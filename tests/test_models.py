@@ -45,6 +45,7 @@ def test_parse_valid_names(name, expected):
         "SUP-1234_AR15_003_extra.dxd",  # too many fields
         "SUP-1234_AR15_003.txt",  # wrong extension
         "SUP-1234_AR15_x03.dxd",  # non-numeric order
+        "SUP-1234_AR15_².dxd",  # digit-category char int() rejects
         "SUP-1234__003.dxd",  # empty platform
         "_AR15_003.dxd",  # empty sku
         "SUP-1234_AR15_.dxd",  # empty order
@@ -54,6 +55,13 @@ def test_parse_valid_names(name, expected):
 def test_parse_rejects_malformed(name):
     with pytest.raises(ValueError):
         parse_capture_filename(name)
+
+
+def test_parse_unicode_digit_gives_friendly_error():
+    # str.isdigit() is True for '²' but int() rejects it; the friendly
+    # "is not numeric" message must win over a raw int() ValueError.
+    with pytest.raises(ValueError, match="is not numeric"):
+        parse_capture_filename("SUP_AR15_²")
 
 
 # --- enum + dataclasses ----------------------------------------------------- #

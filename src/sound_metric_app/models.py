@@ -83,7 +83,7 @@ def parse_capture_filename(name: str) -> ParsedCaptureName:
     sku, platform, order = parts
     if not sku or not platform or not order:
         raise ValueError(f"Malformed capture name {name!r}: fields must be non-empty.")
-    if not order.isdigit():
+    if not (order.isascii() and order.isdigit()):
         raise ValueError(
             f"Malformed capture name {name!r}: shot-order field {order!r} is not numeric."
         )
