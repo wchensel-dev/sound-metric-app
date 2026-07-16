@@ -39,21 +39,26 @@ class ChannelInfo:
         return self.sample_rate > 0
 
 
+def _channels_of(f: "dw.DWFile") -> list[ChannelInfo]:
+    """Enumerate channels of an already-open file with their unit and rate."""
+    out: list[ChannelInfo] = []
+    for name in f.keys():
+        ch = f[name]
+        out.append(
+            ChannelInfo(
+                name=name,
+                unit=getattr(ch, "unit", ""),
+                sample_rate=float(getattr(ch, "sample_rate", 0.0) or 0.0),
+                n_samples=int(getattr(ch, "number_of_samples", 0) or 0),
+            )
+        )
+    return out
+
+
 def list_channels(path: str) -> list[ChannelInfo]:
     """Enumerate channels in a Dewesoft file with their unit and rate."""
-    out: list[ChannelInfo] = []
     with dw.DWFile(path) as f:
-        for name in f.keys():
-            ch = f[name]
-            out.append(
-                ChannelInfo(
-                    name=name,
-                    unit=getattr(ch, "unit", ""),
-                    sample_rate=float(getattr(ch, "sample_rate", 0.0) or 0.0),
-                    n_samples=int(getattr(ch, "number_of_samples", 0) or 0),
-                )
-            )
-    return out
+        return _channels_of(f)
 
 
 def _pressure_channels(channels: list[ChannelInfo]) -> list[ChannelInfo]:
@@ -94,11 +99,9 @@ def _frame_from_channel(
 
 def read_frame(path: str, channel: str | None = None) -> Frame:
     """Read one channel of a Dewesoft file into a :class:`Frame` (Pascals)."""
-    channels = list_channels(path)
-    if channel is None:
-        channel = _pick_pressure_channel(channels)
-
     with dw.DWFile(path) as f:
+        if channel is None:
+            channel = _pick_pressure_channel(_channels_of(f))
         start = getattr(f, "start_store_time", None)
         return _frame_from_channel(f, channel, path, start)
 
@@ -111,9 +114,8 @@ def read_capture(path: str) -> list[Frame]:
     single-mic test file yields one. The channel->SE/MR mapping is applied
     separately via :func:`tag_channels`.
     """
-    channels = list_channels(path)
-    selected = _pressure_channels(channels)
     with dw.DWFile(path) as f:
+        selected = _pressure_channels(_channels_of(f))
         start = getattr(f, "start_store_time", None)
         return [_frame_from_channel(f, c.name, path, start) for c in selected]
 
