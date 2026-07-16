@@ -129,6 +129,19 @@ def test_group_averages_keep_se_and_mr_separate(repo):
         assert averages[MicPosition.SE][field] == pytest.approx(165.0)
 
 
+def test_save_channel_metric_returns_updated_row_id_on_upsert(repo):
+    """Re-saving a position must return that position's row id, not the last insert's."""
+    shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)
+
+    se_id = repo.save_channel_metric(shot_id, MicPosition.SE, _metric(160.0))
+    mr_id = repo.save_channel_metric(shot_id, MicPosition.MR, _metric(150.0))
+    assert se_id != mr_id
+
+    # Conflict path (UPDATE of the SE row) must return the SE row id again.
+    se_id_again = repo.save_channel_metric(shot_id, MicPosition.SE, _metric(165.0))
+    assert se_id_again == se_id
+
+
 def test_group_averages_single_mic_group(repo):
     """A single-mic test condition yields only that position's average."""
     batch_id = repo.create_batch("SUP-1")

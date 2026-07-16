@@ -253,6 +253,7 @@ class WorkflowRepository:
                 peak_dba = excluded.peak_dba,
                 peak_impulse_db = excluded.peak_impulse_db,
                 liaeq_100ms_db = excluded.liaeq_100ms_db
+            RETURNING id
             """,
             (
                 shot_id,
@@ -266,8 +267,9 @@ class WorkflowRepository:
                 result.liaeq_100ms_db,
             ),
         )
+        row_id = int(cur.fetchone()[0])
         self._conn.commit()
-        return int(cur.lastrowid)
+        return row_id
 
     def metrics_for_shot(self, shot_id: int) -> list[dict]:
         cur = self._conn.execute(
