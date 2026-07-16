@@ -88,7 +88,8 @@ def test_batch_group_shot_defaults():
     assert shot.se_channel is None and shot.mr_channel is None
 
 
-def test_metric_result_mic_position_in_row():
+def test_metric_result_as_row_has_no_mic_position():
+    # Mic position is not a DSP-result concern; storage receives it separately.
     r = MetricResult(
         peak_db=1.0,
         peak_dba=2.0,
@@ -98,12 +99,5 @@ def test_metric_result_mic_position_in_row():
         channel="AI 1",
         sample_rate=200_000.0,
         n_samples=20_000,
-        mic_position=MicPosition.SE,
     )
-    row = r.as_row()
-    assert row["mic_position"] == "SE"
-
-    # Legacy single-file path leaves it None.
-    r2 = MetricResult(0, 0, 0, 0, "f.dxd", "AI 1", 200_000.0, 20_000)
-    assert r2.mic_position is None
-    assert r2.as_row()["mic_position"] is None
+    assert "mic_position" not in r.as_row()

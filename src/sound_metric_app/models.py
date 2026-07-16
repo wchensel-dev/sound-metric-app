@@ -135,8 +135,9 @@ class MicChannel:
 class MetricResult:
     """Computed acoustic metrics for a single :class:`Frame`.
 
-    ``mic_position`` is ``None`` for the legacy single-file path (CLI) and set to
-    ``SE`` / ``MR`` once the channel has been tagged during marking.
+    Mic position is not carried here: the DSP layer works on bare frames and has
+    no concept of SE/MR. The tagged position lives on :class:`MicChannel` and is
+    passed explicitly to storage when the metrics are persisted.
     """
 
     peak_db: float
@@ -148,14 +149,12 @@ class MetricResult:
     sample_rate: float
     n_samples: int
     timestamp: datetime | None = None
-    mic_position: MicPosition | None = None
 
     def as_row(self) -> dict:
         """Flat dict suitable for storage / CSV export."""
         return {
             "source_file": self.source_file,
             "channel": self.channel,
-            "mic_position": self.mic_position.value if self.mic_position else None,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             "sample_rate": self.sample_rate,
             "n_samples": self.n_samples,
