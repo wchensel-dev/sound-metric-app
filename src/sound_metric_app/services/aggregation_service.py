@@ -51,11 +51,15 @@ class AggregationService:
         group = self._repo.get_group(group_id)
         if group is None:
             raise LookupError(f"No group with id {group_id}")
-        shots = self._repo.shots_by_group(group_id)
+        return self._averages_for(group)
+
+    def _averages_for(self, group: Group) -> GroupAverages:
+        """Averages for an already-loaded group, skipping the ``get_group`` re-fetch."""
+        shots = self._repo.shots_by_group(group.id)
         return GroupAverages(
             group=group,
             n_shots=len(shots),
-            averages=self._repo.group_averages(group_id),
+            averages=self._repo.group_averages(group.id),
         )
 
     def batch_report(self, batch_id: int) -> BatchReport:
@@ -67,6 +71,6 @@ class AggregationService:
         if batch is None:
             raise LookupError(f"No batch with id {batch_id}")
         groups = [
-            self.group_averages(group.id) for group in self._repo.groups_for_batch(batch_id)
+            self._averages_for(group) for group in self._repo.groups_for_batch(batch_id)
         ]
         return BatchReport(batch=batch, groups=groups)
