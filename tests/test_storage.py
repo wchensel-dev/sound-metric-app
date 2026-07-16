@@ -85,6 +85,34 @@ def test_batch_group_shot_metrics_round_trip(repo):
     assert [s.id for s in repo.shots_by_group(group_id)] == [shot_id]
 
 
+def test_remark_shot_preserves_unsupplied_fields(repo):
+    batch_id = repo.create_batch("SUP-1")
+    group_id = repo.upsert_group(batch_id, "AR15", "M855")
+    shot_id = repo.add_unmarked_shot("SUP-1_AR15_002.dxd", "SUP-1", "AR15", 2)
+
+    repo.mark_shot(
+        shot_id,
+        group_id=group_id,
+        ammo="M855",
+        wind_speed=5.0,
+        temp=72.0,
+        relative_humidity=40.0,
+        se_channel="AI 1",
+        mr_channel="AI 2",
+    )
+
+    # Re-mark to correct only ammo/group; omit environment + channel tags.
+    new_group_id = repo.upsert_group(batch_id, "AR15", "M193")
+    repo.mark_shot(shot_id, group_id=new_group_id, ammo="M193")
+
+    shot = repo.get_shot(shot_id)
+    assert shot.ammo == "M193" and shot.group_id == new_group_id
+    # Previously stored values survive the partial re-mark.
+    assert shot.wind_speed == 5.0 and shot.temp == 72.0 and shot.relative_humidity == 40.0
+    assert shot.se_channel == "AI 1" and shot.mr_channel == "AI 2"
+    assert shot.shot_order == 2
+
+
 def test_add_unmarked_shot_is_idempotent(repo):
     a = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)
     b = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)

@@ -194,8 +194,10 @@ class WorkflowRepository:
     ) -> None:
         """Apply marking metadata, link to a group, and flag the shot marked.
 
-        ``shot_order`` overrides the provisional value from the filename when
-        given; otherwise the existing value is kept.
+        ``group_id`` and ``ammo`` are always written. Every optional field
+        (``shot_order`` and the environment/channel columns) is preserved when
+        left unset, so re-marking to correct one field does not clobber the
+        others: a value is only overwritten when explicitly supplied.
         """
         self._conn.execute(
             """
@@ -203,11 +205,11 @@ class WorkflowRepository:
                 group_id = ?,
                 ammo = ?,
                 shot_order = COALESCE(?, shot_order),
-                wind_speed = ?,
-                temp = ?,
-                relative_humidity = ?,
-                se_channel = ?,
-                mr_channel = ?,
+                wind_speed = COALESCE(?, wind_speed),
+                temp = COALESCE(?, temp),
+                relative_humidity = COALESCE(?, relative_humidity),
+                se_channel = COALESCE(?, se_channel),
+                mr_channel = COALESCE(?, mr_channel),
                 marked = 1
             WHERE id = ?
             """,
