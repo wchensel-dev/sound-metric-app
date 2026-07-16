@@ -68,6 +68,22 @@ def test_window_builds_with_four_tabs(window):
     assert [window.tabs.tabText(i) for i in range(4)] == ["Ingest", "Mark", "Batches", "Report"]
 
 
+def test_selecting_shot_with_null_keys_does_not_crash_mark_tab(window):
+    # A shot whose filename yielded no batch/group keys is stored with
+    # suppressor_sku/test_platform = None. Selecting it must not pass None to
+    # QLineEdit.setPlaceholderText (which raises TypeError).
+    with window.controller._repo() as repo:
+        shot_id = repo.add_unmarked_shot("no-keys.dxd", None, None, 1)
+
+    mv = window.marking_view
+    mv.refresh()  # _on_shot_changed fires on selection; must not raise
+    mv.shot_combo.setCurrentIndex(mv._index_of_shot(shot_id))
+
+    assert mv._current_shot_id() == shot_id
+    assert mv.sku_edit.placeholderText() == ""
+    assert mv.platform_edit.placeholderText() == ""
+
+
 def test_full_workflow_through_widgets(window, qtbot):
     # --- Ingest (off-thread) -> two unmarked rows ---
     window.ingest_view._ingest()

@@ -316,8 +316,8 @@ class MarkingView(_View):
         shot = self._current_shot()
 
         # Prefill override placeholders from the shot's provisional filename keys.
-        self.sku_edit.setPlaceholderText(shot.suppressor_sku if shot else "")
-        self.platform_edit.setPlaceholderText(shot.test_platform if shot else "")
+        self.sku_edit.setPlaceholderText(shot.suppressor_sku or "" if shot else "")
+        self.platform_edit.setPlaceholderText(shot.test_platform or "" if shot else "")
 
         self._set_channel_choices([], loading=True)
         if shot is None:
