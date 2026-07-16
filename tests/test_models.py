@@ -25,7 +25,7 @@ from sound_metric_app.models import (
         ("SUP-1234_AR15_003.d7d", ("SUP-1234", "AR15", 3)),
         ("SUP-1234_AR15_003.DXD", ("SUP-1234", "AR15", 3)),  # case-insensitive ext
         ("SUP-1234_AR15_003", ("SUP-1234", "AR15", 3)),  # no extension
-        (r"C:\input\SUP-9_M4_017.dxd", ("SUP-9", "M4", 17)),  # full path
+        ("/input/SUP-9_M4_017.dxd", ("SUP-9", "M4", 17)),  # full path (POSIX sep parses on both OSes)
         ("SUP-1234_AR15_000.dxd", ("SUP-1234", "AR15", 0)),  # zero order
     ],
 )
