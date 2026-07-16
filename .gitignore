@@ -12,6 +12,7 @@ venv/
 
 # Local data / databases
 *.db
+*.db.bak*
 data/*.dxd
 data/*.d7d
 
