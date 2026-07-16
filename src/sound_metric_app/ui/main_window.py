@@ -457,19 +457,21 @@ class BatchTreeView(_View):
 
     def refresh(self) -> None:
         self.tree.clear()
-        for batch in self.controller.batches():
+        for node in self.controller.batch_tree():
+            batch = node.batch
             state = "closed" if batch.closed else "open"
             b_item = QtWidgets.QTreeWidgetItem([f"Batch #{batch.id}  SKU {batch.sku}", f"[{state}]"])
             b_item.setData(0, QtCore.Qt.UserRole, ("batch", batch.id, batch.closed))
             self.tree.addTopLevelItem(b_item)
-            for group in self.controller.groups_for_batch(batch.id):
-                n = self.controller.count_shots_in_group(group.id)
+            for g_node in node.groups:
+                group = g_node.group
+                n = len(g_node.shots)
                 g_item = QtWidgets.QTreeWidgetItem(
                     [f"Group #{group.id}  {group.test_platform} / {group.ammo}", f"{n} shot(s)"]
                 )
                 g_item.setData(0, QtCore.Qt.UserRole, ("group", group.id, None))
                 b_item.addChild(g_item)
-                for shot in self.controller.shots_by_group(group.id):
+                for shot in g_node.shots:
                     tags = f"SE:{shot.se_channel or '—'}  MR:{shot.mr_channel or '—'}"
                     s_item = QtWidgets.QTreeWidgetItem(
                         [f"Shot #{shot.id}  {Path(shot.source_file).name}", tags]
@@ -540,15 +542,17 @@ class ReportView(_View):
 
     def refresh(self) -> None:
         current = self.batch_combo.currentData()
+        # Keep signals blocked through setCurrentIndex so currentIndexChanged
+        # doesn't fire _load_report; we call it once, explicitly, below.
         self.batch_combo.blockSignals(True)
         self.batch_combo.clear()
         for batch in self.controller.batches():
             state = "closed" if batch.closed else "open"
             self.batch_combo.addItem(f"#{batch.id}  SKU {batch.sku}  [{state}]", batch.id)
-        self.batch_combo.blockSignals(False)
-
         index = self.batch_combo.findData(current)
         self.batch_combo.setCurrentIndex(index if index >= 0 else (0 if self.batch_combo.count() else -1))
+        self.batch_combo.blockSignals(False)
+
         self._load_report()
 
     def _load_report(self, *_args) -> None:

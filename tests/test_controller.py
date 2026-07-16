@@ -101,6 +101,27 @@ def test_full_cycle_ingest_mark_close_report(controller, inbox):
     assert controller.get_batch(batches[0].id).closed is True
 
 
+def test_batch_tree_nests_batches_groups_shots(controller, inbox):
+    _touch(inbox, "SUP-1_AR15_001.dxd")
+    _touch(inbox, "SUP-1_AR15_002.dxd")
+    controller.ingest(inbox, validate=False)
+    for shot in controller.unmarked_shots():
+        controller.mark(
+            shot.id,
+            ammo="M855",
+            channel_map={"AI 1": MicPosition.SE, "AI 2": MicPosition.MR},
+        )
+
+    tree = controller.batch_tree()
+    assert len(tree) == 1
+    batch_node = tree[0]
+    assert batch_node.batch.id == controller.batches()[0].id
+    assert len(batch_node.groups) == 1
+    group_node = batch_node.groups[0]
+    # Shot count for the tree comes from the materialized shots, no COUNT query.
+    assert len(group_node.shots) == 2
+
+
 def test_ingest_without_folder_raises(controller):
     with pytest.raises(ValueError, match="No input folder"):
         controller.ingest()

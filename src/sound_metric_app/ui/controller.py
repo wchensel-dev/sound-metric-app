@@ -21,6 +21,7 @@ without a real ``.dxd`` file, matching ``workflow_cli``'s module-level readers.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
@@ -50,6 +51,22 @@ USER_ERRORS = (
     FileNotFoundError,
     NotADirectoryError,
 )
+
+
+@dataclass
+class GroupNode:
+    """A group with its shots already materialized."""
+
+    group: Group
+    shots: list[Shot]
+
+
+@dataclass
+class BatchNode:
+    """A batch with its groups (each carrying its shots)."""
+
+    batch: Batch
+    groups: list[GroupNode]
 
 
 class WorkflowController:
@@ -155,9 +172,24 @@ class WorkflowController:
         with self._repo() as repo:
             return repo.shots_by_group(group_id)
 
-    def count_shots_in_group(self, group_id: int) -> int:
+    def batch_tree(self) -> list[BatchNode]:
+        """The whole batch -> group -> shot tree, over a single connection.
+
+        The GUI's batch tree renders all three levels at once; loading them here
+        opens one repo instead of a connection per batch/group, and shot counts
+        come from ``len(node.shots)`` rather than a separate COUNT query.
+        """
         with self._repo() as repo:
-            return repo.count_shots_in_group(group_id)
+            return [
+                BatchNode(
+                    batch=batch,
+                    groups=[
+                        GroupNode(group=group, shots=repo.shots_by_group(group.id))
+                        for group in repo.groups_for_batch(batch.id)
+                    ],
+                )
+                for batch in repo.all_batches()
+            ]
 
     # ---- close ---------------------------------------------------------- #
 
