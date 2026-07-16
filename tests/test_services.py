@@ -312,6 +312,15 @@ def test_mark_bad_channel_name_raises_before_marking(repo):
     assert repo.get_shot(shot_id).marked is False
 
 
+def test_mark_empty_channel_map_raises_before_marking(repo):
+    shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)
+    svc = _marking_service(repo)
+    with pytest.raises(ValueError):
+        svc.mark(shot_id, ammo="M855", channel_map={})
+    # An empty map must not silently produce a marked shot with zero metrics.
+    assert repo.get_shot(shot_id).marked is False
+
+
 # --------------------------------------------------------------------------- #
 # Task 7 — AggregationService
 # --------------------------------------------------------------------------- #

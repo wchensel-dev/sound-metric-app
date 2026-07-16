@@ -54,6 +54,11 @@ def test_tag_duplicate_position_rejected():
         tag_channels(frames, {"AI 1": MicPosition.SE, "AI 2": MicPosition.SE})
 
 
+def test_tag_empty_mapping_rejected():
+    with pytest.raises(ValueError):
+        tag_channels([_frame("AI 1")], {})
+
+
 # --- real-file reads ------------------------------------------------------- #
 
 
