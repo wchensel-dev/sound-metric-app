@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS shots (
     mr_channel        TEXT,      -- raw channel name tagged MR
     marked            INTEGER NOT NULL DEFAULT 0,
     group_id          INTEGER REFERENCES groups(id) ON DELETE SET NULL,
-    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    captured_at       TEXT       -- when the shot was fired (Dewesoft start_store_time), ISO-8601
 );
 
 CREATE TABLE IF NOT EXISTS channel_metrics (
@@ -76,6 +77,11 @@ class WorkflowRepository(_SqliteStore):
 
     _SCHEMA = _SCHEMA
     _PRAGMAS = ("PRAGMA foreign_keys = ON",)
+
+    def _migrate(self) -> None:
+        # captured_at was added after the shots table shipped; back-fill the
+        # column on databases created before it existed.
+        self._add_column_if_missing("shots", "captured_at", "TEXT")
 
     #: True while a :meth:`transaction` block is active, so the individual
     #: mutating methods defer their commit to the enclosing block.
@@ -119,6 +125,18 @@ class WorkflowRepository(_SqliteStore):
         cur = self._conn.execute("INSERT INTO batches (sku) VALUES (?)", (sku,))
         self._commit()
         return int(cur.lastrowid)
+
+    def rename_batch_sku(self, batch_id: int, sku: str) -> None:
+        """Change a batch's SKU (e.g. to fix a mistyped one). Idempotent.
+
+        Only rewrites the ``sku`` column; the batch's groups and shots stay put,
+        so this corrects the label without re-clustering any shot. Raises
+        ``LookupError`` if the batch id is unknown.
+        """
+        cur = self._conn.execute("UPDATE batches SET sku = ? WHERE id = ?", (sku, batch_id))
+        if cur.rowcount == 0:
+            raise LookupError(f"No batch with id {batch_id}")
+        self._commit()
 
     def close_batch(self, batch_id: int) -> None:
         """Mark a batch closed. Idempotent. Raises ``LookupError`` if unknown."""
@@ -227,13 +245,14 @@ class WorkflowRepository(_SqliteStore):
         relative_humidity: float | None = None,
         se_channel: str | None = None,
         mr_channel: str | None = None,
+        captured_at: str | None = None,
     ) -> None:
         """Apply marking metadata, link to a group, and flag the shot marked.
 
         ``group_id`` and ``ammo`` are always written. Every optional field
-        (``shot_order`` and the environment/channel columns) is preserved when
-        left unset, so re-marking to correct one field does not clobber the
-        others: a value is only overwritten when explicitly supplied.
+        (``shot_order``, the environment/channel columns, and ``captured_at``) is
+        preserved when left unset, so re-marking to correct one field does not
+        clobber the others: a value is only overwritten when explicitly supplied.
 
         Raises ``LookupError`` if ``shot_id`` matches no shot.
         """
@@ -248,6 +267,7 @@ class WorkflowRepository(_SqliteStore):
                 relative_humidity = COALESCE(?, relative_humidity),
                 se_channel = COALESCE(?, se_channel),
                 mr_channel = COALESCE(?, mr_channel),
+                captured_at = COALESCE(?, captured_at),
                 marked = 1
             WHERE id = ?
             """,
@@ -260,6 +280,7 @@ class WorkflowRepository(_SqliteStore):
                 relative_humidity,
                 se_channel,
                 mr_channel,
+                captured_at,
                 shot_id,
             ),
         )
@@ -301,6 +322,44 @@ class WorkflowRepository(_SqliteStore):
             (group_id,),
         )
         return int(cur.fetchone()[0])
+
+    def delete_empty_groups(self) -> int:
+        """Delete every group that holds no shots; return how many were removed.
+
+        A shot-less group can be left behind by edits made before per-re-mark
+        cleanup existed, or by any path that empties a group without pruning it.
+        The batch tree calls this on load so refreshing sweeps such stragglers,
+        keeping the view uncluttered and freeing their (batch, platform, ammo)
+        names for re-use.
+        """
+        cur = self._conn.execute(
+            """
+            DELETE FROM groups
+            WHERE NOT EXISTS (SELECT 1 FROM shots WHERE shots.group_id = groups.id)
+            """
+        )
+        self._commit()
+        return cur.rowcount
+
+    def delete_group_if_empty(self, group_id: int) -> bool:
+        """Delete a group only if it holds no shots; return whether it was deleted.
+
+        Called after re-marking moves a shot out of its former group: if that
+        leaves the group empty, drop the row so the batch tree does not accrue
+        empty groups and its (batch, platform, ammo) name is free to be re-used.
+        The ``WHERE NOT EXISTS`` guard makes this a no-op for a group that still
+        has shots, so a stale ``group_id`` can never orphan live shots.
+        """
+        cur = self._conn.execute(
+            """
+            DELETE FROM groups
+            WHERE id = ?
+              AND NOT EXISTS (SELECT 1 FROM shots WHERE shots.group_id = groups.id)
+            """,
+            (group_id,),
+        )
+        self._commit()
+        return cur.rowcount > 0
 
     # ---- channel metrics ------------------------------------------------ #
 
@@ -439,4 +498,5 @@ def _row_to_shot(row: sqlite3.Row) -> Shot:
         marked=bool(row["marked"]),
         group_id=row["group_id"],
         created_at=row["created_at"],
+        captured_at=row["captured_at"],
     )

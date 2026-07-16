@@ -97,12 +97,23 @@ def _frame_from_channel(
     )
 
 
+def _start_store_time(f: "dw.DWFile") -> datetime | None:
+    """The capture's start-store time, or ``None`` if the file carried none.
+
+    ``dwdatareader`` exposes this on the file's :class:`DWMeasurementInfo`
+    (``f.info.start_store_time``), *not* on the ``DWFile`` object itself, so it
+    must be read through ``info``.
+    """
+    info = getattr(f, "info", None)
+    return getattr(info, "start_store_time", None) if info is not None else None
+
+
 def read_frame(path: str, channel: str | None = None) -> Frame:
     """Read one channel of a Dewesoft file into a :class:`Frame` (Pascals)."""
     with dw.DWFile(path) as f:
         if channel is None:
             channel = _pick_pressure_channel(_channels_of(f))
-        start = getattr(f, "start_store_time", None)
+        start = _start_store_time(f)
         return _frame_from_channel(f, channel, path, start)
 
 
@@ -116,7 +127,7 @@ def read_capture(path: str) -> list[Frame]:
     """
     with dw.DWFile(path) as f:
         selected = _pressure_channels(_channels_of(f))
-        start = getattr(f, "start_store_time", None)
+        start = _start_store_time(f)
         return [_frame_from_channel(f, c.name, path, start) for c in selected]
 
 

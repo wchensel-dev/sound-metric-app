@@ -113,3 +113,115 @@ def test_full_workflow_through_widgets(window, qtbot):
     tree = window.batch_view.tree
     tree.setCurrentItem(tree.topLevelItem(0))
     assert window.batch_view.close_btn.isEnabled()
+
+
+def _first_batch_item(bv):
+    return bv.tree.topLevelItem(0)
+
+
+def test_edit_button_enabled_for_batch_and_shot_not_group(window, qtbot):
+    # Mark the two shots so the tree has a batch -> group -> shots to select in.
+    window.ingest_view._ingest()
+    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)
+    for _ in range(2):
+        first_id = int(window.ingest_view.table.item(0, 0).text())
+        window.open_marking_for(first_id)
+        mv = window.marking_view
+        qtbot.waitUntil(lambda: mv.se_combo.isEnabled() and mv.se_combo.count() >= 3, timeout=5000)
+        mv.ammo_edit.setText("M855")
+        mv._mark()
+        qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() < 2, timeout=5000)
+    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 0, timeout=5000)
+
+    bv = window.batch_view
+    bv.refresh()
+    batch_item = _first_batch_item(bv)
+    group_item = batch_item.child(0)
+    shot_item = group_item.child(0)
+
+    bv.tree.setCurrentItem(batch_item)
+    assert bv.edit_btn.isEnabled()  # batch: rename SKU
+    bv.tree.setCurrentItem(group_item)
+    assert not bv.edit_btn.isEnabled()  # group: no direct edit
+    bv.tree.setCurrentItem(shot_item)
+    assert bv.edit_btn.isEnabled()  # shot: re-mark
+
+
+def test_rename_batch_via_tree(window, qtbot, monkeypatch):
+    window.ingest_view._ingest()
+    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)
+    first_id = int(window.ingest_view.table.item(0, 0).text())
+    window.open_marking_for(first_id)
+    mv = window.marking_view
+    qtbot.waitUntil(lambda: mv.se_combo.isEnabled() and mv.se_combo.count() >= 3, timeout=5000)
+    mv.ammo_edit.setText("M855")
+    mv._mark()
+    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 1, timeout=5000)
+
+    bv = window.batch_view
+    bv.refresh()
+    bv.tree.setCurrentItem(_first_batch_item(bv))
+
+    # Stand in for the modal SKU prompt with a fixed corrected value.
+    from PySide6 import QtWidgets
+
+    monkeypatch.setattr(
+        QtWidgets.QInputDialog, "getText", staticmethod(lambda *a, **k: ("SUP-FIXED", True))
+    )
+    bv._edit_selected()
+
+    assert window.controller.batches()[0].sku == "SUP-FIXED"
+    assert _first_batch_item(bv).text(0).endswith("SKU SUP-FIXED")
+
+
+def test_edit_shot_re_marks_with_corrected_ammo(window, qtbot):
+    window.ingest_view._ingest()
+    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)
+    first_id = int(window.ingest_view.table.item(0, 0).text())
+    window.open_marking_for(first_id)
+    mv = window.marking_view
+    qtbot.waitUntil(lambda: mv.se_combo.isEnabled() and mv.se_combo.count() >= 3, timeout=5000)
+    mv.ammo_edit.setText("WRONG")
+    mv._mark()
+    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 1, timeout=5000)
+
+    from PySide6 import QtCore
+
+    bv = window.batch_view
+    bv.refresh()
+    shot_item = _first_batch_item(bv).child(0).child(0)
+    _, shot, group, batch = shot_item.data(0, QtCore.Qt.UserRole)
+
+    # Open the pre-filled dialog directly (bypassing the async channel load),
+    # correct the ammo, and accept it as the user would.
+    from sound_metric_app.ui.main_window import ShotEditDialog
+
+    dialog = ShotEditDialog(
+        shot,
+        sku=batch.sku,
+        platform=group.test_platform,
+        ammo=group.ammo,
+        channel_names=["AI 1", "AI 2"],
+        parent=bv,
+    )
+    assert dialog.ammo_edit.text() == "WRONG"  # pre-filled from the group
+    assert dialog.se_combo.currentText() == "AI 1"  # pre-filled from the shot tags
+    dialog.ammo_edit.setText("M855")
+    dialog._on_accept()
+
+    bv._run_async(
+        lambda: window.controller.mark(shot.id, **dialog.values()),
+        lambda _r: window.notify_changed(),
+    )
+    # The shot moves to the corrected "M855" group; the emptied "WRONG" group is
+    # dropped so the batch tree does not keep an empty group behind.
+    qtbot.waitUntil(
+        lambda: {g.ammo for g in window.controller.groups_for_batch(batch.id)} == {"M855"},
+        timeout=5000,
+    )
+    by_ammo = {
+        g.ammo: window.controller.shots_by_group(g.id)
+        for g in window.controller.groups_for_batch(batch.id)
+    }
+    assert "WRONG" not in by_ammo
+    assert [s.id for s in by_ammo["M855"]] == [shot.id]

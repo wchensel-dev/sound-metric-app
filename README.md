@@ -100,6 +100,7 @@ find a clean way to detect it automatically.
 | **Wind Speed** | shot | Environmental condition — recorded **per shot** |
 | **Temp** | shot | Ambient temperature — recorded **per shot** |
 | **Relative Humidity** | shot | Ambient RH — recorded **per shot** |
+| **Captured** | shot | When the shot was fired — read from the capture file's Dewesoft `start_store_time` at marking (read-only) |
 | **Mic channel → SE / MR** | channel | Which stream in the file is which mic |
 
 Environmental fields (Wind Speed, Temp, Relative Humidity) are captured on each
@@ -175,7 +176,12 @@ same local database. It opens four tabs matching the workflow:
 - **Mark** — pick an unmarked shot, tag its **SE**/**MR** channels (listed from
   the file), fill in ammo + metadata, and click **Mark** to compute and store
   its metrics.
-- **Batches** — the Batch → Group → Shot tree, with **Close batch**.
+- **Batches** — the Batch → Group → Shot tree, with **Close batch**. To fix a
+  wrong entry, select a node and click **Edit…** (or double-click it): editing a
+  **batch** renames its SKU in place (all its shots come along); editing a
+  **shot** reopens the marking form pre-filled with its current values, and
+  saving re-marks it — re-clustering it into the corrected group/batch and
+  recomputing its metrics.
 - **Report** — per-group SE vs MR averages, kept in separate rows (never mixed).
 
 Ingest and mark run off the UI thread, so a large capture never freezes the

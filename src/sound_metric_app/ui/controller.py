@@ -120,6 +120,10 @@ class WorkflowController:
         with self._repo() as repo:
             return repo.unmarked_shots()
 
+    def get_shot(self, shot_id: int) -> Shot | None:
+        with self._repo() as repo:
+            return repo.get_shot(shot_id)
+
     # ---- mark ----------------------------------------------------------- #
 
     def channels_for(self, source_file: str) -> list[ChannelInfo]:
@@ -164,6 +168,33 @@ class WorkflowController:
         with self._repo() as repo:
             return repo.get_batch(batch_id)
 
+    def rename_batch(self, batch_id: int, sku: str) -> None:
+        """Correct a batch's SKU in place, keeping all its groups and shots.
+
+        Guards the "at most one open batch per SKU" invariant: renaming an *open*
+        batch onto a SKU that already has a different open batch is rejected, so
+        future marking never has two open batches to choose between. Renaming a
+        closed batch, or renaming to its own current SKU, is always allowed.
+
+        Raises ``ValueError`` on an empty SKU or such a collision, ``LookupError``
+        if the batch id is unknown.
+        """
+        sku = sku.strip()
+        if not sku:
+            raise ValueError("SKU cannot be empty.")
+        with self._repo() as repo:
+            batch = repo.get_batch(batch_id)
+            if batch is None:
+                raise LookupError(f"No batch with id {batch_id}")
+            if not batch.closed:
+                other = repo.open_batch_for_sku(sku)
+                if other is not None and other.id != batch_id:
+                    raise ValueError(
+                        f"SKU {sku!r} already has an open batch (#{other.id}). "
+                        "Close it first, or pick a different SKU."
+                    )
+            repo.rename_batch_sku(batch_id, sku)
+
     def groups_for_batch(self, batch_id: int) -> list[Group]:
         with self._repo() as repo:
             return repo.groups_for_batch(batch_id)
@@ -178,8 +209,13 @@ class WorkflowController:
         The GUI's batch tree renders all three levels at once; loading them here
         opens one repo instead of a connection per batch/group, and shot counts
         come from ``len(node.shots)`` rather than a separate COUNT query.
+
+        Empty groups are swept before the tree is built, so a refresh cleans up
+        any group left shot-less by an earlier edit (see
+        :meth:`WorkflowRepository.delete_empty_groups`).
         """
         with self._repo() as repo:
+            repo.delete_empty_groups()
             return [
                 BatchNode(
                     batch=batch,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from sound_metric_app.models import MetricResult, MicPosition
@@ -42,6 +44,47 @@ def test_schema_created_fresh(tmp_path):
     assert db_path.exists()
 
 
+def test_migrate_adds_captured_at_to_legacy_shots_table(tmp_path):
+    # A database created before captured_at existed: a shots table without the
+    # column. Opening the repo must add it (idempotently) so marking can write it.
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as conn:
+        # The shots schema as it stood before captured_at was added.
+        conn.execute(
+            """
+            CREATE TABLE shots (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_file       TEXT NOT NULL UNIQUE,
+                suppressor_sku    TEXT,
+                test_platform     TEXT,
+                ammo              TEXT,
+                shot_order        INTEGER,
+                wind_speed        REAL,
+                temp              REAL,
+                relative_humidity REAL,
+                se_channel        TEXT,
+                mr_channel        TEXT,
+                marked            INTEGER NOT NULL DEFAULT 0,
+                group_id          INTEGER,
+                created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+        conn.execute("INSERT INTO shots (source_file) VALUES ('SUP-1_AR15_001.dxd')")
+
+    with WorkflowRepository(db_path) as repo:
+        cols = {r["name"] for r in repo._conn.execute("PRAGMA table_info(shots)")}
+        assert "captured_at" in cols
+        # The pre-existing row survived and reads back with captured_at = None.
+        shot = repo.get_shot_by_source("SUP-1_AR15_001.dxd")
+        assert shot is not None and shot.captured_at is None
+
+    # Re-opening runs _migrate again; adding the column a second time is a no-op.
+    with WorkflowRepository(db_path) as repo:
+        cols = {r["name"] for r in repo._conn.execute("PRAGMA table_info(shots)")}
+        assert "captured_at" in cols
+
+
 def test_batch_group_shot_metrics_round_trip(repo):
     batch_id = repo.create_batch("SUP-1234")
     group_id = repo.upsert_group(batch_id, "AR15", "M855")
@@ -58,6 +101,7 @@ def test_batch_group_shot_metrics_round_trip(repo):
         relative_humidity=40.0,
         se_channel="AI 1",
         mr_channel="AI 2",
+        captured_at="2026-07-15T09:30:15",
     )
     repo.save_channel_metric(shot_id, MicPosition.SE, _metric(160.0, "AI 1"))
     repo.save_channel_metric(shot_id, MicPosition.MR, _metric(150.0, "AI 2"))
@@ -74,6 +118,7 @@ def test_batch_group_shot_metrics_round_trip(repo):
     assert shot.ammo == "M855" and shot.group_id == group_id
     assert shot.wind_speed == 5.0 and shot.temp == 72.0 and shot.relative_humidity == 40.0
     assert shot.se_channel == "AI 1" and shot.mr_channel == "AI 2"
+    assert shot.captured_at == "2026-07-15T09:30:15"
     assert shot.shot_order == 3  # preserved from ingest
 
     # Two mic metric rows, one per position.
@@ -99,6 +144,7 @@ def test_remark_shot_preserves_unsupplied_fields(repo):
         relative_humidity=40.0,
         se_channel="AI 1",
         mr_channel="AI 2",
+        captured_at="2026-07-15T09:30:15",
     )
 
     # Re-mark to correct only ammo/group; omit environment + channel tags.
@@ -110,6 +156,7 @@ def test_remark_shot_preserves_unsupplied_fields(repo):
     # Previously stored values survive the partial re-mark.
     assert shot.wind_speed == 5.0 and shot.temp == 72.0 and shot.relative_humidity == 40.0
     assert shot.se_channel == "AI 1" and shot.mr_channel == "AI 2"
+    assert shot.captured_at == "2026-07-15T09:30:15"
     assert shot.shot_order == 2
 
 
@@ -127,6 +174,39 @@ def test_upsert_group_returns_same_id(repo):
     g3 = repo.upsert_group(batch_id, "AR15", "M193")  # different ammo -> new group
     assert g1 == g2
     assert g3 != g1
+
+
+def test_delete_group_if_empty_removes_only_empty_groups(repo):
+    batch_id = repo.create_batch("SUP-1")
+    empty = repo.upsert_group(batch_id, "AR15", "M193")
+    occupied = repo.upsert_group(batch_id, "AR15", "M855")
+    shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)
+    repo.mark_shot(shot_id, group_id=occupied, ammo="M855")
+
+    assert repo.delete_group_if_empty(empty) is True
+    assert repo.get_group(empty) is None
+    # The name is now free to be re-created without colliding on the unique key.
+    assert repo.upsert_group(batch_id, "AR15", "M193") != empty
+
+    # A group that still holds a shot is left untouched.
+    assert repo.delete_group_if_empty(occupied) is False
+    assert repo.get_group(occupied) is not None
+
+
+def test_delete_empty_groups_sweeps_all_shot_less_groups(repo):
+    batch_id = repo.create_batch("SUP-1")
+    empty_a = repo.upsert_group(batch_id, "AR15", "M193")
+    empty_b = repo.upsert_group(batch_id, "MK18", "M855")
+    occupied = repo.upsert_group(batch_id, "AR15", "M855")
+    shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)
+    repo.mark_shot(shot_id, group_id=occupied, ammo="M855")
+
+    assert repo.delete_empty_groups() == 2
+    assert repo.get_group(empty_a) is None
+    assert repo.get_group(empty_b) is None
+    assert repo.get_group(occupied) is not None
+    # Idempotent: a second sweep with nothing empty removes nothing.
+    assert repo.delete_empty_groups() == 0
 
 
 def test_close_batch(repo):

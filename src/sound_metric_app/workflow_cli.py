@@ -117,6 +117,8 @@ def _cmd_mark(args: argparse.Namespace, repo: WorkflowRepository) -> int:
     print(f"Marked shot #{shot.id}  ({Path(shot.source_file).name})")
     print(f"  batch  : #{marked.batch.id}  SKU {marked.batch.sku}")
     print(f"  group  : #{marked.group_id}  {shot.test_platform} / {shot.ammo}")
+    if shot.captured_at:
+        print(f"  fired  : {shot.captured_at}")
     for position in (MicPosition.SE, MicPosition.MR):
         result = marked.metrics.get(position)
         if result is None:

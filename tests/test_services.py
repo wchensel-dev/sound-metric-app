@@ -8,6 +8,7 @@ need a real ``.dxd`` file.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 
 import numpy as np
 import pytest
@@ -259,6 +260,39 @@ def test_mark_produces_se_and_mr_rows_and_leaves_unmarked_list(repo):
     assert repo.unmarked_shots() == []
 
 
+def test_mark_records_capture_timestamp_from_frames(repo):
+    # The capture reader supplies the file's start-store time on each frame;
+    # marking should persist it as the shot's captured_at (ISO-8601).
+    fired_at = datetime(2026, 7, 15, 9, 30, 15)
+
+    def reader(path):
+        return [
+            Frame(
+                samples=np.array([1.0]),
+                sample_rate=200_000.0,
+                channel=name,
+                source_file=path,
+                timestamp=fired_at,
+            )
+            for name in ("AI 1", "AI 2")
+        ]
+
+    shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)
+    svc = _marking_service(repo, reader=reader)
+    svc.mark(shot_id, ammo="M855", channel_map={"AI 1": MicPosition.SE})
+
+    assert repo.get_shot(shot_id).captured_at == fired_at.isoformat()
+
+
+def test_mark_leaves_captured_at_none_when_file_has_no_timestamp(repo):
+    # The default fake reader builds frames without a timestamp; captured_at
+    # stays None rather than raising.
+    shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)
+    svc = _marking_service(repo)
+    svc.mark(shot_id, ammo="M855", channel_map={"AI 1": MicPosition.SE})
+    assert repo.get_shot(shot_id).captured_at is None
+
+
 def test_mark_single_mic_yields_one_row(repo):
     shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)
     svc = _marking_service(repo)
@@ -286,6 +320,47 @@ def test_remark_two_mic_shot_as_single_mic_drops_mr(repo):
     shot = repo.get_shot(shot_id)
     assert (shot.se_channel, shot.mr_channel) == ("AI 1", None)
     assert MicPosition.MR not in repo.group_averages(first.group_id)
+
+
+def test_remark_into_new_group_drops_the_emptied_group(repo):
+    # A shot re-marked onto different ammo moves to a new group; its former group
+    # is now empty and must be deleted so the batch tree does not accrue it.
+    shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)
+    svc = _marking_service(repo)
+    first = svc.mark(shot_id, ammo="M855", channel_map={"AI 1": MicPosition.SE})
+
+    second = svc.mark(shot_id, ammo="M193", channel_map={"AI 1": MicPosition.SE})
+
+    assert second.group_id != first.group_id
+    assert repo.get_group(first.group_id) is None  # emptied group gone
+    assert repo.groups_for_batch(second.batch.id) == [repo.get_group(second.group_id)]
+
+
+def test_remark_keeps_group_that_still_has_other_shots(repo):
+    # Two shots share a group; re-marking one out must not delete the group the
+    # other still lives in.
+    keep_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)
+    move_id = repo.add_unmarked_shot("SUP-1_AR15_002.dxd", "SUP-1", "AR15", 2)
+    svc = _marking_service(repo)
+    shared = svc.mark(keep_id, ammo="M855", channel_map={"AI 1": MicPosition.SE})
+    svc.mark(move_id, ammo="M855", channel_map={"AI 1": MicPosition.SE})
+
+    svc.mark(move_id, ammo="M193", channel_map={"AI 1": MicPosition.SE})
+
+    assert repo.get_group(shared.group_id) is not None
+    assert repo.count_shots_in_group(shared.group_id) == 1
+
+
+def test_remark_within_same_group_keeps_it(repo):
+    # Re-marking that resolves back to the same group must never delete it.
+    shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)
+    svc = _marking_service(repo)
+    first = svc.mark(shot_id, ammo="M855", channel_map={"AI 1": MicPosition.SE})
+
+    again = svc.mark(shot_id, ammo="M855", channel_map={"AI 1": MicPosition.MR})
+
+    assert again.group_id == first.group_id
+    assert repo.get_group(first.group_id) is not None
 
 
 def test_mark_rolls_back_when_processing_fails_midway(repo):
