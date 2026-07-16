@@ -38,7 +38,7 @@ class MicPosition(str, Enum):
 
 # Capture files are named ``<suppressor_sku>_<test_platform>_<shot_order>.dxd``
 # (or ``.d7d``), e.g. ``SUP-1234_AR15_003.dxd`` -> ("SUP-1234", "AR15", 3).
-_CAPTURE_EXTENSIONS = {".dxd", ".d7d"}
+CAPTURE_EXTENSIONS = frozenset({".dxd", ".d7d"})
 
 
 class ParsedCaptureName(NamedTuple):
@@ -67,10 +67,10 @@ def parse_capture_filename(name: str) -> ParsedCaptureName:
     """
     p = Path(name)
     suffix = p.suffix.lower()
-    if suffix and suffix not in _CAPTURE_EXTENSIONS:
+    if suffix and suffix not in CAPTURE_EXTENSIONS:
         raise ValueError(
             f"Not a capture file: {name!r} has extension {p.suffix!r}, "
-            f"expected one of {sorted(_CAPTURE_EXTENSIONS)}."
+            f"expected one of {sorted(CAPTURE_EXTENSIONS)}."
         )
     stem = p.stem if suffix else p.name
 

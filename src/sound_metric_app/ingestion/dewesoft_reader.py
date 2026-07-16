@@ -130,8 +130,11 @@ def tag_channels(frames: list[Frame], mapping: dict[str, MicPosition]) -> list[M
     Raises
     ------
     ValueError
-        If a named channel is not among ``frames`` or a position is reused.
+        If ``mapping`` is empty, a named channel is not among ``frames``, or a
+        position is reused.
     """
+    if not mapping:
+        raise ValueError("Tag at least one channel (SE and/or MR); the channel map is empty.")
     by_name = {fr.channel: fr for fr in frames}
     tagged: list[MicChannel] = []
     used: set[MicPosition] = set()

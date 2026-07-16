@@ -131,6 +131,7 @@ src/sound_metric_app/
   ingestion/   dwdatareader -> Frame  (native lib bundled, no SDK needed)
   dsp/         weighting, metrics, MetricsProcessor  (pure, tested)
   storage/     SQLite results database
+  services/    headless workflow: ingest, mark, cluster, aggregate
   ui/          PySide6 desktop app
   cli.py       command-line analyzer
 tests/         unit + real-file validation
