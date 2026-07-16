@@ -11,7 +11,8 @@ Standard-library ``sqlite3`` only. Foreign keys are enforced per connection.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 
 from ..models import Batch, Group, MetricResult, MicPosition, Shot
 from ._base import _SqliteStore
@@ -76,12 +77,47 @@ class WorkflowRepository(_SqliteStore):
     _SCHEMA = _SCHEMA
     _PRAGMAS = ("PRAGMA foreign_keys = ON",)
 
+    #: True while a :meth:`transaction` block is active, so the individual
+    #: mutating methods defer their commit to the enclosing block.
+    _in_transaction: bool = False
+
+    # ---- transactions --------------------------------------------------- #
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Group multiple writes into one atomic unit.
+
+        While the block is active, the mutating methods skip their per-call
+        commit; the block commits once on success or rolls back every pending
+        write on any exception. Callers that must not leave a half-applied state
+        (e.g. marking a shot and storing its metrics) wrap their writes here.
+
+        Not reentrant — SQLite has a single connection-level transaction.
+        """
+        if self._in_transaction:
+            raise RuntimeError("WorkflowRepository.transaction() is not reentrant")
+        self._in_transaction = True
+        try:
+            yield
+        except BaseException:
+            self._conn.rollback()
+            raise
+        else:
+            self._conn.commit()
+        finally:
+            self._in_transaction = False
+
+    def _commit(self) -> None:
+        """Commit now, unless inside a :meth:`transaction` block (defer to it)."""
+        if not self._in_transaction:
+            self._conn.commit()
+
     # ---- batches -------------------------------------------------------- #
 
     def create_batch(self, sku: str) -> int:
         """Create a new (open) batch for a SKU and return its id."""
         cur = self._conn.execute("INSERT INTO batches (sku) VALUES (?)", (sku,))
-        self._conn.commit()
+        self._commit()
         return int(cur.lastrowid)
 
     def close_batch(self, batch_id: int) -> None:
@@ -92,7 +128,7 @@ class WorkflowRepository(_SqliteStore):
         )
         if cur.rowcount == 0:
             raise LookupError(f"No batch with id {batch_id}")
-        self._conn.commit()
+        self._commit()
 
     def get_batch(self, batch_id: int) -> Batch | None:
         row = self._conn.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone()
@@ -117,7 +153,7 @@ class WorkflowRepository(_SqliteStore):
             """,
             (batch_id, test_platform, ammo),
         )
-        self._conn.commit()
+        self._commit()
         row = self._conn.execute(
             "SELECT id FROM groups WHERE batch_id = ? AND test_platform = ? AND ammo = ?",
             (batch_id, test_platform, ammo),
@@ -154,7 +190,7 @@ class WorkflowRepository(_SqliteStore):
             """,
             (source_file, suppressor_sku, test_platform, shot_order),
         )
-        self._conn.commit()
+        self._commit()
         row = self._conn.execute(
             "SELECT id FROM shots WHERE source_file = ?", (source_file,)
         ).fetchone()
@@ -224,7 +260,7 @@ class WorkflowRepository(_SqliteStore):
         )
         if cur.rowcount == 0:
             raise LookupError(f"No shot with id {shot_id}")
-        self._conn.commit()
+        self._commit()
 
     def set_shot_channels(
         self, shot_id: int, *, se_channel: str | None, mr_channel: str | None
@@ -243,7 +279,7 @@ class WorkflowRepository(_SqliteStore):
         )
         if cur.rowcount == 0:
             raise LookupError(f"No shot with id {shot_id}")
-        self._conn.commit()
+        self._commit()
 
     def shots_by_group(self, group_id: int) -> list[Shot]:
         """Shots in a group, ordered by shot order (then id for stability)."""
@@ -288,7 +324,7 @@ class WorkflowRepository(_SqliteStore):
             ),
         )
         row_id = int(cur.fetchone()[0])
-        self._conn.commit()
+        self._commit()
         return row_id
 
     def delete_channel_metrics_except(self, shot_id: int, keep: Iterable[MicPosition]) -> None:
@@ -307,7 +343,7 @@ class WorkflowRepository(_SqliteStore):
             )
         else:
             self._conn.execute("DELETE FROM channel_metrics WHERE shot_id = ?", (shot_id,))
-        self._conn.commit()
+        self._commit()
 
     def metrics_for_shot(self, shot_id: int) -> list[dict]:
         cur = self._conn.execute(

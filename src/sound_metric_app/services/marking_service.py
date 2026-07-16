@@ -120,28 +120,34 @@ class MarkingService:
         # Resolve (and open, if needed) the batch/group for this test context.
         resolved = self._clustering.resolve_group(sku, platform, ammo)
 
-        self._repo.mark_shot(
-            shot_id,
-            group_id=resolved.group_id,
-            ammo=ammo,
-            shot_order=shot_order,
-            wind_speed=wind_speed,
-            temp=temp,
-            relative_humidity=relative_humidity,
-        )
-        # channel_map fully defines this shot's tagging, so set the tags
-        # definitively (clearing a mic dropped on re-mark) rather than letting
-        # mark_shot's preserve-on-None semantics keep a stale tag.
-        self._repo.set_shot_channels(shot_id, se_channel=se_channel, mr_channel=mr_channel)
+        # Run all DSP before any DB write, so a processing failure never leaves
+        # a persisted mark behind.
+        metrics: dict[MicPosition, MetricResult] = {
+            mic.position: self._processor.process(mic.frame) for mic in tagged
+        }
 
-        metrics: dict[MicPosition, MetricResult] = {}
-        for mic in tagged:
-            result = self._processor.process(mic.frame)
-            self._repo.save_channel_metric(shot_id, mic.position, result)
-            metrics[mic.position] = result
-        # Re-marking may drop a previously tagged mic; remove its now-stale
-        # metric row so aggregation stops averaging orphaned data.
-        self._repo.delete_channel_metrics_except(shot_id, metrics)
+        # Marking and metric storage must be atomic: a shot is either fully
+        # marked with all its metrics or left untouched. A partial commit would
+        # drop the shot from the unmarked list while missing metrics.
+        with self._repo.transaction():
+            self._repo.mark_shot(
+                shot_id,
+                group_id=resolved.group_id,
+                ammo=ammo,
+                shot_order=shot_order,
+                wind_speed=wind_speed,
+                temp=temp,
+                relative_humidity=relative_humidity,
+            )
+            # channel_map fully defines this shot's tagging, so set the tags
+            # definitively (clearing a mic dropped on re-mark) rather than letting
+            # mark_shot's preserve-on-None semantics keep a stale tag.
+            self._repo.set_shot_channels(shot_id, se_channel=se_channel, mr_channel=mr_channel)
+            for position, result in metrics.items():
+                self._repo.save_channel_metric(shot_id, position, result)
+            # Re-marking may drop a previously tagged mic; remove its now-stale
+            # metric row so aggregation stops averaging orphaned data.
+            self._repo.delete_channel_metrics_except(shot_id, metrics)
 
         return MarkedShot(
             shot=self._repo.get_shot(shot_id),

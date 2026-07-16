@@ -7,6 +7,8 @@ need a real ``.dxd`` file.
 
 from __future__ import annotations
 
+import sqlite3
+
 import numpy as np
 import pytest
 
@@ -274,6 +276,71 @@ def test_remark_two_mic_shot_as_single_mic_drops_mr(repo):
     shot = repo.get_shot(shot_id)
     assert (shot.se_channel, shot.mr_channel) == ("AI 1", None)
     assert MicPosition.MR not in repo.group_averages(first.group_id)
+
+
+def test_mark_rolls_back_when_processing_fails_midway(repo):
+    # DSP fails on the second mic: the shot must stay unmarked with no metrics,
+    # so it re-surfaces for marking rather than becoming a half-marked shot.
+    class ExplodingProcessor:
+        def __init__(self):
+            self.calls = 0
+
+        def process(self, frame):
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("DSP blew up")
+            return PeakProcessor().process(frame)
+
+    shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)
+    svc = MarkingService(
+        repo, ClusteringService(repo), reader=FakeCaptureReader(), processor=ExplodingProcessor()
+    )
+
+    with pytest.raises(RuntimeError):
+        svc.mark(
+            shot_id,
+            ammo="M855",
+            channel_map={"AI 1": MicPosition.SE, "AI 2": MicPosition.MR},
+        )
+
+    shot = repo.get_shot(shot_id)
+    assert shot.marked is False
+    assert shot.group_id is None
+    assert (shot.se_channel, shot.mr_channel) == (None, None)
+    assert repo.metrics_for_shot(shot_id) == []
+    assert repo.unmarked_shots() != []
+
+
+def test_mark_rolls_back_when_a_metric_write_fails(repo):
+    # A DB failure after the mark + first metric are written must roll back the
+    # whole marking, not leave the shot marked with only one mic's metric.
+    shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)
+    svc = _marking_service(repo)
+
+    real_save = repo.save_channel_metric
+    calls = {"n": 0}
+
+    def flaky_save(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise sqlite3.OperationalError("disk full")
+        return real_save(*args, **kwargs)
+
+    repo.save_channel_metric = flaky_save
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            svc.mark(
+                shot_id,
+                ammo="M855",
+                channel_map={"AI 1": MicPosition.SE, "AI 2": MicPosition.MR},
+            )
+    finally:
+        repo.save_channel_metric = real_save
+
+    shot = repo.get_shot(shot_id)
+    assert shot.marked is False
+    assert shot.group_id is None
+    assert repo.metrics_for_shot(shot_id) == []
 
 
 def test_mark_override_keys(repo):
