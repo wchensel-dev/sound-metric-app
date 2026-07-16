@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
-
-from ..config import DEFAULT_DB_PATH
 from ..models import MetricResult
+from ._base import _SqliteStore
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (
@@ -25,15 +22,10 @@ CREATE TABLE IF NOT EXISTS results (
 """
 
 
-class ResultsDatabase:
+class ResultsDatabase(_SqliteStore):
     """Thin data-management wrapper over a local SQLite file."""
 
-    def __init__(self, path: str | Path = DEFAULT_DB_PATH):
-        self.path = str(path)
-        self._conn = sqlite3.connect(self.path)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
+    _SCHEMA = _SCHEMA
 
     def add_result(self, result: MetricResult) -> int:
         row = result.as_row()
@@ -58,12 +50,3 @@ class ResultsDatabase:
     def delete_result(self, result_id: int) -> None:
         self._conn.execute("DELETE FROM results WHERE id = ?", (result_id,))
         self._conn.commit()
-
-    def close(self) -> None:
-        self._conn.close()
-
-    def __enter__(self) -> ResultsDatabase:
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self.close()

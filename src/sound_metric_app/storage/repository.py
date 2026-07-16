@@ -11,10 +11,9 @@ Standard-library ``sqlite3`` only. Foreign keys are enforced per connection.
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
 
-from ..config import DEFAULT_DB_PATH
 from ..models import Batch, Group, MetricResult, MicPosition, Shot
+from ._base import _SqliteStore
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS batches (
@@ -70,16 +69,11 @@ CREATE TABLE IF NOT EXISTS channel_metrics (
 _METRIC_FIELDS = ("peak_db", "peak_dba", "peak_impulse_db", "liaeq_100ms_db")
 
 
-class WorkflowRepository:
+class WorkflowRepository(_SqliteStore):
     """Data-management wrapper over the hierarchy tables in a local SQLite file."""
 
-    def __init__(self, path: str | Path = DEFAULT_DB_PATH):
-        self.path = str(path)
-        self._conn = sqlite3.connect(self.path)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys = ON")
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
+    _SCHEMA = _SCHEMA
+    _PRAGMAS = ("PRAGMA foreign_keys = ON",)
 
     # ---- batches -------------------------------------------------------- #
 
@@ -134,9 +128,7 @@ class WorkflowRepository:
         return _row_to_group(row) if row else None
 
     def groups_for_batch(self, batch_id: int) -> list[Group]:
-        cur = self._conn.execute(
-            "SELECT * FROM groups WHERE batch_id = ? ORDER BY id", (batch_id,)
-        )
+        cur = self._conn.execute("SELECT * FROM groups WHERE batch_id = ? ORDER BY id", (batch_id,))
         return [_row_to_group(r) for r in cur.fetchall()]
 
     # ---- shots ---------------------------------------------------------- #
@@ -317,17 +309,6 @@ class WorkflowRepository:
                 "n": int(r["n"]),
             }
         return out
-
-    # ---- lifecycle ------------------------------------------------------ #
-
-    def close(self) -> None:
-        self._conn.close()
-
-    def __enter__(self) -> WorkflowRepository:
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self.close()
 
 
 # --------------------------------------------------------------------------- #
