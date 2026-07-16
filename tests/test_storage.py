@@ -136,6 +136,18 @@ def test_close_batch(repo):
     assert repo.open_batch_for_sku("SUP-1") is None  # no open batch remains
 
 
+def test_close_batch_unknown_id_raises(repo):
+    with pytest.raises(LookupError):
+        repo.close_batch(9999)
+
+
+def test_mark_shot_unknown_id_raises(repo):
+    batch_id = repo.create_batch("SUP-1")
+    group_id = repo.upsert_group(batch_id, "AR15", "M855")
+    with pytest.raises(LookupError):
+        repo.mark_shot(9999, group_id=group_id, ammo="M855")
+
+
 def test_group_averages_keep_se_and_mr_separate(repo):
     batch_id = repo.create_batch("SUP-1")
     group_id = repo.upsert_group(batch_id, "AR15", "M855")

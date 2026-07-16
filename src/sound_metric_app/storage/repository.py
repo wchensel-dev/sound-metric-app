@@ -90,11 +90,13 @@ class WorkflowRepository:
         return int(cur.lastrowid)
 
     def close_batch(self, batch_id: int) -> None:
-        """Mark a batch closed. Idempotent."""
-        self._conn.execute(
+        """Mark a batch closed. Idempotent. Raises ``LookupError`` if unknown."""
+        cur = self._conn.execute(
             "UPDATE batches SET closed = 1, closed_at = datetime('now') WHERE id = ?",
             (batch_id,),
         )
+        if cur.rowcount == 0:
+            raise LookupError(f"No batch with id {batch_id}")
         self._conn.commit()
 
     def get_batch(self, batch_id: int) -> Batch | None:
@@ -198,8 +200,10 @@ class WorkflowRepository:
         (``shot_order`` and the environment/channel columns) is preserved when
         left unset, so re-marking to correct one field does not clobber the
         others: a value is only overwritten when explicitly supplied.
+
+        Raises ``LookupError`` if ``shot_id`` matches no shot.
         """
-        self._conn.execute(
+        cur = self._conn.execute(
             """
             UPDATE shots SET
                 group_id = ?,
@@ -225,6 +229,8 @@ class WorkflowRepository:
                 shot_id,
             ),
         )
+        if cur.rowcount == 0:
+            raise LookupError(f"No shot with id {shot_id}")
         self._conn.commit()
 
     def shots_by_group(self, group_id: int) -> list[Shot]:
