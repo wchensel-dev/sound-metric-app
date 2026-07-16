@@ -147,6 +147,18 @@ def test_mark_requires_a_channel_tag(env, capsys):
     assert "at least one mic channel" in capsys.readouterr().err
 
 
+def test_mark_rejects_identical_se_and_mr(env, capsys, capture_reader):
+    db, inbox = env
+    _touch(inbox, "SUP-1_AR15_001.dxd")
+    workflow_cli.main(["ingest", str(inbox), "--db", db, "--no-validate"])
+    capsys.readouterr()
+    rc = workflow_cli.main(
+        ["mark", "1", "--ammo", "M855", "--se", "AI 1", "--mr", "AI 1", "--db", db]
+    )
+    assert rc == 2
+    assert "cannot be the same channel" in capsys.readouterr().err
+
+
 def test_mark_unknown_shot_errors(env, capsys, capture_reader):
     db, _ = env
     rc = workflow_cli.main(["mark", "999", "--ammo", "M855", "--se", "AI 1", "--db", db])

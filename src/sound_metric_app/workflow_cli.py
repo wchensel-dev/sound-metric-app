@@ -88,6 +88,9 @@ def _cmd_ingest(args: argparse.Namespace, repo: WorkflowRepository) -> int:
 
 
 def _cmd_mark(args: argparse.Namespace, repo: WorkflowRepository) -> int:
+    if args.se and args.mr and args.se == args.mr:
+        print("--se and --mr cannot be the same channel.", file=sys.stderr)
+        return 2
     channel_map: dict[str, MicPosition] = {}
     if args.se:
         channel_map[args.se] = MicPosition.SE
