@@ -35,7 +35,23 @@ class _SqliteStore:
         for pragma in self._PRAGMAS:
             self._conn.execute(pragma)
         self._conn.executescript(self._SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Bring an already-existing database up to the current schema.
+
+        The schema script only ever *creates* missing tables, so columns added
+        to a table after it was first created never reach a database that already
+        has that table. Subclasses override this to apply idempotent
+        ``ALTER TABLE ... ADD COLUMN`` migrations; the default is a no-op.
+        """
+
+    def _add_column_if_missing(self, table: str, column: str, decl: str) -> None:
+        """Add ``column`` to ``table`` if it is not already present. Idempotent."""
+        existing = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     def close(self) -> None:
         self._conn.close()

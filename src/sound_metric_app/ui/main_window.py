@@ -18,6 +18,7 @@ Run with:  python -m sound_metric_app.ui.main_window   (needs the 'gui' extra)
 from __future__ import annotations
 
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from PySide6 import QtCore, QtWidgets
@@ -434,66 +435,296 @@ class MarkingView(_View):
 # --------------------------------------------------------------------------- #
 
 
+class ShotEditDialog(QtWidgets.QDialog):
+    """Correct a marked shot's fields, pre-filled from its current state.
+
+    Purely a form: it validates and exposes the collected values via
+    :meth:`values`; the caller re-marks the shot (which re-clusters it into the
+    right batch/group and recomputes metrics). SKU/platform/ammo default to what
+    the shot was actually clustered into — its batch and group — not the
+    provisional filename keys, so an unchanged save is a true no-op.
+    """
+
+    def __init__(
+        self,
+        shot: Shot,
+        *,
+        sku: str,
+        platform: str,
+        ammo: str,
+        channel_names: list[str],
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(f"Edit shot #{shot.id}")
+        self._shot = shot
+        self._values: dict | None = None
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(QtWidgets.QLabel(Path(shot.source_file).name))
+        form = QtWidgets.QFormLayout()
+
+        self.se_combo = QtWidgets.QComboBox()
+        self.mr_combo = QtWidgets.QComboBox()
+        for combo in (self.se_combo, self.mr_combo):
+            combo.addItem(_NONE_LABEL)
+            combo.addItems(channel_names)
+        _select_channel(self.se_combo, shot.se_channel)
+        _select_channel(self.mr_combo, shot.mr_channel)
+        form.addRow("SE channel:", self.se_combo)
+        form.addRow("MR channel:", self.mr_combo)
+
+        self.ammo_edit = QtWidgets.QLineEdit(ammo or "")
+        form.addRow("Ammo *:", self.ammo_edit)
+        self.sku_edit = QtWidgets.QLineEdit(sku or "")
+        form.addRow("SKU *:", self.sku_edit)
+        self.platform_edit = QtWidgets.QLineEdit(platform or "")
+        form.addRow("Platform *:", self.platform_edit)
+        self.shot_order_edit = QtWidgets.QLineEdit(_str_or_empty(shot.shot_order))
+        form.addRow("Shot order:", self.shot_order_edit)
+        self.wind_edit = QtWidgets.QLineEdit(_str_or_empty(shot.wind_speed))
+        form.addRow("Wind speed (mph):", self.wind_edit)
+        self.temp_edit = QtWidgets.QLineEdit(_str_or_empty(shot.temp))
+        form.addRow("Temp (°F):", self.temp_edit)
+        self.rh_edit = QtWidgets.QLineEdit(_str_or_empty(shot.relative_humidity))
+        form.addRow("Relative humidity (%):", self.rh_edit)
+        # Read-only: the capture's fired-at time, pulled from the Dewesoft file at
+        # marking. Shown for reference; not user-editable.
+        form.addRow("Captured:", QtWidgets.QLabel(_format_captured_at(shot.captured_at)))
+        layout.addLayout(form)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _selected_channel(self, combo: QtWidgets.QComboBox) -> str | None:
+        text = combo.currentText()
+        return None if text in (_NONE_LABEL, "") else text
+
+    def _on_accept(self) -> None:
+        ammo = self.ammo_edit.text().strip()
+        if not ammo:
+            QtWidgets.QMessageBox.warning(self, "Missing ammo", "Ammo is required.")
+            return
+        sku = self.sku_edit.text().strip()
+        platform = self.platform_edit.text().strip()
+        if not sku or not platform:
+            QtWidgets.QMessageBox.warning(
+                self, "Missing key", "SKU and Platform are required to re-mark a shot."
+            )
+            return
+
+        channel_map: dict[str, MicPosition] = {}
+        se = self._selected_channel(self.se_combo)
+        mr = self._selected_channel(self.mr_combo)
+        if se:
+            channel_map[se] = MicPosition.SE
+        if mr:
+            channel_map[mr] = MicPosition.MR
+        if not channel_map:
+            QtWidgets.QMessageBox.warning(
+                self, "No mic tagged", "Tag at least one channel as SE or MR."
+            )
+            return
+        if se and mr and se == mr:
+            QtWidgets.QMessageBox.warning(
+                self, "Same channel", "SE and MR cannot be the same channel."
+            )
+            return
+
+        try:
+            self._values = dict(
+                ammo=ammo,
+                channel_map=channel_map,
+                suppressor_sku=sku,
+                test_platform=platform,
+                shot_order=_opt_int(self.shot_order_edit.text()),
+                wind_speed=_opt_float(self.wind_edit.text()),
+                temp=_opt_float(self.temp_edit.text()),
+                relative_humidity=_opt_float(self.rh_edit.text()),
+                # A full correction form: a cleared box means "blank this field",
+                # not "leave it as it was", so write the optional fields exactly.
+                replace_optional=True,
+            )
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Invalid value", str(exc))
+            return
+        self.accept()
+
+    def values(self) -> dict:
+        """The validated ``controller.mark`` kwargs. Valid only after Save."""
+        assert self._values is not None, "values() called before an accepted Save"
+        return self._values
+
+
 class BatchTreeView(_View):
     def __init__(self, controller: WorkflowController, main: "MainWindow"):
         super().__init__(controller, main)
         layout = QtWidgets.QVBoxLayout(self)
 
         self.tree = QtWidgets.QTreeWidget()
-        self.tree.setHeaderLabels(["Batch / Group / Shot", "Detail"])
-        self.tree.itemSelectionChanged.connect(self._update_close_enabled)
+        self.tree.setHeaderLabels(["Batch / Group / Shot", "Detail", "Timestamp"])
+        self.tree.itemSelectionChanged.connect(self._update_actions_enabled)
+        # Only leaf shot rows edit on double-click; on a batch/group row that
+        # gesture is Qt's expand/collapse and must not also pop an edit modal.
+        self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         layout.addWidget(self.tree)
 
         button_row = QtWidgets.QHBoxLayout()
         refresh_btn = QtWidgets.QPushButton("Refresh")
         refresh_btn.clicked.connect(self.refresh)
+        self.edit_btn = QtWidgets.QPushButton("Edit…")
+        self.edit_btn.setEnabled(False)
+        self.edit_btn.clicked.connect(self._edit_selected)
         self.close_btn = QtWidgets.QPushButton("Close batch")
         self.close_btn.setEnabled(False)
         self.close_btn.clicked.connect(self._close_batch)
         button_row.addWidget(refresh_btn)
         button_row.addStretch(1)
+        button_row.addWidget(self.edit_btn)
         button_row.addWidget(self.close_btn)
         layout.addLayout(button_row)
 
     def refresh(self) -> None:
+        # Prune empty groups/batches before rendering; batch_tree() itself is a
+        # pure read, so the sweep is an explicit step on the refresh path.
+        self.controller.sweep_empty()
         self.tree.clear()
         for node in self.controller.batch_tree():
             batch = node.batch
             state = "closed" if batch.closed else "open"
-            b_item = QtWidgets.QTreeWidgetItem([f"Batch #{batch.id}  SKU {batch.sku}", f"[{state}]"])
-            b_item.setData(0, QtCore.Qt.UserRole, ("batch", batch.id, batch.closed))
+            b_item = QtWidgets.QTreeWidgetItem(
+                [f"Batch #{batch.id}  SKU {batch.sku}", f"[{state}]", ""]
+            )
+            b_item.setData(0, QtCore.Qt.UserRole, ("batch", batch))
             self.tree.addTopLevelItem(b_item)
             for g_node in node.groups:
                 group = g_node.group
                 n = len(g_node.shots)
                 g_item = QtWidgets.QTreeWidgetItem(
-                    [f"Group #{group.id}  {group.test_platform} / {group.ammo}", f"{n} shot(s)"]
+                    [f"Group #{group.id}  {group.test_platform} / {group.ammo}", f"{n} shot(s)", ""]
                 )
-                g_item.setData(0, QtCore.Qt.UserRole, ("group", group.id, None))
+                g_item.setData(0, QtCore.Qt.UserRole, ("group", group))
                 b_item.addChild(g_item)
                 for shot in g_node.shots:
                     tags = f"SE:{shot.se_channel or '—'}  MR:{shot.mr_channel or '—'}"
                     s_item = QtWidgets.QTreeWidgetItem(
-                        [f"Shot #{shot.id}  {Path(shot.source_file).name}", tags]
+                        [
+                            f"Shot #{shot.id}  {Path(shot.source_file).name}",
+                            tags,
+                            _format_captured_at(shot.captured_at),
+                        ]
                     )
-                    s_item.setData(0, QtCore.Qt.UserRole, ("shot", shot.id, None))
+                    # Carry the shot's group and batch so an edit can pre-fill the
+                    # SKU/platform/ammo it was actually clustered into (which may
+                    # differ from its provisional filename keys after an override).
+                    s_item.setData(0, QtCore.Qt.UserRole, ("shot", shot, group, batch))
                     g_item.addChild(s_item)
         self.tree.expandAll()
         self.tree.resizeColumnToContents(0)
-        self._update_close_enabled()
+        self.tree.resizeColumnToContents(1)
+        self.tree.resizeColumnToContents(2)
+        self._update_actions_enabled()
 
-    def _selected_batch(self) -> tuple[int, bool] | None:
+    def _selected_entry(self) -> tuple | None:
         items = self.tree.selectedItems()
         if not items:
             return None
-        data = items[0].data(0, QtCore.Qt.UserRole)
-        if data and data[0] == "batch":
-            return data[1], data[2]  # (batch_id, closed)
+        return items[0].data(0, QtCore.Qt.UserRole)
+
+    def _selected_batch(self) -> tuple[int, bool] | None:
+        entry = self._selected_entry()
+        if entry and entry[0] == "batch":
+            batch = entry[1]
+            return batch.id, batch.closed
         return None
 
-    def _update_close_enabled(self) -> None:
+    def _update_actions_enabled(self) -> None:
+        entry = self._selected_entry()
+        kind = entry[0] if entry else None
+        # A batch (rename its SKU) or a shot (re-mark it) can be edited; a group
+        # is renamed by editing its shots, so it has no direct edit action.
+        self.edit_btn.setEnabled(kind in ("batch", "shot"))
         selected = self._selected_batch()
         self.close_btn.setEnabled(selected is not None and not selected[1])
+
+    # ---- edit ----------------------------------------------------------- #
+
+    def _on_item_double_clicked(self, item: QtWidgets.QTreeWidgetItem, _column: int) -> None:
+        entry = item.data(0, QtCore.Qt.UserRole)
+        if entry and entry[0] == "shot":
+            self._edit_selected()
+
+    def _edit_selected(self) -> None:
+        entry = self._selected_entry()
+        if not entry:
+            return
+        if entry[0] == "batch":
+            self._edit_batch(entry[1])
+        elif entry[0] == "shot":
+            self._edit_shot(entry[1], entry[2], entry[3])
+
+    def _edit_batch(self, batch) -> None:
+        new_sku, ok = QtWidgets.QInputDialog.getText(
+            self,
+            f"Edit batch #{batch.id}",
+            "SKU:",
+            QtWidgets.QLineEdit.Normal,
+            batch.sku,
+        )
+        if not ok:
+            return
+        new_sku = new_sku.strip()
+        if not new_sku or new_sku == batch.sku:
+            return
+        try:
+            self.controller.rename_batch(batch.id, new_sku)
+        except Exception as exc:  # noqa: BLE001 — surface to the user as a dialog
+            QtWidgets.QMessageBox.critical(self, "Error", str(exc))
+            return
+        self.main.notify_changed()
+
+    def _edit_shot(self, shot, group, batch) -> None:
+        # Re-marking a shot whose batch is closed re-clusters it into a *new* open
+        # batch (a closed batch is never the SKU's open batch), so warn first.
+        if batch.closed:
+            confirm = QtWidgets.QMessageBox.question(
+                self,
+                "Batch closed",
+                f"Batch #{batch.id} (SKU {batch.sku}) is closed. Saving changes will "
+                f"move shot #{shot.id} into a new open batch. Continue?",
+            )
+            if confirm != QtWidgets.QMessageBox.Yes:
+                return
+
+        # Load the raw channels off the UI thread, then open the pre-filled dialog.
+        self._run_async(
+            lambda: self.controller.channels_for(shot.source_file),
+            lambda channels: self._open_shot_dialog(shot, group, batch, channels),
+            busy=(self.edit_btn,),
+        )
+
+    def _open_shot_dialog(self, shot, group, batch, channels) -> None:
+        dialog = ShotEditDialog(
+            shot,
+            sku=batch.sku,
+            platform=group.test_platform,
+            ammo=group.ammo,
+            channel_names=[c.name for c in channels],
+            parent=self,
+        )
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        values = dialog.values()
+        shot_id = shot.id
+        self._run_async(
+            lambda: self.controller.mark(shot_id, **values),
+            lambda _result: self.main.notify_changed(),
+            busy=(self.edit_btn,),
+        )
 
     def _close_batch(self) -> None:
         selected = self._selected_batch()
@@ -637,6 +868,35 @@ class MainWindow(QtWidgets.QMainWindow):
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+
+
+def _str_or_empty(value) -> str:
+    """Render an optional field for a pre-filled edit box (``None`` -> "")."""
+    return "" if value is None else str(value)
+
+
+def _format_captured_at(captured_at: str | None) -> str:
+    """Render a shot's ISO capture timestamp for display (``None`` -> "—").
+
+    Falls back to the raw stored string if it does not parse as ISO-8601, so an
+    unexpected format is still shown rather than hidden.
+    """
+    if not captured_at:
+        return "—"
+    try:
+        return datetime.fromisoformat(captured_at).strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return captured_at
+
+
+def _select_channel(combo: QtWidgets.QComboBox, name: str | None) -> None:
+    """Preselect ``name`` in a channel combo, falling back to ``(none)`` at index 0."""
+    if name:
+        index = combo.findText(name)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+            return
+    combo.setCurrentIndex(0)
 
 
 def _opt_int(text: str) -> int | None:

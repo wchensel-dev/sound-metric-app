@@ -66,6 +66,7 @@ class MarkingService:
         wind_speed: float | None = None,
         temp: float | None = None,
         relative_humidity: float | None = None,
+        replace_optional: bool = False,
     ) -> MarkedShot:
         """Mark ``shot_id`` and compute its per-mic metrics.
 
@@ -82,8 +83,15 @@ class MarkingService:
             Batch/group keys. Default to the shot's provisional values parsed
             from its filename at ingest; pass them to override a mis-named file.
         shot_order, wind_speed, temp, relative_humidity:
-            Per-shot fields; each is preserved if omitted (the store only
-            overwrites values explicitly supplied).
+            Per-shot fields. By default each is preserved if omitted (the store
+            only overwrites values explicitly supplied). Pass
+            ``replace_optional=True`` for a full-form edit, where these are
+            written exactly and an omitted (``None``) field blanks the stored
+            value instead of preserving it.
+        replace_optional:
+            See ``shot_order`` et al. above. Leave ``False`` for a partial
+            re-mark (e.g. the CLI); set ``True`` when the caller supplies the
+            complete intended state, such as the GUI edit dialog.
 
         Returns
         -------
@@ -102,6 +110,13 @@ class MarkingService:
         shot = self._repo.get_shot(shot_id)
         if shot is None:
             raise LookupError(f"No shot with id {shot_id}")
+        previous_group_id = shot.group_id
+        # Remember the group's batch too: pruning an emptied group can leave its
+        # batch empty (e.g. re-marking the sole shot out of a closed batch).
+        previous_batch_id = None
+        if previous_group_id is not None:
+            previous_group = self._repo.get_group(previous_group_id)
+            previous_batch_id = previous_group.batch_id if previous_group else None
 
         sku = suppressor_sku or shot.suppressor_sku
         platform = test_platform or shot.test_platform
@@ -114,6 +129,9 @@ class MarkingService:
         # Read the capture and validate the channel tagging before touching the DB.
         frames = self._reader(shot.source_file)
         tagged = tag_channels(frames, channel_map)
+        # Every frame from one capture shares the file's start-store time; record
+        # it as the shot's fired-at timestamp (None if the file carried none).
+        captured_at = _capture_timestamp(frames)
         se_channel = _channel_for(channel_map, MicPosition.SE)
         mr_channel = _channel_for(channel_map, MicPosition.MR)
 
@@ -138,6 +156,8 @@ class MarkingService:
                 wind_speed=wind_speed,
                 temp=temp,
                 relative_humidity=relative_humidity,
+                captured_at=captured_at,
+                replace_optional=replace_optional,
             )
             # channel_map fully defines this shot's tagging, so set the tags
             # definitively (clearing a mic dropped on re-mark) rather than letting
@@ -148,6 +168,16 @@ class MarkingService:
             # Re-marking may drop a previously tagged mic; remove its now-stale
             # metric row so aggregation stops averaging orphaned data.
             self._repo.delete_channel_metrics_except(shot_id, metrics)
+            # Re-marking into a different group may leave the former group empty;
+            # drop it so the batch tree stays uncluttered and its name is re-usable.
+            # If that group was its batch's last, the batch is now an empty shell
+            # (the closed-batch re-mark flow), so prune it too.
+            if previous_group_id is not None and previous_group_id != resolved.group_id:
+                if (
+                    self._repo.delete_group_if_empty(previous_group_id)
+                    and previous_batch_id is not None
+                ):
+                    self._repo.delete_batch_if_empty(previous_batch_id)
 
         return MarkedShot(
             shot=self._repo.get_shot(shot_id),
@@ -162,4 +192,17 @@ def _channel_for(channel_map: dict[str, MicPosition], position: MicPosition) -> 
     for name, pos in channel_map.items():
         if pos is position:
             return name
+    return None
+
+
+def _capture_timestamp(frames: list[Frame]) -> str | None:
+    """The capture's fired-at time as an ISO-8601 string, or ``None``.
+
+    Every frame from one file carries the same ``start_store_time``; take it from
+    the first frame that has one so a missing timestamp on one channel does not
+    lose it. Returns ``None`` when no frame carried a timestamp.
+    """
+    for frame in frames:
+        if frame.timestamp is not None:
+            return frame.timestamp.isoformat()
     return None

@@ -229,3 +229,7 @@ class Shot:
     group_id: int | None = None
     id: int | None = None
     created_at: str | None = None
+    #: When the shot was fired, pulled from the capture file's start-store time
+    #: (Dewesoft ``start_store_time``). ISO-8601 string, or ``None`` if the file
+    #: carried no timestamp. Set at marking, when the capture is read.
+    captured_at: str | None = None

@@ -12,8 +12,12 @@ venv/
 
 # Local data / databases
 *.db
+*.db.bak*
 data/*.dxd
 data/*.d7d
+
+# Per-user app settings (holds machine-specific paths)
+sma_config.json
 
 # Tooling
 .pytest_cache/
