@@ -210,6 +210,16 @@ def test_ensure_open_guards_closed_and_unknown(repo):
         svc.ensure_open(9999)
 
 
+def test_open_batch_raises_if_created_batch_vanishes(repo):
+    """A just-created batch disappearing (e.g. concurrent delete) fails loudly."""
+    svc = ClusteringService(repo)
+    # Simulate the race: no open batch, create succeeds, but the follow-up
+    # fetch finds nothing.
+    repo.get_batch = lambda batch_id: None
+    with pytest.raises(LookupError):
+        svc.resolve_group("SUP-1", "AR15", "M855")
+
+
 # --------------------------------------------------------------------------- #
 # Task 5 — MarkingService
 # --------------------------------------------------------------------------- #

@@ -84,4 +84,9 @@ class ClusteringService:
         if batch is None:
             batch_id = self._repo.create_batch(suppressor_sku)
             batch = self._repo.get_batch(batch_id)
+            if batch is None:
+                raise LookupError(
+                    f"Batch {batch_id} vanished immediately after creation "
+                    f"(SKU {suppressor_sku!r})"
+                )
         return batch
