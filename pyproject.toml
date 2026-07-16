@@ -23,6 +23,9 @@ dev = ["pytest>=8.0", "pytest-qt>=4.2", "ruff>=0.5"]
 sma-analyze = "sound_metric_app.cli:main"
 sma = "sound_metric_app.workflow_cli:main"
 
+[project.gui-scripts]
+sma-gui = "sound_metric_app.ui.launcher:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/sound_metric_app"]
 
