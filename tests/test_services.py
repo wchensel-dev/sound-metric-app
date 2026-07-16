@@ -255,6 +255,27 @@ def test_mark_single_mic_yields_one_row(repo):
     assert {m["mic_position"] for m in repo.metrics_for_shot(shot_id)} == {"SE"}
 
 
+def test_remark_two_mic_shot_as_single_mic_drops_mr(repo):
+    # First mark tags both mics, then re-mark drops the MR mic (a noisy channel).
+    shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)
+    svc = _marking_service(repo)
+    first = svc.mark(
+        shot_id,
+        ammo="M855",
+        channel_map={"AI 1": MicPosition.SE, "AI 2": MicPosition.MR},
+    )
+    assert {m["mic_position"] for m in repo.metrics_for_shot(shot_id)} == {"SE", "MR"}
+
+    result = svc.mark(shot_id, ammo="M855", channel_map={"AI 1": MicPosition.SE})
+
+    # No stale MR row survives to corrupt aggregation, and the tag is cleared.
+    assert set(result.metrics) == {MicPosition.SE}
+    assert {m["mic_position"] for m in repo.metrics_for_shot(shot_id)} == {"SE"}
+    shot = repo.get_shot(shot_id)
+    assert (shot.se_channel, shot.mr_channel) == ("AI 1", None)
+    assert MicPosition.MR not in repo.group_averages(first.group_id)
+
+
 def test_mark_override_keys(repo):
     # Filename said SUP-1/AR15, but the user corrects both at marking.
     shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)

@@ -128,15 +128,20 @@ class MarkingService:
             wind_speed=wind_speed,
             temp=temp,
             relative_humidity=relative_humidity,
-            se_channel=se_channel,
-            mr_channel=mr_channel,
         )
+        # channel_map fully defines this shot's tagging, so set the tags
+        # definitively (clearing a mic dropped on re-mark) rather than letting
+        # mark_shot's preserve-on-None semantics keep a stale tag.
+        self._repo.set_shot_channels(shot_id, se_channel=se_channel, mr_channel=mr_channel)
 
         metrics: dict[MicPosition, MetricResult] = {}
         for mic in tagged:
             result = self._processor.process(mic.frame)
             self._repo.save_channel_metric(shot_id, mic.position, result)
             metrics[mic.position] = result
+        # Re-marking may drop a previously tagged mic; remove its now-stale
+        # metric row so aggregation stops averaging orphaned data.
+        self._repo.delete_channel_metrics_except(shot_id, metrics)
 
         return MarkedShot(
             shot=self._repo.get_shot(shot_id),

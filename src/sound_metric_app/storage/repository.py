@@ -11,6 +11,7 @@ Standard-library ``sqlite3`` only. Foreign keys are enforced per connection.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable
 
 from ..models import Batch, Group, MetricResult, MicPosition, Shot
 from ._base import _SqliteStore
@@ -225,6 +226,25 @@ class WorkflowRepository(_SqliteStore):
             raise LookupError(f"No shot with id {shot_id}")
         self._conn.commit()
 
+    def set_shot_channels(
+        self, shot_id: int, *, se_channel: str | None, mr_channel: str | None
+    ) -> None:
+        """Set a shot's SE/MR channel tags exactly, clearing either when ``None``.
+
+        Unlike :meth:`mark_shot` — which preserves an unsupplied channel tag —
+        this overwrites both columns unconditionally, so re-marking a shot with
+        fewer mics drops the tag for the mic that is no longer present.
+
+        Raises ``LookupError`` if ``shot_id`` matches no shot.
+        """
+        cur = self._conn.execute(
+            "UPDATE shots SET se_channel = ?, mr_channel = ? WHERE id = ?",
+            (se_channel, mr_channel, shot_id),
+        )
+        if cur.rowcount == 0:
+            raise LookupError(f"No shot with id {shot_id}")
+        self._conn.commit()
+
     def shots_by_group(self, group_id: int) -> list[Shot]:
         """Shots in a group, ordered by shot order (then id for stability)."""
         cur = self._conn.execute(
@@ -270,6 +290,24 @@ class WorkflowRepository(_SqliteStore):
         row_id = int(cur.fetchone()[0])
         self._conn.commit()
         return row_id
+
+    def delete_channel_metrics_except(self, shot_id: int, keep: Iterable[MicPosition]) -> None:
+        """Delete a shot's ``channel_metrics`` rows whose position is not in ``keep``.
+
+        Called when re-marking drops a previously tagged mic, so aggregation
+        does not keep averaging the orphaned row.
+        """
+        kept = [p.value for p in keep]
+        if kept:
+            placeholders = ",".join("?" * len(kept))
+            self._conn.execute(
+                "DELETE FROM channel_metrics "
+                f"WHERE shot_id = ? AND mic_position NOT IN ({placeholders})",
+                (shot_id, *kept),
+            )
+        else:
+            self._conn.execute("DELETE FROM channel_metrics WHERE shot_id = ?", (shot_id,))
+        self._conn.commit()
 
     def metrics_for_shot(self, shot_id: int) -> list[dict]:
         cur = self._conn.execute(

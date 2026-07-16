@@ -192,3 +192,34 @@ def test_group_averages_single_mic_group(repo):
 
     averages = repo.group_averages(group_id)
     assert set(averages) == {MicPosition.SE}
+
+
+def test_set_shot_channels_clears_unsupplied_tag(repo):
+    batch_id = repo.create_batch("SUP-1")
+    group_id = repo.upsert_group(batch_id, "AR15", "M855")
+    shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)
+    repo.mark_shot(shot_id, group_id=group_id, ammo="M855", se_channel="AI 1", mr_channel="AI 2")
+
+    # Unlike mark_shot, a None tag is written through, not preserved.
+    repo.set_shot_channels(shot_id, se_channel="AI 1", mr_channel=None)
+
+    shot = repo.get_shot(shot_id)
+    assert (shot.se_channel, shot.mr_channel) == ("AI 1", None)
+
+
+def test_set_shot_channels_unknown_id_raises(repo):
+    with pytest.raises(LookupError):
+        repo.set_shot_channels(9999, se_channel="AI 1", mr_channel=None)
+
+
+def test_delete_channel_metrics_except(repo):
+    shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)
+    repo.save_channel_metric(shot_id, MicPosition.SE, _metric(160.0))
+    repo.save_channel_metric(shot_id, MicPosition.MR, _metric(150.0))
+
+    repo.delete_channel_metrics_except(shot_id, [MicPosition.SE])
+    assert {m["mic_position"] for m in repo.metrics_for_shot(shot_id)} == {"SE"}
+
+    # An empty keep set clears every row for the shot.
+    repo.delete_channel_metrics_except(shot_id, [])
+    assert repo.metrics_for_shot(shot_id) == []
