@@ -15,6 +15,11 @@ impulse-noise acoustic metrics, with local storage and data-management tools.
 Reference pressure: 20 µPa. Input: one `.dxd`/`.d7d` = one 100 ms frame
 (20,000 samples @ 200 kHz).
 
+The exact formulas, constants, and assumptions behind every metric are
+documented in [MATH.md](MATH.md). **Keep it in sync:** any change to the math
+models in `src/sound_metric_app/dsp/` (or the constants in `config.py`) must be
+reflected in `MATH.md` in the same change.
+
 ## Data Model & Workflow
 
 The app is organized around a pipeline that turns raw capture files into
