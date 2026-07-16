@@ -379,6 +379,43 @@ class WorkflowRepository(_SqliteStore):
         self._commit()
         return cur.rowcount > 0
 
+    def delete_empty_batches(self) -> int:
+        """Delete every batch that holds no groups; return how many were removed.
+
+        Runs after :meth:`delete_empty_groups` in a sweep: pruning a batch's
+        last shot-less group leaves the batch itself an empty shell (a re-marked
+        or closed batch that no longer holds anything), which this removes so the
+        tree does not accrete empty batches over time.
+        """
+        cur = self._conn.execute(
+            """
+            DELETE FROM batches
+            WHERE NOT EXISTS (SELECT 1 FROM groups WHERE groups.batch_id = batches.id)
+            """
+        )
+        self._commit()
+        return cur.rowcount
+
+    def delete_batch_if_empty(self, batch_id: int) -> bool:
+        """Delete a batch only if it holds no groups; return whether it was deleted.
+
+        Called after re-marking moves a shot's former group out from under it: if
+        that was the batch's last group, drop the now-empty batch so re-marking
+        the sole shot out of a (typically closed) batch does not leave it behind
+        as a shell. The ``WHERE NOT EXISTS`` guard makes this a no-op for a batch
+        that still has groups.
+        """
+        cur = self._conn.execute(
+            """
+            DELETE FROM batches
+            WHERE id = ?
+              AND NOT EXISTS (SELECT 1 FROM groups WHERE groups.batch_id = batches.id)
+            """,
+            (batch_id,),
+        )
+        self._commit()
+        return cur.rowcount > 0
+
     # ---- channel metrics ------------------------------------------------ #
 
     def save_channel_metric(

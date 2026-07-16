@@ -589,6 +589,9 @@ class BatchTreeView(_View):
         layout.addLayout(button_row)
 
     def refresh(self) -> None:
+        # Prune empty groups/batches before rendering; batch_tree() itself is a
+        # pure read, so the sweep is an explicit step on the refresh path.
+        self.controller.sweep_empty()
         self.tree.clear()
         for node in self.controller.batch_tree():
             batch = node.batch
@@ -623,6 +626,7 @@ class BatchTreeView(_View):
         self.tree.expandAll()
         self.tree.resizeColumnToContents(0)
         self.tree.resizeColumnToContents(1)
+        self.tree.resizeColumnToContents(2)
         self._update_actions_enabled()
 
     def _selected_entry(self) -> tuple | None:

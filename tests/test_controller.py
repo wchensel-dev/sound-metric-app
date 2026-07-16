@@ -218,20 +218,53 @@ def test_edit_marked_shot_moves_it_to_a_new_group(controller, inbox):
     assert [s.id for s in by_ammo["M855"]] == [shot_id]
 
 
-def test_batch_tree_sweeps_pre_existing_empty_groups(controller, inbox):
+def test_batch_tree_is_a_pure_read(controller, inbox):
+    # batch_tree() must not mutate: a stray empty group survives a load and is
+    # only removed by the explicit sweep_empty() maintenance pass.
+    _ingest_and_mark_one(controller, inbox, ammo="M855")
+    batch = controller.batches()[0]
+    with controller._repo() as repo:
+        stray = repo.upsert_group(batch.id, "AR15", "STRAY")
+
+    tree = controller.batch_tree()  # read only
+
+    assert stray in {g.group.id for node in tree for g in node.groups}
+
+
+def test_sweep_empty_removes_pre_existing_empty_groups(controller, inbox):
     # Simulate a shot-less group left behind by an edit before per-re-mark
-    # cleanup existed; refreshing the tree (which calls batch_tree) drops it.
+    # cleanup existed; the refresh path's sweep_empty() drops it.
     shot_id = _ingest_and_mark_one(controller, inbox, ammo="M855")
     batch = controller.batches()[0]
     with controller._repo() as repo:
         stray = repo.upsert_group(batch.id, "AR15", "STRAY")
     assert stray in {g.id for g in controller.groups_for_batch(batch.id)}
 
-    tree = controller.batch_tree()
+    controller.sweep_empty()
 
-    group_ids = {g.group.id for node in tree for g in node.groups}
+    group_ids = {g.id for g in controller.groups_for_batch(batch.id)}
     assert stray not in group_ids
     assert controller.get_shot(shot_id).group_id in group_ids  # marked shot's group kept
+
+
+def test_remark_out_of_closed_batch_prunes_the_empty_batch(controller, inbox):
+    # A closed batch with its sole shot re-marked into a new open batch must not
+    # leave the emptied closed batch behind as a shell.
+    shot_id = _ingest_and_mark_one(controller, inbox, ammo="M855")
+    closed_batch = controller.batches()[0]
+    controller.close_batch(closed_batch.id)
+
+    # Re-mark the shot: a closed batch is never the SKU's open batch, so this
+    # re-clusters into a new open batch and empties the closed one.
+    controller.mark(
+        shot_id,
+        ammo="M855",
+        channel_map={"AI 1": MicPosition.SE, "AI 2": MicPosition.MR},
+    )
+
+    assert controller.get_batch(closed_batch.id) is None
+    batches = controller.batches()
+    assert len(batches) == 1 and not batches[0].closed
 
 
 def test_get_shot_returns_marked_shot(controller, inbox):

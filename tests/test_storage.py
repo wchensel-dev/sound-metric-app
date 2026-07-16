@@ -239,6 +239,33 @@ def test_delete_empty_groups_sweeps_all_shot_less_groups(repo):
     assert repo.delete_empty_groups() == 0
 
 
+def test_delete_batch_if_empty_removes_only_group_less_batches(repo):
+    empty = repo.create_batch("SUP-1")
+    occupied = repo.create_batch("SUP-2")
+    repo.upsert_group(occupied, "AR15", "M855")
+
+    assert repo.delete_batch_if_empty(empty) is True
+    assert repo.get_batch(empty) is None
+
+    # A batch that still holds a group is left untouched.
+    assert repo.delete_batch_if_empty(occupied) is False
+    assert repo.get_batch(occupied) is not None
+
+
+def test_delete_empty_batches_sweeps_all_group_less_batches(repo):
+    empty_a = repo.create_batch("SUP-1")
+    empty_b = repo.create_batch("SUP-2")
+    occupied = repo.create_batch("SUP-3")
+    repo.upsert_group(occupied, "AR15", "M855")
+
+    assert repo.delete_empty_batches() == 2
+    assert repo.get_batch(empty_a) is None
+    assert repo.get_batch(empty_b) is None
+    assert repo.get_batch(occupied) is not None
+    # Idempotent: a second sweep with nothing empty removes nothing.
+    assert repo.delete_empty_batches() == 0
+
+
 def test_close_batch(repo):
     batch_id = repo.create_batch("SUP-1")
     repo.close_batch(batch_id)

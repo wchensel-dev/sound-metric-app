@@ -111,6 +111,12 @@ class MarkingService:
         if shot is None:
             raise LookupError(f"No shot with id {shot_id}")
         previous_group_id = shot.group_id
+        # Remember the group's batch too: pruning an emptied group can leave its
+        # batch empty (e.g. re-marking the sole shot out of a closed batch).
+        previous_batch_id = None
+        if previous_group_id is not None:
+            previous_group = self._repo.get_group(previous_group_id)
+            previous_batch_id = previous_group.batch_id if previous_group else None
 
         sku = suppressor_sku or shot.suppressor_sku
         platform = test_platform or shot.test_platform
@@ -164,8 +170,14 @@ class MarkingService:
             self._repo.delete_channel_metrics_except(shot_id, metrics)
             # Re-marking into a different group may leave the former group empty;
             # drop it so the batch tree stays uncluttered and its name is re-usable.
+            # If that group was its batch's last, the batch is now an empty shell
+            # (the closed-batch re-mark flow), so prune it too.
             if previous_group_id is not None and previous_group_id != resolved.group_id:
-                self._repo.delete_group_if_empty(previous_group_id)
+                if (
+                    self._repo.delete_group_if_empty(previous_group_id)
+                    and previous_batch_id is not None
+                ):
+                    self._repo.delete_batch_if_empty(previous_batch_id)
 
         return MarkedShot(
             shot=self._repo.get_shot(shot_id),

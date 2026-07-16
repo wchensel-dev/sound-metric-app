@@ -210,19 +210,29 @@ class WorkflowController:
         with self._repo() as repo:
             return repo.shots_by_group(group_id)
 
+    def sweep_empty(self) -> None:
+        """Drop any shot-less groups and the batches their removal leaves empty.
+
+        An explicit maintenance pass the GUI runs on refresh, kept out of the
+        read accessors so loading the tree never mutates the DB. Empty groups are
+        swept first, then any batch left group-less by that sweep — cleaning up
+        containers left behind by an edit or by data predating per-re-mark
+        cleanup (see :meth:`WorkflowRepository.delete_empty_groups` and
+        :meth:`WorkflowRepository.delete_empty_batches`).
+        """
+        with self._repo() as repo:
+            repo.delete_empty_groups()
+            repo.delete_empty_batches()
+
     def batch_tree(self) -> list[BatchNode]:
         """The whole batch -> group -> shot tree, over a single connection.
 
         The GUI's batch tree renders all three levels at once; loading them here
         opens one repo instead of a connection per batch/group, and shot counts
-        come from ``len(node.shots)`` rather than a separate COUNT query.
-
-        Empty groups are swept before the tree is built, so a refresh cleans up
-        any group left shot-less by an earlier edit (see
-        :meth:`WorkflowRepository.delete_empty_groups`).
+        come from ``len(node.shots)`` rather than a separate COUNT query. This is
+        a pure read; call :meth:`sweep_empty` first to prune empty containers.
         """
         with self._repo() as repo:
-            repo.delete_empty_groups()
             return [
                 BatchNode(
                     batch=batch,
