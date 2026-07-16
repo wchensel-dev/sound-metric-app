@@ -174,6 +174,36 @@ def test_rename_batch_via_tree(window, qtbot, monkeypatch):
     assert _first_batch_item(bv).text(0).endswith("SKU SUP-FIXED")
 
 
+def test_double_click_edits_shots_not_parent_rows(window, qtbot, monkeypatch):
+    # Double-click is Qt's expand/collapse gesture on batch/group rows; it must
+    # not also route through _edit_selected there (only leaf shot rows edit).
+    window.ingest_view._ingest()
+    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)
+    first_id = int(window.ingest_view.table.item(0, 0).text())
+    window.open_marking_for(first_id)
+    mv = window.marking_view
+    qtbot.waitUntil(lambda: mv.se_combo.isEnabled() and mv.se_combo.count() >= 3, timeout=5000)
+    mv.ammo_edit.setText("M855")
+    mv._mark()
+    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 1, timeout=5000)
+
+    bv = window.batch_view
+    bv.refresh()
+    edited: list = []
+    monkeypatch.setattr(bv, "_edit_selected", lambda: edited.append(True))
+
+    batch_item = _first_batch_item(bv)
+    group_item = batch_item.child(0)
+    shot_item = group_item.child(0)
+
+    bv._on_item_double_clicked(batch_item, 0)
+    bv._on_item_double_clicked(group_item, 0)
+    assert edited == []  # parent rows: no edit modal
+
+    bv._on_item_double_clicked(shot_item, 0)
+    assert edited == [True]  # leaf shot row: edits
+
+
 def test_edit_shot_re_marks_with_corrected_ammo(window, qtbot):
     window.ingest_view._ingest()
     qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)

@@ -565,7 +565,9 @@ class BatchTreeView(_View):
         self.tree = QtWidgets.QTreeWidget()
         self.tree.setHeaderLabels(["Batch / Group / Shot", "Detail", "Timestamp"])
         self.tree.itemSelectionChanged.connect(self._update_actions_enabled)
-        self.tree.doubleClicked.connect(lambda *_: self._edit_selected())
+        # Only leaf shot rows edit on double-click; on a batch/group row that
+        # gesture is Qt's expand/collapse and must not also pop an edit modal.
+        self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         layout.addWidget(self.tree)
 
         button_row = QtWidgets.QHBoxLayout()
@@ -643,6 +645,11 @@ class BatchTreeView(_View):
         self.close_btn.setEnabled(selected is not None and not selected[1])
 
     # ---- edit ----------------------------------------------------------- #
+
+    def _on_item_double_clicked(self, item: QtWidgets.QTreeWidgetItem, _column: int) -> None:
+        entry = item.data(0, QtCore.Qt.UserRole)
+        if entry and entry[0] == "shot":
+            self._edit_selected()
 
     def _edit_selected(self) -> None:
         entry = self._selected_entry()
