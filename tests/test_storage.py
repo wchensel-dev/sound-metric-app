@@ -160,6 +160,36 @@ def test_remark_shot_preserves_unsupplied_fields(repo):
     assert shot.shot_order == 2
 
 
+def test_remark_shot_replace_optional_blanks_cleared_fields(repo):
+    batch_id = repo.create_batch("SUP-1")
+    group_id = repo.upsert_group(batch_id, "AR15", "M855")
+    shot_id = repo.add_unmarked_shot("SUP-1_AR15_002.dxd", "SUP-1", "AR15", 2)
+
+    repo.mark_shot(
+        shot_id,
+        group_id=group_id,
+        ammo="M855",
+        shot_order=2,
+        wind_speed=5.0,
+        temp=72.0,
+        relative_humidity=40.0,
+        se_channel="AI 1",
+        mr_channel="AI 2",
+        captured_at="2026-07-15T09:30:15",
+    )
+
+    # A full-form edit re-mark that clears the optional fields (passes None):
+    # replace_optional writes them exactly, so they are blanked, not preserved.
+    repo.mark_shot(shot_id, group_id=group_id, ammo="M855", replace_optional=True)
+
+    shot = repo.get_shot(shot_id)
+    assert shot.shot_order is None
+    assert shot.wind_speed is None and shot.temp is None and shot.relative_humidity is None
+    # Channels and captured_at are not governed by replace_optional; they persist.
+    assert shot.se_channel == "AI 1" and shot.mr_channel == "AI 2"
+    assert shot.captured_at == "2026-07-15T09:30:15"
+
+
 def test_add_unmarked_shot_is_idempotent(repo):
     a = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)
     b = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)

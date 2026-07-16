@@ -142,8 +142,14 @@ class WorkflowController:
         wind_speed: float | None = None,
         temp: float | None = None,
         relative_humidity: float | None = None,
+        replace_optional: bool = False,
     ) -> MarkedShot:
-        """Annotate a shot, tag SE/MR, and compute + store its metrics."""
+        """Annotate a shot, tag SE/MR, and compute + store its metrics.
+
+        ``replace_optional=True`` writes the optional per-shot fields (shot order
+        and environment) exactly, so a cleared field blanks the stored value —
+        used by the full-form edit dialog. Leave ``False`` for a partial re-mark.
+        """
         with self._repo() as repo:
             svc = MarkingService(repo, ClusteringService(repo), reader=self._capture_reader)
             return svc.mark(
@@ -156,6 +162,7 @@ class WorkflowController:
                 wind_speed=wind_speed,
                 temp=temp,
                 relative_humidity=relative_humidity,
+                replace_optional=replace_optional,
             )
 
     # ---- batches / groups / shots (read) -------------------------------- #

@@ -66,6 +66,7 @@ class MarkingService:
         wind_speed: float | None = None,
         temp: float | None = None,
         relative_humidity: float | None = None,
+        replace_optional: bool = False,
     ) -> MarkedShot:
         """Mark ``shot_id`` and compute its per-mic metrics.
 
@@ -82,8 +83,15 @@ class MarkingService:
             Batch/group keys. Default to the shot's provisional values parsed
             from its filename at ingest; pass them to override a mis-named file.
         shot_order, wind_speed, temp, relative_humidity:
-            Per-shot fields; each is preserved if omitted (the store only
-            overwrites values explicitly supplied).
+            Per-shot fields. By default each is preserved if omitted (the store
+            only overwrites values explicitly supplied). Pass
+            ``replace_optional=True`` for a full-form edit, where these are
+            written exactly and an omitted (``None``) field blanks the stored
+            value instead of preserving it.
+        replace_optional:
+            See ``shot_order`` et al. above. Leave ``False`` for a partial
+            re-mark (e.g. the CLI); set ``True`` when the caller supplies the
+            complete intended state, such as the GUI edit dialog.
 
         Returns
         -------
@@ -143,6 +151,7 @@ class MarkingService:
                 temp=temp,
                 relative_humidity=relative_humidity,
                 captured_at=captured_at,
+                replace_optional=replace_optional,
             )
             # channel_map fully defines this shot's tagging, so set the tags
             # definitively (clearing a mic dropped on re-mark) rather than letting

@@ -545,6 +545,9 @@ class ShotEditDialog(QtWidgets.QDialog):
                 wind_speed=_opt_float(self.wind_edit.text()),
                 temp=_opt_float(self.temp_edit.text()),
                 relative_humidity=_opt_float(self.rh_edit.text()),
+                # A full correction form: a cleared box means "blank this field",
+                # not "leave it as it was", so write the optional fields exactly.
+                replace_optional=True,
             )
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, "Invalid value", str(exc))

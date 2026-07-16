@@ -246,25 +246,43 @@ class WorkflowRepository(_SqliteStore):
         se_channel: str | None = None,
         mr_channel: str | None = None,
         captured_at: str | None = None,
+        replace_optional: bool = False,
     ) -> None:
         """Apply marking metadata, link to a group, and flag the shot marked.
 
-        ``group_id`` and ``ammo`` are always written. Every optional field
-        (``shot_order``, the environment/channel columns, and ``captured_at``) is
-        preserved when left unset, so re-marking to correct one field does not
-        clobber the others: a value is only overwritten when explicitly supplied.
+        ``group_id`` and ``ammo`` are always written. By default every optional
+        field (``shot_order``, the environment/channel columns, and
+        ``captured_at``) is preserved when left unset, so re-marking to correct
+        one field does not clobber the others: a value is only overwritten when
+        explicitly supplied. This suits a partial re-mark (e.g. the CLI setting a
+        single field).
+
+        Pass ``replace_optional=True`` for a full-form edit, where the caller
+        supplies the complete intended state and an unset user field means
+        *blank it*: the four user-editable optional fields (``shot_order``,
+        ``wind_speed``, ``temp``, ``relative_humidity``) are then written exactly,
+        so passing ``None`` clears them. The channel and ``captured_at`` columns
+        are unaffected — the service sets channels definitively via
+        :meth:`set_shot_channels` and always re-supplies ``captured_at`` from the
+        capture file.
 
         Raises ``LookupError`` if ``shot_id`` matches no shot.
         """
+
+        # Column names are hard-coded literals, so this f-string carries no
+        # injection surface; user values still bind through placeholders.
+        def _opt(column: str) -> str:
+            return "?" if replace_optional else f"COALESCE(?, {column})"
+
         cur = self._conn.execute(
-            """
+            f"""
             UPDATE shots SET
                 group_id = ?,
                 ammo = ?,
-                shot_order = COALESCE(?, shot_order),
-                wind_speed = COALESCE(?, wind_speed),
-                temp = COALESCE(?, temp),
-                relative_humidity = COALESCE(?, relative_humidity),
+                shot_order = {_opt("shot_order")},
+                wind_speed = {_opt("wind_speed")},
+                temp = {_opt("temp")},
+                relative_humidity = {_opt("relative_humidity")},
                 se_channel = COALESCE(?, se_channel),
                 mr_channel = COALESCE(?, mr_channel),
                 captured_at = COALESCE(?, captured_at),
