@@ -157,9 +157,55 @@ sma-analyze path\to\file.dxd
 # Compute and store in a local SQLite DB
 sma-analyze path\to\file.dxd --store sound_metrics.db
 
-# Desktop GUI
+# Desktop GUI (workflow app)
 python -m sound_metric_app.ui.main_window
 ```
+
+The desktop app is the GUI counterpart to the `sma` CLI below — same services,
+same local database. It opens four tabs matching the workflow:
+
+- **Ingest** — shows the configured input folder, an **Ingest** button, and the
+  list of Unmarked Data Sets (with an ingest summary of malformed/unreadable
+  files). Select a shot and click **Mark selected shot →** to jump to marking.
+- **Mark** — pick an unmarked shot, tag its **SE**/**MR** channels (listed from
+  the file), fill in ammo + metadata, and click **Mark** to compute and store
+  its metrics.
+- **Batches** — the Batch → Group → Shot tree, with **Close batch**.
+- **Report** — per-group SE vs MR averages, kept in separate rows (never mixed).
+
+Ingest and mark run off the UI thread, so a large capture never freezes the
+window; service errors surface as dialogs.
+
+### Workflow CLI (`sma`)
+
+The `sma` command drives the full ingest → mark → cluster → report pipeline over
+a local SQLite database (`--db`, default `sound_metrics.db`).
+
+```powershell
+# One-time: set the input folder the ingest command scans by default
+sma config set-input-folder C:\captures\inbox
+sma config show
+
+# Ingest new capture files as Unmarked Data Sets (uses the configured folder,
+# or pass one explicitly). --no-validate skips the readability check.
+sma ingest
+sma ingest C:\captures\inbox
+
+# See what's waiting, then mark a shot: tag SE/MR channels + test metadata
+sma list unmarked
+sma mark 1 --ammo M855 --se "AI 1" --mr "AI 2" --wind-speed 5 --temp 72 --rh 40
+
+# Browse the hierarchy
+sma list batches
+sma list groups --batch 1
+
+# Per-group SE/MR averages, then close the batch to define it
+sma report --batch 1
+sma report --group 1
+sma close-batch 1
+```
+
+The legacy single-file analyzer (`sma-analyze`) is unchanged.
 
 ## Tests
 
@@ -169,6 +215,12 @@ pytest
 
 Point `SMA_SAMPLE_DXD` at a real file (or drop one in `data/`) to enable the
 real-file ingestion tests.
+
+The GUI tests run headless via Qt's offscreen platform:
+
+```powershell
+$env:QT_QPA_PLATFORM = "offscreen"; pytest
+```
 
 ## Validation TODO
 

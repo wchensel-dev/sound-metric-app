@@ -142,6 +142,11 @@ class WorkflowRepository(_SqliteStore):
         ).fetchone()
         return _row_to_batch(row) if row else None
 
+    def all_batches(self) -> list[Batch]:
+        """Every batch, oldest first (for the CLI/GUI ``list batches`` view)."""
+        cur = self._conn.execute("SELECT * FROM batches ORDER BY id")
+        return [_row_to_batch(r) for r in cur.fetchall()]
+
     # ---- groups --------------------------------------------------------- #
 
     def upsert_group(self, batch_id: int, test_platform: str, ammo: str) -> int:
