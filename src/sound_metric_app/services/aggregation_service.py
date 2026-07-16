@@ -55,10 +55,9 @@ class AggregationService:
 
     def _averages_for(self, group: Group) -> GroupAverages:
         """Averages for an already-loaded group, skipping the ``get_group`` re-fetch."""
-        shots = self._repo.shots_by_group(group.id)
         return GroupAverages(
             group=group,
-            n_shots=len(shots),
+            n_shots=self._repo.count_shots_in_group(group.id),
             averages=self._repo.group_averages(group.id),
         )
 

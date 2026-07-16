@@ -289,6 +289,14 @@ class WorkflowRepository(_SqliteStore):
         )
         return [_row_to_shot(r) for r in cur.fetchall()]
 
+    def count_shots_in_group(self, group_id: int) -> int:
+        """Number of shots in a group, without materializing their rows."""
+        cur = self._conn.execute(
+            "SELECT COUNT(*) FROM shots WHERE group_id = ?",
+            (group_id,),
+        )
+        return int(cur.fetchone()[0])
+
     # ---- channel metrics ------------------------------------------------ #
 
     def save_channel_metric(
