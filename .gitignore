@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual envs
+.venv/
+venv/
+
+# Local data / databases
+*.db
+data/*.dxd
+data/*.d7d
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.vscode/
