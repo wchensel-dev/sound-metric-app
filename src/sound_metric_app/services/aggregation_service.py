@@ -25,11 +25,19 @@ class GroupAverages:
     to ``{peak_db, peak_dba, peak_impulse_db, liaeq_100ms_db, n}`` where ``n`` is
     the number of shots contributing that position. Positions absent from the
     group are omitted, so a single-mic group yields a single entry.
+
+    ``shots`` is the un-averaged drill-down behind those averages: each present
+    position maps to a list of the individual shot metric rows the average was
+    taken over (see
+    :meth:`~sound_metric_app.storage.WorkflowRepository.shot_metrics_for_group`).
+    Its keys always match ``averages``; it is a required field so this invariant
+    cannot be broken by omitting it at construction.
     """
 
     group: Group
     n_shots: int
     averages: dict[MicPosition, dict]
+    shots: dict[MicPosition, list[dict]]
 
 
 @dataclass
@@ -59,6 +67,7 @@ class AggregationService:
             group=group,
             n_shots=self._repo.count_shots_in_group(group.id),
             averages=self._repo.group_averages(group.id),
+            shots=self._repo.shot_metrics_for_group(group.id),
         )
 
     def batch_report(self, batch_id: int) -> BatchReport:

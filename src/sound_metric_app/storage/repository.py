@@ -83,6 +83,17 @@ class WorkflowRepository(_SqliteStore):
         # column on databases created before it existed.
         self._add_column_if_missing("shots", "captured_at", "TEXT")
 
+        if self._schema_version() < 1:
+            # peak_impulse_db used to be the maximum Impulse level [dB]; it is
+            # now that level integrated over the frame [dB*ms] (MATH.md §6).
+            # Older rows cannot be converted -- the integral needs the waveform,
+            # not the stored scalar -- so blank them rather than let AVG() mix
+            # the two unit systems into a number that looks plausible and means
+            # nothing. NULL reads as "unknown" and AVG() skips it. Re-processing
+            # the source files repopulates these rows in the new units.
+            self._conn.execute("UPDATE channel_metrics SET peak_impulse_db = NULL")
+            self._set_schema_version(1)
+
     #: True while a :meth:`transaction` block is active, so the individual
     #: mutating methods defer their commit to the enclosing block.
     _in_transaction: bool = False
@@ -509,6 +520,43 @@ class WorkflowRepository(_SqliteStore):
                 **{k: r[k] for k in _METRIC_FIELDS},
                 "n": int(r["n"]),
             }
+        return out
+
+    def shot_metrics_for_group(self, group_id: int) -> dict[MicPosition, list[dict]]:
+        """Per-shot metric rows for a group, grouped by mic position.
+
+        The un-averaged counterpart to :meth:`group_averages`: instead of one
+        mean per position, returns every contributing shot's own metrics so a
+        report can drill down from a group's SE/MR average into the individual
+        shots behind it. Maps each present :class:`MicPosition` to a list of
+        ``{shot_id, shot_order, source_file, peak_db, peak_dba,
+        peak_impulse_db, liaeq_100ms_db}``, ordered by shot order then id.
+        Positions absent from the group are omitted.
+        """
+        cur = self._conn.execute(
+            """
+            SELECT cm.mic_position       AS pos,
+                   s.id                  AS shot_id,
+                   s.shot_order          AS shot_order,
+                   s.source_file         AS source_file,
+                   cm.peak_db, cm.peak_dba, cm.peak_impulse_db, cm.liaeq_100ms_db
+            FROM channel_metrics cm
+            JOIN shots s ON s.id = cm.shot_id
+            WHERE s.group_id = ?
+            ORDER BY cm.mic_position, s.shot_order, s.id
+            """,
+            (group_id,),
+        )
+        out: dict[MicPosition, list[dict]] = {}
+        for r in cur.fetchall():
+            out.setdefault(MicPosition(r["pos"]), []).append(
+                {
+                    "shot_id": int(r["shot_id"]),
+                    "shot_order": r["shot_order"],
+                    "source_file": r["source_file"],
+                    **{k: r[k] for k in _METRIC_FIELDS},
+                }
+            )
         return out
 
 

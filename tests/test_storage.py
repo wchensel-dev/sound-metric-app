@@ -7,7 +7,7 @@ import sqlite3
 import pytest
 
 from sound_metric_app.models import MetricResult, MicPosition
-from sound_metric_app.storage import WorkflowRepository
+from sound_metric_app.storage import ResultsDatabase, WorkflowRepository
 
 
 def _metric(peak: float, channel: str = "AI 1") -> MetricResult:
@@ -83,6 +83,65 @@ def test_migrate_adds_captured_at_to_legacy_shots_table(tmp_path):
     with WorkflowRepository(db_path) as repo:
         cols = {r["name"] for r in repo._conn.execute("PRAGMA table_info(shots)")}
         assert "captured_at" in cols
+
+
+def test_migrate_blanks_pre_dbms_impulse_values(tmp_path):
+    # peak_impulse_db changed from a max level [dB] to a time integral [dB*ms].
+    # Rows stored under the old definition are unconvertible, so opening the
+    # repo must blank them -- otherwise AVG() averages dB against dB*ms.
+    db_path = tmp_path / "stale.db"
+    with WorkflowRepository(db_path) as repo:
+        batch_id = repo.create_batch("SUP-1")
+        group_id = repo.upsert_group(batch_id, "AR15", "M855")
+        shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", shot_order=1)
+        repo.mark_shot(shot_id, group_id=group_id, ammo="M855", se_channel="AI 1")
+        repo.save_channel_metric(shot_id, MicPosition.SE, _metric(150.0))
+        # Pretend this row predates the unit change.
+        repo._conn.execute("DELETE FROM schema_version")
+        repo._conn.commit()
+
+    with WorkflowRepository(db_path) as repo:
+        avgs = repo.group_averages(group_id)
+        assert avgs[MicPosition.SE]["peak_impulse_db"] is None
+        # Only the impulse column is affected; the true-dB metrics are untouched.
+        assert avgs[MicPosition.SE]["peak_db"] == 150.0
+        assert repo._schema_version() == 1
+
+
+def test_migrate_leaves_current_impulse_values_alone(tmp_path):
+    # A row written after the stamp exists must survive later re-opens.
+    db_path = tmp_path / "current.db"
+    with WorkflowRepository(db_path) as repo:
+        batch_id = repo.create_batch("SUP-1")
+        group_id = repo.upsert_group(batch_id, "AR15", "M855")
+        shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", shot_order=1)
+        repo.mark_shot(shot_id, group_id=group_id, ammo="M855", se_channel="AI 1")
+        repo.save_channel_metric(shot_id, MicPosition.SE, _metric(15000.0))
+
+    with WorkflowRepository(db_path) as repo:
+        assert repo.group_averages(group_id)[MicPosition.SE]["peak_impulse_db"] == 15000.0
+
+
+def test_both_stores_migrate_when_sharing_one_file(tmp_path):
+    # The two stores share a .db, so the version marker must be per-store: the
+    # first one to connect must not stamp the second out of its own migration.
+    db_path = tmp_path / "shared.db"
+    with ResultsDatabase(db_path) as db:
+        db.add_result(_metric(150.0))
+    with WorkflowRepository(db_path) as repo:
+        shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", shot_order=1)
+        repo.save_channel_metric(shot_id, MicPosition.SE, _metric(150.0))
+        repo._conn.execute("DELETE FROM schema_version")
+        repo._conn.commit()
+
+    # WorkflowRepository connects first and stamps itself...
+    with WorkflowRepository(db_path) as repo:
+        row = repo._conn.execute("SELECT peak_impulse_db FROM channel_metrics").fetchone()
+        assert row["peak_impulse_db"] is None
+    # ...which must not stop ResultsDatabase from blanking its own stale row.
+    with ResultsDatabase(db_path) as db:
+        assert db.all_results()[0]["peak_impulse_db"] is None
+        assert db.all_results()[0]["peak_db"] == 150.0
 
 
 def test_batch_group_shot_metrics_round_trip(repo):

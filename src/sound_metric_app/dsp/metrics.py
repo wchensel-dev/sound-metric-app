@@ -59,5 +59,19 @@ def impulse_weighted_level(
 
 
 def peak_impulse_db(pressure: np.ndarray, fs: float) -> float:
-    """Maximum of the Impulse time-weighted level (dB)."""
-    return float(np.max(impulse_weighted_level(pressure, fs)))
+    """Impulse: time-integral of the Impulse time-weighted level (dB*ms).
+
+    Forward-Euler (rectangular) numerical integration of the sample-by-sample
+    Impulse level over the frame::
+
+        Impulse = sum_n L_I[n] * dt        dt = 1000 / fs  (ms)
+
+    giving units of dB*ms. Zero-power samples (log10 -> -inf) are skipped so a
+    silent frame integrates to 0 rather than -inf. NaN samples are deliberately
+    NOT skipped: a NaN in the input propagates to the result so contaminated
+    data surfaces instead of masquerading as a plausible level.
+    """
+    levels = impulse_weighted_level(pressure, fs)
+    keep = levels != -np.inf
+    dt_ms = 1000.0 / fs
+    return float(np.sum(levels[keep]) * dt_ms)

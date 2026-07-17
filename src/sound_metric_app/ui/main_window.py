@@ -29,6 +29,31 @@ from .controller import WorkflowController
 _NONE_LABEL = "(none)"
 
 
+def _style_grid_tree(tree: QtWidgets.QTreeWidget) -> None:
+    """Give a ``QTreeWidget`` visible column/row grid lines.
+
+    A tree has no built-in grid, so we draw one: per-item borders supply the
+    column and row rules and alternating row colours make wide numeric rows
+    easier to scan. Colours come from ``palette(...)`` so the grid tracks the
+    active light/dark theme instead of clashing with it. Shared by the Report
+    and Batches trees so both read the same way.
+    """
+    tree.setAlternatingRowColors(True)
+    tree.header().setSectionsMovable(False)
+    tree.setStyleSheet(
+        "QTreeWidget {"
+        " alternate-background-color: palette(alternate-base);"
+        " background: palette(base); }"
+        "QTreeWidget::item {"
+        " border-right: 1px solid palette(mid);"
+        " border-bottom: 1px solid palette(mid);"
+        " padding: 2px 4px; }"
+        "QTreeWidget::item:selected {"
+        " background: palette(highlight);"
+        " color: palette(highlighted-text); }"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Off-thread task runner
 # --------------------------------------------------------------------------- #
@@ -242,8 +267,12 @@ class MarkingView(_View):
         form.addRow("SE channel:", self.se_combo)
         form.addRow("MR channel:", self.mr_combo)
 
-        self.ammo_edit = QtWidgets.QLineEdit()
-        form.addRow("Ammo *:", self.ammo_edit)
+        self.ammo_combo = QtWidgets.QComboBox()
+        # Editable so a one-off ammo can still be typed, but the configured
+        # presets (Settings ▸ Ammo definitions) are one click away.
+        self.ammo_combo.setEditable(True)
+        self.ammo_combo.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        form.addRow("Ammo *:", self.ammo_combo)
         self.sku_edit = QtWidgets.QLineEdit()
         form.addRow("SKU override:", self.sku_edit)
         self.platform_edit = QtWidgets.QLineEdit()
@@ -272,6 +301,7 @@ class MarkingView(_View):
 
     def refresh(self) -> None:
         """Reload the unmarked-shot picker, preserving the current selection."""
+        self._populate_ammo()
         current = self._current_shot_id()
         shots = self.controller.unmarked_shots()
         self.shot_combo.blockSignals(True)
@@ -286,6 +316,28 @@ class MarkingView(_View):
             self._on_shot_changed()
         else:
             self.shot_combo.setCurrentIndex(index)
+
+    def _populate_ammo(self) -> None:
+        """Reload the ammo preset list, keeping whatever the user has typed/chosen."""
+        # This runs synchronously from refresh() (including at launch, via
+        # MainWindow.notify_changed), so a malformed ammo_definitions setting must
+        # surface as a dialog rather than escaping as an unhandled crash — the
+        # same treatment the async config read paths get from _run_async.
+        try:
+            presets = self.controller.ammo_definitions()
+        except ValueError as exc:
+            QtWidgets.QMessageBox.critical(self, "Error", str(exc))
+            presets = []
+        current = self.ammo_combo.currentText()
+        self.ammo_combo.blockSignals(True)
+        self.ammo_combo.clear()
+        self.ammo_combo.addItems(presets)
+        # Leave the field blank rather than silently defaulting to the first
+        # preset — ammo is required, so the user must pick or type it.
+        self.ammo_combo.setCurrentText(current)
+        if not current:
+            self.ammo_combo.setCurrentIndex(-1)
+        self.ammo_combo.blockSignals(False)
 
     def select_shot(self, shot_id: int) -> None:
         """Focus the picker on ``shot_id`` (called from the Ingest view)."""
@@ -365,7 +417,7 @@ class MarkingView(_View):
             QtWidgets.QMessageBox.information(self, "No shot", "No unmarked shot selected.")
             return
 
-        ammo = self.ammo_edit.text().strip()
+        ammo = self.ammo_combo.currentText().strip()
         if not ammo:
             QtWidgets.QMessageBox.warning(self, "Missing ammo", "Ammo is required to mark a shot.")
             return
@@ -420,7 +472,8 @@ class MarkingView(_View):
                     f"LIAeq {result.liaeq_100ms_db:.2f} dBA"
                 )
         self.status_label.setText("\n".join(parts))
-        self.ammo_edit.clear()
+        self.ammo_combo.setCurrentIndex(-1)
+        self.ammo_combo.clearEditText()
         self.sku_edit.clear()
         self.platform_edit.clear()
         self.shot_order_edit.clear()
@@ -453,6 +506,7 @@ class ShotEditDialog(QtWidgets.QDialog):
         platform: str,
         ammo: str,
         channel_names: list[str],
+        ammo_definitions: list[str] | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -474,8 +528,12 @@ class ShotEditDialog(QtWidgets.QDialog):
         form.addRow("SE channel:", self.se_combo)
         form.addRow("MR channel:", self.mr_combo)
 
-        self.ammo_edit = QtWidgets.QLineEdit(ammo or "")
-        form.addRow("Ammo *:", self.ammo_edit)
+        self.ammo_combo = QtWidgets.QComboBox()
+        self.ammo_combo.setEditable(True)
+        self.ammo_combo.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        self.ammo_combo.addItems(ammo_definitions or [])
+        self.ammo_combo.setCurrentText(ammo or "")
+        form.addRow("Ammo *:", self.ammo_combo)
         self.sku_edit = QtWidgets.QLineEdit(sku or "")
         form.addRow("SKU *:", self.sku_edit)
         self.platform_edit = QtWidgets.QLineEdit(platform or "")
@@ -505,7 +563,7 @@ class ShotEditDialog(QtWidgets.QDialog):
         return None if text in (_NONE_LABEL, "") else text
 
     def _on_accept(self) -> None:
-        ammo = self.ammo_edit.text().strip()
+        ammo = self.ammo_combo.currentText().strip()
         if not ammo:
             QtWidgets.QMessageBox.warning(self, "Missing ammo", "Ammo is required.")
             return
@@ -571,6 +629,7 @@ class BatchTreeView(_View):
         # Only leaf shot rows edit on double-click; on a batch/group row that
         # gesture is Qt's expand/collapse and must not also pop an edit modal.
         self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        _style_grid_tree(self.tree)
         layout.addWidget(self.tree)
 
         button_row = QtWidgets.QHBoxLayout()
@@ -714,6 +773,7 @@ class BatchTreeView(_View):
             platform=group.test_platform,
             ammo=group.ammo,
             channel_names=[c.name for c in channels],
+            ammo_definitions=self.controller.ammo_definitions(),
             parent=self,
         )
         if dialog.exec() != QtWidgets.QDialog.Accepted:
@@ -752,7 +812,8 @@ class BatchTreeView(_View):
 
 
 class ReportView(_View):
-    _COLUMNS = ["Group", "Mic", "n", "Peak dB", "Peak dBA", "Peak Impulse dB", "LIAeq,100ms dBA"]
+    _COLUMNS = ["Group / Shot", "Mic", "n", "Peak dB", "Peak dBA", "Peak Impulse dB·ms", "LIAeq,100ms dBA"]
+    _METRIC_KEYS = ("peak_db", "peak_dba", "peak_impulse_db", "liaeq_100ms_db")
 
     def __init__(self, controller: WorkflowController, main: "MainWindow"):
         super().__init__(controller, main)
@@ -765,11 +826,14 @@ class ReportView(_View):
         picker_row.addWidget(self.batch_combo, 1)
         layout.addLayout(picker_row)
 
-        self.table = QtWidgets.QTableWidget(0, len(self._COLUMNS))
-        self.table.setHorizontalHeaderLabels(self._COLUMNS)
-        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.table)
+        # A tree, not a flat table: each group's SE/MR average is a top-level
+        # row that expands to reveal the individual shots it averages over.
+        self.tree = QtWidgets.QTreeWidget()
+        self.tree.setColumnCount(len(self._COLUMNS))
+        self.tree.setHeaderLabels(self._COLUMNS)
+        self.tree.setRootIsDecorated(True)
+        _style_grid_tree(self.tree)
+        layout.addWidget(self.tree)
 
     def refresh(self) -> None:
         current = self.batch_combo.currentData()
@@ -787,40 +851,110 @@ class ReportView(_View):
         self._load_report()
 
     def _load_report(self, *_args) -> None:
-        self.table.setRowCount(0)
+        self.tree.clear()
         batch_id = self.batch_combo.currentData()
         if batch_id is None:
             return
         report = self.controller.batch_report(batch_id)
         for group_avg in report.groups:
             g = group_avg.group
-            group_label = f"#{g.id}  {g.test_platform} / {g.ammo}"
+            group_label = f"{g.test_platform} / {g.ammo}"
             if not group_avg.averages:
-                self._add_row([group_label, "—", "0", "no metrics", "", "", ""])
+                self._add_top([group_label, "—", "0", "no metrics", "", "", ""])
                 continue
+            # One top-level row per mic (SE, MR kept separate), labelled with the
+            # group only on the first so the pair reads as a unit; each carries
+            # its shots as expandable children.
             for position in (MicPosition.SE, MicPosition.MR):
                 avg = group_avg.averages.get(position)
                 if avg is None:
                     continue
-                self._add_row(
+                avg_item = self._add_top(
                     [
                         group_label,
                         position.value,
                         str(avg["n"]),
-                        f"{avg['peak_db']:.2f}",
-                        f"{avg['peak_dba']:.2f}",
-                        f"{avg['peak_impulse_db']:.2f}",
-                        f"{avg['liaeq_100ms_db']:.2f}",
+                        *(_format_metric(avg[k]) for k in self._METRIC_KEYS),
                     ]
                 )
+                for shot in group_avg.shots.get(position, ()):
+                    avg_item.addChild(self._shot_item(shot))
                 group_label = ""  # only label the first mic row of each group
-        self.table.resizeColumnsToContents()
+        for col in range(len(self._COLUMNS)):
+            self.tree.resizeColumnToContents(col)
 
-    def _add_row(self, values: list[str]) -> None:
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-        for col, text in enumerate(values):
-            self.table.setItem(row, col, QtWidgets.QTableWidgetItem(text))
+    def _shot_item(self, shot: dict) -> QtWidgets.QTreeWidgetItem:
+        order = shot.get("shot_order")
+        label = f"Shot {order}" if order is not None else Path(shot["source_file"]).name
+        return QtWidgets.QTreeWidgetItem(
+            [label, "", "", *(_format_metric(shot[k]) for k in self._METRIC_KEYS)]
+        )
+
+    def _add_top(self, values: list[str]) -> QtWidgets.QTreeWidgetItem:
+        item = QtWidgets.QTreeWidgetItem(values)
+        self.tree.addTopLevelItem(item)
+        return item
+
+
+# --------------------------------------------------------------------------- #
+# Settings
+# --------------------------------------------------------------------------- #
+
+
+class AmmoDefinitionsDialog(QtWidgets.QDialog):
+    """Manage the ammo presets offered when marking a shot.
+
+    A plain list editor: add a typed ammo type, remove a selected one, then Save.
+    The caller persists the collected list via the controller. Order is preserved
+    and normalization (trim/de-dup) happens on save in :mod:`config`.
+    """
+
+    def __init__(self, definitions: list[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Ammo definitions")
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(QtWidgets.QLabel("Ammo types offered when marking a shot:"))
+
+        self.list = QtWidgets.QListWidget()
+        self.list.addItems(definitions)
+        layout.addWidget(self.list)
+
+        entry_row = QtWidgets.QHBoxLayout()
+        self.entry = QtWidgets.QLineEdit()
+        self.entry.setPlaceholderText("e.g. LC M855 (5.56)")
+        self.entry.returnPressed.connect(self._add)
+        add_btn = QtWidgets.QPushButton("Add")
+        add_btn.clicked.connect(self._add)
+        remove_btn = QtWidgets.QPushButton("Remove selected")
+        remove_btn.clicked.connect(self._remove)
+        entry_row.addWidget(self.entry, 1)
+        entry_row.addWidget(add_btn)
+        entry_row.addWidget(remove_btn)
+        layout.addLayout(entry_row)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _add(self) -> None:
+        name = self.entry.text().strip()
+        if not name:
+            return
+        if not self.list.findItems(name, QtCore.Qt.MatchExactly):
+            self.list.addItem(name)
+        self.entry.clear()
+        self.entry.setFocus()
+
+    def _remove(self) -> None:
+        for item in self.list.selectedItems():
+            self.list.takeItem(self.list.row(item))
+
+    def definitions(self) -> list[str]:
+        """The ammo types currently listed, in display order."""
+        return [self.list.item(i).text() for i in range(self.list.count())]
 
 
 # --------------------------------------------------------------------------- #
@@ -849,6 +983,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(self.tabs)
 
         self._views = [self.ingest_view, self.marking_view, self.batch_view, self.report_view]
+        self._build_menus()
+        self.notify_changed()
+
+    def _build_menus(self) -> None:
+        settings_menu = self.menuBar().addMenu("Settings")
+        ammo_action = settings_menu.addAction("Ammo definitions…")
+        ammo_action.triggered.connect(self._edit_ammo_definitions)
+
+    def _edit_ammo_definitions(self) -> None:
+        """Open the ammo-preset editor; on save, persist and refresh the mark form."""
+        dialog = AmmoDefinitionsDialog(self.controller.ammo_definitions(), parent=self)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        self.controller.set_ammo_definitions(dialog.definitions())
         self.notify_changed()
 
     def _on_tab_changed(self, index: int) -> None:
@@ -873,6 +1021,17 @@ class MainWindow(QtWidgets.QMainWindow):
 def _str_or_empty(value) -> str:
     """Render an optional field for a pre-filled edit box (``None`` -> "")."""
     return "" if value is None else str(value)
+
+
+def _format_metric(value) -> str:
+    """Render a metric value for a report cell (``None`` -> "—").
+
+    Metric columns are nullable REAL (and the schema-v1 migration blanks
+    ``peak_impulse_db`` on pre-existing rows), so a value can arrive as ``None``.
+    Show an em-dash for the one missing cell instead of letting ``f"{None:.2f}"``
+    raise and abort the whole report render.
+    """
+    return "—" if value is None else f"{value:.2f}"
 
 
 def _format_captured_at(captured_at: str | None) -> str:

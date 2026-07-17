@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 from scipy import signal
 
-from sound_metric_app.config import P_REF
-from sound_metric_app.dsp.metrics import leq_db, peak_db
+from sound_metric_app.config import P_REF, WINDOW_MS
+from sound_metric_app.dsp.metrics import (
+    impulse_weighted_level,
+    leq_db,
+    peak_db,
+    peak_impulse_db,
+)
+from sound_metric_app.dsp.processor import MetricsProcessor
 from sound_metric_app.dsp.weighting import a_weighting_sos
+from sound_metric_app.models import Frame
 
 FS = 200_000.0
 
@@ -45,3 +54,57 @@ def test_a_weighting_response(freq, expected_db, tol):
     _, h = signal.sosfreqz(sos, worN=[freq], fs=FS)
     mag_db = 20 * np.log10(np.abs(h[0]))
     assert mag_db == pytest.approx(expected_db, abs=tol)
+
+
+def test_peak_impulse_db_silent_frame_integrates_to_zero():
+    # An all-zero (silent) frame: every sample is -inf and is skipped, so the
+    # integral is exactly 0 rather than -inf.
+    x = np.zeros(int(FS * 0.1), dtype=np.float64)
+    assert peak_impulse_db(x, FS) == 0.0
+
+
+def test_peak_impulse_db_applies_db_ms_dt_factor():
+    # peak_impulse_db integrates the Impulse level with dt = 1000/fs (ms) to give
+    # dB*ms. Pin that factor against the underlying level so a dropped dt, a
+    # seconds-vs-ms mixup (dt = 1/fs), or a sign error can't pass unnoticed --
+    # the silent/NaN tests are blind to all three.
+    x = _sine(1000.0, amp_pa=1.0, dur_s=0.1)
+    levels = impulse_weighted_level(x, FS)
+    expected = float(np.sum(levels[levels != -np.inf]) * (1000.0 / FS))
+    # A ~90 dB sine integrated over 100 ms is a large positive dB*ms value, not
+    # the bare dB sum (dt dropped) or a 1000x-smaller dB*s value (dt in seconds).
+    assert expected > 0.0
+    assert peak_impulse_db(x, FS) == pytest.approx(expected)
+
+
+def test_peak_impulse_db_nan_input_surfaces_as_nan():
+    # A NaN-contaminated frame must NOT be silently reported as 0.0 (a plausible
+    # silent-frame value); the NaN has to propagate so the corruption is visible.
+    x = _sine(1000.0, amp_pa=1.0, dur_s=0.1)
+    x[len(x) // 2] = np.nan
+    assert np.isnan(peak_impulse_db(x, FS))
+
+
+def _frame(n_samples: int) -> Frame:
+    return Frame(
+        samples=np.zeros(n_samples, dtype=np.float64),
+        sample_rate=FS,
+        channel="AI 1",
+        source_file="SUP_AR15_001.dxd",
+    )
+
+
+def test_processor_no_warning_for_nominal_duration():
+    # 100 ms at 200 kHz -> 20 000 samples: no off-nominal warning.
+    frame = _frame(int(FS * WINDOW_MS / 1000.0))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        MetricsProcessor().process(frame)
+
+
+def test_processor_warns_for_off_nominal_duration():
+    # 120 ms frame: peak_impulse_db integrates over the frame, so the extra
+    # length makes it non-comparable; the processor should warn.
+    frame = _frame(int(FS * 0.120))
+    with pytest.warns(UserWarning, match="not the nominal"):
+        MetricsProcessor().process(frame)

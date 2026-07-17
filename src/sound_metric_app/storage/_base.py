@@ -14,6 +14,17 @@ from typing import Self
 
 from ..config import DEFAULT_DB_PATH
 
+#: Per-store schema version marker. Keyed by store class name rather than using
+#: ``PRAGMA user_version`` because the stores share one database file, so a
+#: file-level counter bumped by whichever store connected first would starve the
+#: other's migrations.
+_VERSION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    store   TEXT PRIMARY KEY,
+    version INTEGER NOT NULL
+);
+"""
+
 
 class _SqliteStore:
     """Base for the local-SQLite data wrappers.
@@ -34,6 +45,7 @@ class _SqliteStore:
         self._conn.row_factory = sqlite3.Row
         for pragma in self._PRAGMAS:
             self._conn.execute(pragma)
+        self._conn.executescript(_VERSION_SCHEMA)
         self._conn.executescript(self._SCHEMA)
         self._migrate()
         self._conn.commit()
@@ -52,6 +64,29 @@ class _SqliteStore:
         existing = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
         if column not in existing:
             self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+    def _schema_version(self) -> int:
+        """This store's data version in the open file. 0 if never stamped.
+
+        A brand-new database also reports 0, which is intentional: its tables are
+        empty, so any migration guarded on the version is a no-op there and the
+        stamp simply moves forward.
+        """
+        row = self._conn.execute(
+            "SELECT version FROM schema_version WHERE store = ?",
+            (type(self).__name__,),
+        ).fetchone()
+        return int(row["version"]) if row is not None else 0
+
+    def _set_schema_version(self, version: int) -> None:
+        """Stamp this store's data version, so guarded migrations run once."""
+        self._conn.execute(
+            """
+            INSERT INTO schema_version (store, version) VALUES (?, ?)
+            ON CONFLICT(store) DO UPDATE SET version = excluded.version
+            """,
+            (type(self).__name__, version),
+        )
 
     def close(self) -> None:
         self._conn.close()

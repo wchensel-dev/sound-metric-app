@@ -82,6 +82,11 @@ class WorkflowController:
         self._db_path = str(db_path)
         self._channel_reader = channel_reader
         self._capture_reader = capture_reader
+        #: Cached ammo presets. The GUI re-reads these on every view refresh
+        #: (each tab switch / mark / ingest / close), but the list only changes
+        #: through :meth:`set_ammo_definitions`, so we parse the settings file
+        #: once and invalidate on write instead of hitting disk each refresh.
+        self._ammo_definitions_cache: list[str] | None = None
 
     @contextmanager
     def _repo(self) -> Iterator[WorkflowRepository]:
@@ -97,6 +102,24 @@ class WorkflowController:
     def set_input_folder(self, folder: str | Path) -> Path:
         """Persist the default input folder and return the resolved path."""
         return config.set_input_folder(folder)
+
+    def ammo_definitions(self) -> list[str]:
+        """The ammo presets offered when marking a shot (built-in defaults if unset).
+
+        Cached after the first read (see ``_ammo_definitions_cache``): a malformed
+        settings file still raises ``ValueError`` on every call until fixed, since
+        only a successful read is cached. Returns a fresh copy so callers can't
+        mutate the cached list.
+        """
+        if self._ammo_definitions_cache is None:
+            self._ammo_definitions_cache = config.get_ammo_definitions()
+        return list(self._ammo_definitions_cache)
+
+    def set_ammo_definitions(self, definitions: list[str]) -> list[str]:
+        """Persist the ammo presets (normalized), refresh the cache, and return them."""
+        stored = config.set_ammo_definitions(definitions)
+        self._ammo_definitions_cache = list(stored)
+        return stored
 
     # ---- ingest --------------------------------------------------------- #
 
