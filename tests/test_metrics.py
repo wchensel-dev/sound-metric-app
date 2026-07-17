@@ -9,7 +9,12 @@ import pytest
 from scipy import signal
 
 from sound_metric_app.config import P_REF, WINDOW_MS
-from sound_metric_app.dsp.metrics import leq_db, peak_db, peak_impulse_db
+from sound_metric_app.dsp.metrics import (
+    impulse_weighted_level,
+    leq_db,
+    peak_db,
+    peak_impulse_db,
+)
 from sound_metric_app.dsp.processor import MetricsProcessor
 from sound_metric_app.dsp.weighting import a_weighting_sos
 from sound_metric_app.models import Frame
@@ -56,6 +61,20 @@ def test_peak_impulse_db_silent_frame_integrates_to_zero():
     # integral is exactly 0 rather than -inf.
     x = np.zeros(int(FS * 0.1), dtype=np.float64)
     assert peak_impulse_db(x, FS) == 0.0
+
+
+def test_peak_impulse_db_applies_db_ms_dt_factor():
+    # peak_impulse_db integrates the Impulse level with dt = 1000/fs (ms) to give
+    # dB*ms. Pin that factor against the underlying level so a dropped dt, a
+    # seconds-vs-ms mixup (dt = 1/fs), or a sign error can't pass unnoticed --
+    # the silent/NaN tests are blind to all three.
+    x = _sine(1000.0, amp_pa=1.0, dur_s=0.1)
+    levels = impulse_weighted_level(x, FS)
+    expected = float(np.sum(levels[levels != -np.inf]) * (1000.0 / FS))
+    # A ~90 dB sine integrated over 100 ms is a large positive dB*ms value, not
+    # the bare dB sum (dt dropped) or a 1000x-smaller dB*s value (dt in seconds).
+    assert expected > 0.0
+    assert peak_impulse_db(x, FS) == pytest.approx(expected)
 
 
 def test_peak_impulse_db_nan_input_surfaces_as_nan():
