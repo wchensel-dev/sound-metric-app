@@ -63,6 +63,17 @@ def window(tmp_path, monkeypatch, qtbot):
     return win
 
 
+def test_format_metric_blanks_null_instead_of_raising():
+    # channel_metrics columns are nullable REAL (the schema-v1 migration blanks
+    # peak_impulse_db), so a metric can be None. It must render as an em-dash,
+    # not raise TypeError from f"{None:.2f}" and abort the whole report render.
+    from sound_metric_app.ui.main_window import _format_metric
+
+    assert _format_metric(None) == "—"
+    assert _format_metric(163.4) == "163.40"
+    assert _format_metric(0) == "0.00"
+
+
 def test_window_builds_with_four_tabs(window):
     assert window.tabs.count() == 4
     assert [window.tabs.tabText(i) for i in range(4)] == ["Ingest", "Mark", "Batches", "Report"]

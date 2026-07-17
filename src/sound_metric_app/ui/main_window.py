@@ -874,7 +874,7 @@ class ReportView(_View):
                         group_label,
                         position.value,
                         str(avg["n"]),
-                        *(f"{avg[k]:.2f}" for k in self._METRIC_KEYS),
+                        *(_format_metric(avg[k]) for k in self._METRIC_KEYS),
                     ]
                 )
                 for shot in group_avg.shots.get(position, ()):
@@ -887,7 +887,7 @@ class ReportView(_View):
         order = shot.get("shot_order")
         label = f"Shot {order}" if order is not None else Path(shot["source_file"]).name
         return QtWidgets.QTreeWidgetItem(
-            [label, "", "", *(f"{shot[k]:.2f}" for k in self._METRIC_KEYS)]
+            [label, "", "", *(_format_metric(shot[k]) for k in self._METRIC_KEYS)]
         )
 
     def _add_top(self, values: list[str]) -> QtWidgets.QTreeWidgetItem:
@@ -1021,6 +1021,17 @@ class MainWindow(QtWidgets.QMainWindow):
 def _str_or_empty(value) -> str:
     """Render an optional field for a pre-filled edit box (``None`` -> "")."""
     return "" if value is None else str(value)
+
+
+def _format_metric(value) -> str:
+    """Render a metric value for a report cell (``None`` -> "—").
+
+    Metric columns are nullable REAL (and the schema-v1 migration blanks
+    ``peak_impulse_db`` on pre-existing rows), so a value can arrive as ``None``.
+    Show an em-dash for the one missing cell instead of letting ``f"{None:.2f}"``
+    raise and abort the whole report render.
+    """
+    return "—" if value is None else f"{value:.2f}"
 
 
 def _format_captured_at(captured_at: str | None) -> str:
