@@ -274,6 +274,33 @@ def test_mark_tab_offers_configured_ammo_presets(window):
     assert presets == ["Custom 62gr", "LC M855 (5.56)"]
 
 
+def test_malformed_ammo_config_does_not_crash_launch(tmp_path, monkeypatch, qtbot):
+    from PySide6 import QtWidgets
+
+    from sound_metric_app.ui import main_window as mw
+
+    # A hand-edited config with a non-list ammo_definitions makes
+    # config.get_ammo_definitions raise ValueError. That read happens during
+    # MainWindow.__init__ (notify_changed -> MarkingView.refresh -> _populate_ammo),
+    # so it must surface as a dialog, not an unhandled traceback that stops launch.
+    config = tmp_path / "sma_config.json"
+    config.write_text('{"ammo_definitions": "LC M855"}', encoding="utf-8")
+    monkeypatch.setenv("SMA_CONFIG", str(config))
+
+    shown: list[str] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "critical", lambda *a, **k: shown.append(a[2])
+    )
+
+    controller = WorkflowController(tmp_path / "wf.db")
+    win = mw.MainWindow(controller)  # must not raise
+    qtbot.addWidget(win)
+
+    assert shown and "ammo_definitions" in shown[0]
+    mv = win.marking_view
+    assert mv.ammo_combo.count() == 0
+
+
 def test_ammo_definitions_dialog_add_and_remove(window):
     from sound_metric_app.ui.main_window import AmmoDefinitionsDialog
 

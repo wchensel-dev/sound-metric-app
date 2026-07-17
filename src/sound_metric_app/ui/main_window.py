@@ -319,10 +319,19 @@ class MarkingView(_View):
 
     def _populate_ammo(self) -> None:
         """Reload the ammo preset list, keeping whatever the user has typed/chosen."""
+        # This runs synchronously from refresh() (including at launch, via
+        # MainWindow.notify_changed), so a malformed ammo_definitions setting must
+        # surface as a dialog rather than escaping as an unhandled crash — the
+        # same treatment the async config read paths get from _run_async.
+        try:
+            presets = self.controller.ammo_definitions()
+        except ValueError as exc:
+            QtWidgets.QMessageBox.critical(self, "Error", str(exc))
+            presets = []
         current = self.ammo_combo.currentText()
         self.ammo_combo.blockSignals(True)
         self.ammo_combo.clear()
-        self.ammo_combo.addItems(self.controller.ammo_definitions())
+        self.ammo_combo.addItems(presets)
         # Leave the field blank rather than silently defaulting to the first
         # preset — ammo is required, so the user must pick or type it.
         self.ammo_combo.setCurrentText(current)
