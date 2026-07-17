@@ -9,7 +9,7 @@ import pytest
 from scipy import signal
 
 from sound_metric_app.config import P_REF, WINDOW_MS
-from sound_metric_app.dsp.metrics import leq_db, peak_db
+from sound_metric_app.dsp.metrics import leq_db, peak_db, peak_impulse_db
 from sound_metric_app.dsp.processor import MetricsProcessor
 from sound_metric_app.dsp.weighting import a_weighting_sos
 from sound_metric_app.models import Frame
@@ -49,6 +49,21 @@ def test_a_weighting_response(freq, expected_db, tol):
     _, h = signal.sosfreqz(sos, worN=[freq], fs=FS)
     mag_db = 20 * np.log10(np.abs(h[0]))
     assert mag_db == pytest.approx(expected_db, abs=tol)
+
+
+def test_peak_impulse_db_silent_frame_integrates_to_zero():
+    # An all-zero (silent) frame: every sample is -inf and is skipped, so the
+    # integral is exactly 0 rather than -inf.
+    x = np.zeros(int(FS * 0.1), dtype=np.float64)
+    assert peak_impulse_db(x, FS) == 0.0
+
+
+def test_peak_impulse_db_nan_input_surfaces_as_nan():
+    # A NaN-contaminated frame must NOT be silently reported as 0.0 (a plausible
+    # silent-frame value); the NaN has to propagate so the corruption is visible.
+    x = _sine(1000.0, amp_pa=1.0, dur_s=0.1)
+    x[len(x) // 2] = np.nan
+    assert np.isnan(peak_impulse_db(x, FS))
 
 
 def _frame(n_samples: int) -> Frame:
