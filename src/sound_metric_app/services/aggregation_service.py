@@ -11,7 +11,7 @@ mean of its shots' SE values and likewise for MR.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from ..models import Batch, Group, MicPosition
 from ..storage import WorkflowRepository
@@ -30,13 +30,14 @@ class GroupAverages:
     position maps to a list of the individual shot metric rows the average was
     taken over (see
     :meth:`~sound_metric_app.storage.WorkflowRepository.shot_metrics_for_group`).
-    Its keys always match ``averages``.
+    Its keys always match ``averages``; it is a required field so this invariant
+    cannot be broken by omitting it at construction.
     """
 
     group: Group
     n_shots: int
     averages: dict[MicPosition, dict]
-    shots: dict[MicPosition, list[dict]] = field(default_factory=dict)
+    shots: dict[MicPosition, list[dict]]
 
 
 @dataclass
