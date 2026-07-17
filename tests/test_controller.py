@@ -147,6 +147,25 @@ def test_mark_unknown_shot_raises(controller):
         controller.mark(999, ammo="M855", channel_map={"AI 1": MicPosition.SE})
 
 
+def test_ammo_definitions_default_to_builtins(controller):
+    # A fresh settings file yields the built-in presets so the mark form is never
+    # empty out of the box.
+    assert controller.ammo_definitions() == [
+        "LC M193 (5.56)",
+        "LC M855 (5.56)",
+        "Black Hills 77gr OTM (5.56)",
+    ]
+
+
+def test_set_ammo_definitions_persists_and_normalizes(controller):
+    stored = controller.set_ammo_definitions(
+        ["  LC M855 (5.56) ", "Custom 62gr", "LC M855 (5.56)", "  "]
+    )
+    # Trimmed, de-duplicated, blanks dropped, order preserved.
+    assert stored == ["LC M855 (5.56)", "Custom 62gr"]
+    assert controller.ammo_definitions() == ["LC M855 (5.56)", "Custom 62gr"]
+
+
 def test_report_unknown_batch_raises(controller):
     with pytest.raises(LookupError):
         controller.batch_report(42)

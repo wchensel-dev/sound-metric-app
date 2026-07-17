@@ -511,6 +511,43 @@ class WorkflowRepository(_SqliteStore):
             }
         return out
 
+    def shot_metrics_for_group(self, group_id: int) -> dict[MicPosition, list[dict]]:
+        """Per-shot metric rows for a group, grouped by mic position.
+
+        The un-averaged counterpart to :meth:`group_averages`: instead of one
+        mean per position, returns every contributing shot's own metrics so a
+        report can drill down from a group's SE/MR average into the individual
+        shots behind it. Maps each present :class:`MicPosition` to a list of
+        ``{shot_id, shot_order, source_file, peak_db, peak_dba,
+        peak_impulse_db, liaeq_100ms_db}``, ordered by shot order then id.
+        Positions absent from the group are omitted.
+        """
+        cur = self._conn.execute(
+            """
+            SELECT cm.mic_position       AS pos,
+                   s.id                  AS shot_id,
+                   s.shot_order          AS shot_order,
+                   s.source_file         AS source_file,
+                   cm.peak_db, cm.peak_dba, cm.peak_impulse_db, cm.liaeq_100ms_db
+            FROM channel_metrics cm
+            JOIN shots s ON s.id = cm.shot_id
+            WHERE s.group_id = ?
+            ORDER BY cm.mic_position, s.shot_order, s.id
+            """,
+            (group_id,),
+        )
+        out: dict[MicPosition, list[dict]] = {}
+        for r in cur.fetchall():
+            out.setdefault(MicPosition(r["pos"]), []).append(
+                {
+                    "shot_id": int(r["shot_id"]),
+                    "shot_order": r["shot_order"],
+                    "source_file": r["source_file"],
+                    **{k: r[k] for k in _METRIC_FIELDS},
+                }
+            )
+        return out
+
 
 # --------------------------------------------------------------------------- #
 # Row -> dataclass mappers

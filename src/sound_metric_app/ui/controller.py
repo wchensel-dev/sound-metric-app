@@ -98,6 +98,14 @@ class WorkflowController:
         """Persist the default input folder and return the resolved path."""
         return config.set_input_folder(folder)
 
+    def ammo_definitions(self) -> list[str]:
+        """The ammo presets offered when marking a shot (built-in defaults if unset)."""
+        return config.get_ammo_definitions()
+
+    def set_ammo_definitions(self, definitions: list[str]) -> list[str]:
+        """Persist the ammo presets (normalized) and return the stored list."""
+        return config.set_ammo_definitions(definitions)
+
     # ---- ingest --------------------------------------------------------- #
 
     def ingest(self, folder: str | Path | None = None, *, validate: bool = True) -> IngestReport:

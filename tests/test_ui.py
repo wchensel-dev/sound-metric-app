@@ -96,7 +96,7 @@ def test_full_workflow_through_widgets(window, qtbot):
         mv = window.marking_view
         # Wait for the (fake) channel load to populate the SE picker.
         qtbot.waitUntil(lambda: mv.se_combo.isEnabled() and mv.se_combo.count() >= 3, timeout=5000)
-        mv.ammo_edit.setText("M855")  # SE/MR default to AI 1 / AI 2
+        mv.ammo_combo.setCurrentText("M855")  # SE/MR default to AI 1 / AI 2
         mv._mark()
         qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() < 2, timeout=5000)
         # loop condition re-reads the table; wait for the second mark to clear it
@@ -105,9 +105,13 @@ def test_full_workflow_through_widgets(window, qtbot):
     # --- Report shows the group with SE and MR rows (never mixed) ---
     rv = window.report_view
     rv.refresh()
-    qtbot.waitUntil(lambda: rv.table.rowCount() >= 2, timeout=5000)
-    mics = {rv.table.item(r, 1).text() for r in range(rv.table.rowCount())}
+    qtbot.waitUntil(lambda: rv.tree.topLevelItemCount() >= 2, timeout=5000)
+    tops = [rv.tree.topLevelItem(i) for i in range(rv.tree.topLevelItemCount())]
+    mics = {item.text(1) for item in tops}
     assert {"SE", "MR"} <= mics
+    # Each mic average expands to its individual shots.
+    se_item = next(item for item in tops if item.text(1) == "SE")
+    assert se_item.childCount() >= 1
 
     # --- Close the batch from the tree ---
     tree = window.batch_view.tree
@@ -128,7 +132,7 @@ def test_edit_button_enabled_for_batch_and_shot_not_group(window, qtbot):
         window.open_marking_for(first_id)
         mv = window.marking_view
         qtbot.waitUntil(lambda: mv.se_combo.isEnabled() and mv.se_combo.count() >= 3, timeout=5000)
-        mv.ammo_edit.setText("M855")
+        mv.ammo_combo.setCurrentText("M855")
         mv._mark()
         qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() < 2, timeout=5000)
     qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 0, timeout=5000)
@@ -154,7 +158,7 @@ def test_rename_batch_via_tree(window, qtbot, monkeypatch):
     window.open_marking_for(first_id)
     mv = window.marking_view
     qtbot.waitUntil(lambda: mv.se_combo.isEnabled() and mv.se_combo.count() >= 3, timeout=5000)
-    mv.ammo_edit.setText("M855")
+    mv.ammo_combo.setCurrentText("M855")
     mv._mark()
     qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 1, timeout=5000)
 
@@ -183,7 +187,7 @@ def test_double_click_edits_shots_not_parent_rows(window, qtbot, monkeypatch):
     window.open_marking_for(first_id)
     mv = window.marking_view
     qtbot.waitUntil(lambda: mv.se_combo.isEnabled() and mv.se_combo.count() >= 3, timeout=5000)
-    mv.ammo_edit.setText("M855")
+    mv.ammo_combo.setCurrentText("M855")
     mv._mark()
     qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 1, timeout=5000)
 
@@ -211,7 +215,7 @@ def test_edit_shot_re_marks_with_corrected_ammo(window, qtbot):
     window.open_marking_for(first_id)
     mv = window.marking_view
     qtbot.waitUntil(lambda: mv.se_combo.isEnabled() and mv.se_combo.count() >= 3, timeout=5000)
-    mv.ammo_edit.setText("WRONG")
+    mv.ammo_combo.setCurrentText("WRONG")
     mv._mark()
     qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 1, timeout=5000)
 
@@ -234,9 +238,9 @@ def test_edit_shot_re_marks_with_corrected_ammo(window, qtbot):
         channel_names=["AI 1", "AI 2"],
         parent=bv,
     )
-    assert dialog.ammo_edit.text() == "WRONG"  # pre-filled from the group
+    assert dialog.ammo_combo.currentText() == "WRONG"  # pre-filled from the group
     assert dialog.se_combo.currentText() == "AI 1"  # pre-filled from the shot tags
-    dialog.ammo_edit.setText("M855")
+    dialog.ammo_combo.setCurrentText("M855")
     dialog._on_accept()
 
     bv._run_async(
@@ -255,3 +259,33 @@ def test_edit_shot_re_marks_with_corrected_ammo(window, qtbot):
     }
     assert "WRONG" not in by_ammo
     assert [s.id for s in by_ammo["M855"]] == [shot.id]
+
+
+def test_mark_tab_offers_configured_ammo_presets(window):
+    # The mark form's ammo combo is seeded with the default presets and reflects
+    # a saved custom list after Settings ▸ Ammo definitions.
+    mv = window.marking_view
+    presets = [mv.ammo_combo.itemText(i) for i in range(mv.ammo_combo.count())]
+    assert presets == ["LC M193 (5.56)", "LC M855 (5.56)", "Black Hills 77gr OTM (5.56)"]
+
+    window.controller.set_ammo_definitions(["Custom 62gr", "LC M855 (5.56)"])
+    window.notify_changed()
+    presets = [mv.ammo_combo.itemText(i) for i in range(mv.ammo_combo.count())]
+    assert presets == ["Custom 62gr", "LC M855 (5.56)"]
+
+
+def test_ammo_definitions_dialog_add_and_remove(window):
+    from sound_metric_app.ui.main_window import AmmoDefinitionsDialog
+
+    dialog = AmmoDefinitionsDialog(["LC M193 (5.56)"], parent=window)
+    # Add a new type; a duplicate of an existing one is ignored.
+    dialog.entry.setText("Custom 62gr")
+    dialog._add()
+    dialog.entry.setText("LC M193 (5.56)")
+    dialog._add()
+    assert dialog.definitions() == ["LC M193 (5.56)", "Custom 62gr"]
+
+    # Remove the first, selected item.
+    dialog.list.setCurrentRow(0)
+    dialog._remove()
+    assert dialog.definitions() == ["Custom 62gr"]

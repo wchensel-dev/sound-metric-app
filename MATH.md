@@ -66,13 +66,13 @@ Peak_dBA = L_peak(p_A) = 20 · log10( max_n |p_A[n]| / p_ref )
 ```
 Same peak operator applied to the A-weighted signal `p_A` (§8).
 
-## 6. Peak Impulse — `peak_impulse_db` (provisional)
+## 6. Impulse — `peak_impulse_db` (provisional)
 
-Computed on the **A-weighted** signal `p_A`.
+Computed on the **A-weighted** signal `p_A`. Units: **dB·ms**.
 
-Instantaneous Impulse ("I") time-weighted level, sample by sample, via a
-one-pole exponential smoother of squared pressure with an asymmetric
-(fast-attack / slow-release) time constant:
+First form the instantaneous Impulse ("I") time-weighted level, sample by
+sample, via a one-pole exponential smoother of squared pressure with an
+asymmetric (fast-attack / slow-release) time constant:
 
 ```
 α_r = exp( −1 / (fs · τ_r) )        (rise / attack coefficient)
@@ -85,18 +85,27 @@ for n = 0 .. N−1:
     α    = α_r   if x[n] > s[n−1]   else α_f
     s[n] = α · s[n−1] + (1 − α) · x[n]
 
-L_I[n] = 10 · log10( s[n] / p_ref² )
+L_I[n] = 10 · log10( s[n] / p_ref² )        [dB]
 ```
 
-The metric is the maximum over the frame:
+The metric is the **time integral** of `L_I` over the frame, evaluated by
+forward-Euler (rectangular) numerical integration with step `Δt = 1000 / fs`
+milliseconds:
 
 ```
-Peak_Impulse_dB = max_n L_I[n]
+Impulse = Σ_{n=0}^{N−1} L_I[n] · Δt          [dB·ms]
 ```
+
+This is why the reported quantity carries units of **dB·ms** (a dB level
+integrated over time) rather than the plain dB of a peak level: the `· Δt`
+factor supplies the millisecond dimension. Samples where `s[n] = 0` (so
+`L_I[n] = −∞`) are omitted from the sum, so a silent frame integrates to `0`.
 
 Notes:
 - `s[n]` is a smoothed mean-square estimate; attack uses `τ_r = 35 ms`, release
   uses `τ_f = 1500 ms`.
+- The integration runs over the **whole 100 ms frame**, so the peak of `L_I`
+  is always included in the total.
 - This is a **single-stage** exponential detector, not the two-stage
   (RMS-detector followed by peak-hold) Impulse detector of IEC 61672 — the
   provisional simplification noted in §2.7.
@@ -165,11 +174,14 @@ Per group (fixed Suppressor SKU + Test Platform + Ammo) and per mic position
 mean of the decibel values** across the group's shots:
 
 ```
-metric_avg = (1/n) · Σ_{shots in group, matching position} metric_shot     [dB]
+metric_avg = (1/n) · Σ_{shots in group, matching position} metric_shot
 ```
 where `metric ∈ {peak_db, peak_dba, peak_impulse_db, liaeq_100ms_db}` and `n`
 is the shot count for that position. SE and MR are aggregated in separate
-`GROUP BY mic_position` partitions and never combined.
+`GROUP BY mic_position` partitions and never combined. The dB-level metrics
+average in `[dB]`; `peak_impulse_db` averages in `[dB·ms]` (§6).
 
 Note: averaging is performed in the **dB (log) domain**, not on linear pressure
 or energy. This is the store's stated convention, not an energy-equivalent mean.
+`peak_impulse_db` is a dB level already integrated over time (§6); its shots are
+likewise averaged arithmetically.
