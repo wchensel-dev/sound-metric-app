@@ -166,6 +166,45 @@ def test_set_ammo_definitions_persists_and_normalizes(controller):
     assert controller.ammo_definitions() == ["LC M855 (5.56)", "Custom 62gr"]
 
 
+def test_ammo_definitions_are_cached_between_reads(controller, monkeypatch):
+    # The GUI re-reads presets on every view refresh; only the first read should
+    # touch the settings file, and callers can't mutate the cached list.
+    from sound_metric_app import config
+
+    controller.ammo_definitions()  # warm the cache
+
+    def _fail() -> list[str]:
+        raise AssertionError("get_ammo_definitions re-read after the cache was warm")
+
+    monkeypatch.setattr(config, "get_ammo_definitions", _fail)
+    first = controller.ammo_definitions()
+    first.append("mutated")
+    assert "mutated" not in controller.ammo_definitions()
+
+
+def test_set_ammo_definitions_refreshes_the_cache(controller):
+    controller.ammo_definitions()  # warm the cache with the built-in defaults
+    controller.set_ammo_definitions(["Custom 62gr"])
+    # A write invalidates the stale cache rather than serving the old list.
+    assert controller.ammo_definitions() == ["Custom 62gr"]
+
+
+def test_malformed_ammo_definitions_are_not_cached(controller, monkeypatch):
+    # A ValueError must keep surfacing on every call until the settings are fixed,
+    # so a failed read is never cached as a successful one.
+    from sound_metric_app import config
+
+    monkeypatch.setattr(
+        config,
+        "get_ammo_definitions",
+        lambda: (_ for _ in ()).throw(ValueError("bad settings")),
+    )
+    with pytest.raises(ValueError):
+        controller.ammo_definitions()
+    with pytest.raises(ValueError):
+        controller.ammo_definitions()
+
+
 def test_report_unknown_batch_raises(controller):
     with pytest.raises(LookupError):
         controller.batch_report(42)
