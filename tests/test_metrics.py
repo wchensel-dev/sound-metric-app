@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 from scipy import signal
 
-from sound_metric_app.config import P_REF
+from sound_metric_app.config import P_REF, WINDOW_MS
 from sound_metric_app.dsp.metrics import leq_db, peak_db
+from sound_metric_app.dsp.processor import MetricsProcessor
 from sound_metric_app.dsp.weighting import a_weighting_sos
+from sound_metric_app.models import Frame
 
 FS = 200_000.0
 
@@ -45,3 +49,28 @@ def test_a_weighting_response(freq, expected_db, tol):
     _, h = signal.sosfreqz(sos, worN=[freq], fs=FS)
     mag_db = 20 * np.log10(np.abs(h[0]))
     assert mag_db == pytest.approx(expected_db, abs=tol)
+
+
+def _frame(n_samples: int) -> Frame:
+    return Frame(
+        samples=np.zeros(n_samples, dtype=np.float64),
+        sample_rate=FS,
+        channel="AI 1",
+        source_file="SUP_AR15_001.dxd",
+    )
+
+
+def test_processor_no_warning_for_nominal_duration():
+    # 100 ms at 200 kHz -> 20 000 samples: no off-nominal warning.
+    frame = _frame(int(FS * WINDOW_MS / 1000.0))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        MetricsProcessor().process(frame)
+
+
+def test_processor_warns_for_off_nominal_duration():
+    # 120 ms frame: peak_impulse_db integrates over the frame, so the extra
+    # length makes it non-comparable; the processor should warn.
+    frame = _frame(int(FS * 0.120))
+    with pytest.warns(UserWarning, match="not the nominal"):
+        MetricsProcessor().process(frame)

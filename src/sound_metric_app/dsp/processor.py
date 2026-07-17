@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
+import math
+import warnings
+
+from ..config import WINDOW_MS
 from ..models import Frame, MetricResult
 from .metrics import leq_db, peak_db, peak_impulse_db
 from .weighting import apply_a_weighting
+
+#: Fractional tolerance on frame duration before a warning is emitted. The
+#: Impulse metric integrates over the frame (MATH.md §6), so off-nominal lengths
+#: shift its baseline and make shots non-comparable; small acquisition drift is
+#: harmless, so only deviations beyond this are flagged.
+_DURATION_REL_TOL = 0.01
 
 
 class MetricsProcessor:
@@ -17,6 +27,7 @@ class MetricsProcessor:
     def process(self, frame: Frame) -> MetricResult:
         p = frame.samples
         fs = frame.sample_rate
+        self._warn_if_off_nominal_duration(frame)
         p_a = apply_a_weighting(p, fs)
 
         return MetricResult(
@@ -30,3 +41,24 @@ class MetricsProcessor:
             n_samples=frame.n_samples,
             timestamp=frame.timestamp,
         )
+
+    @staticmethod
+    def _warn_if_off_nominal_duration(frame: Frame) -> None:
+        """Warn when a frame is not the nominal ``WINDOW_MS`` length.
+
+        ``peak_impulse_db`` integrates over the whole frame, so its value scales
+        with capture duration; a frame longer or shorter than the nominal window
+        yields an Impulse that is not comparable to nominal-length shots. Nominal
+        parameters "drive validation warnings only" (MATH.md §2.3), so this is a
+        warning, not a hard rejection.
+        """
+        duration_ms = frame.duration_s * 1000.0
+        if not math.isclose(duration_ms, WINDOW_MS, rel_tol=_DURATION_REL_TOL):
+            warnings.warn(
+                f"Frame {frame.source_file!r} channel {frame.channel!r} is "
+                f"{duration_ms:.1f} ms ({frame.n_samples} samples at "
+                f"{frame.sample_rate:.0f} Hz), not the nominal {WINDOW_MS:.0f} ms; "
+                f"peak_impulse_db integrates over the frame and will not be "
+                f"comparable to nominal-length shots.",
+                stacklevel=2,
+            )
