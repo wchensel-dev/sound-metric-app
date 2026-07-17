@@ -27,6 +27,15 @@ class ResultsDatabase(_SqliteStore):
 
     _SCHEMA = _SCHEMA
 
+    def _migrate(self) -> None:
+        if self._schema_version() < 1:
+            # Same unit change as the workflow store's channel_metrics: rows
+            # written before peak_impulse_db became dB*ms hold a plain dB level
+            # that cannot be converted after the fact. Blank them so nothing
+            # reports a dB value under a dB*ms label.
+            self._conn.execute("UPDATE results SET peak_impulse_db = NULL")
+            self._set_schema_version(1)
+
     def add_result(self, result: MetricResult) -> int:
         row = result.as_row()
         cur = self._conn.execute(

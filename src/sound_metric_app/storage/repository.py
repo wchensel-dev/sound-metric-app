@@ -83,6 +83,17 @@ class WorkflowRepository(_SqliteStore):
         # column on databases created before it existed.
         self._add_column_if_missing("shots", "captured_at", "TEXT")
 
+        if self._schema_version() < 1:
+            # peak_impulse_db used to be the maximum Impulse level [dB]; it is
+            # now that level integrated over the frame [dB*ms] (MATH.md §6).
+            # Older rows cannot be converted -- the integral needs the waveform,
+            # not the stored scalar -- so blank them rather than let AVG() mix
+            # the two unit systems into a number that looks plausible and means
+            # nothing. NULL reads as "unknown" and AVG() skips it. Re-processing
+            # the source files repopulates these rows in the new units.
+            self._conn.execute("UPDATE channel_metrics SET peak_impulse_db = NULL")
+            self._set_schema_version(1)
+
     #: True while a :meth:`transaction` block is active, so the individual
     #: mutating methods defer their commit to the enclosing block.
     _in_transaction: bool = False
