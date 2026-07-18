@@ -31,11 +31,11 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"File     : {result.source_file}")
     print(f"Channel  : {result.channel}  ({result.sample_rate:.0f} Hz, {result.n_samples} samples)")
-    print(f"  Peak dB               : {result.peak_db:8.2f} dB")
-    print(f"  Peak dBA              : {result.peak_dba:8.2f} dB(A)")
-    print(f"  Impulse [prov.]       : {result.peak_impulse_db:10.2f} dB*ms")
-    print(f"  LAImax                : {result.laimax_db:8.2f} dB(A)")
-    print(f"  LIAeq,100ms  [prov.]  : {result.liaeq_100ms_db:8.2f} dB(A)")
+    print(f"  Peak dB                 : {result.peak_db:8.2f} dB")
+    print(f"  Peak dBA                : {result.peak_dba:8.2f} dB(A)")
+    print(f"  Impulse [home-grown]    : {result.peak_impulse_db:10.2f} dB*ms")
+    print(f"  LAImax                  : {result.laimax_db:8.2f} dB(A)")
+    print(f"  LIAeq,100ms [per-frame] : {result.liaeq_100ms_db:8.2f} dB(A)")
 
     if args.store:
         with ResultsDatabase(args.store) as db:
