@@ -366,6 +366,38 @@ def test_group_averages_keep_se_and_mr_separate(repo):
         assert averages[MicPosition.SE][field] == pytest.approx(165.0)
 
 
+def test_group_averages_ignore_silent_inf_shots(repo):
+    """A silent (-inf) shot must not poison the average of the valid shots."""
+    batch_id = repo.create_batch("SUP-1")
+    group_id = repo.upsert_group(batch_id, "AR15", "M855")
+
+    # One valid shot at 160 dB and one dead/silent channel stored as -inf.
+    for order, level in enumerate([160.0, float("-inf")], start=1):
+        shot_id = repo.add_unmarked_shot(f"SUP-1_AR15_00{order}.dxd", "SUP-1", "AR15", order)
+        repo.mark_shot(shot_id, group_id=group_id, ammo="M855")
+        repo.save_channel_metric(shot_id, MicPosition.SE, _metric(level))
+
+    averages = repo.group_averages(group_id)
+    # The finite shot survives; -inf no longer dominates the mean.
+    for field in ("peak_db", "peak_dba", "laimax_db", "liaeq_100ms_db"):
+        assert averages[MicPosition.SE][field] == pytest.approx(160.0)
+    assert averages[MicPosition.SE]["n"] == 2
+
+
+def test_group_averages_all_silent_stays_inf(repo):
+    """When every shot in a position is silent the average is still -inf, not NULL."""
+    batch_id = repo.create_batch("SUP-1")
+    group_id = repo.upsert_group(batch_id, "AR15", "M855")
+
+    for order in (1, 2):
+        shot_id = repo.add_unmarked_shot(f"SUP-1_AR15_00{order}.dxd", "SUP-1", "AR15", order)
+        repo.mark_shot(shot_id, group_id=group_id, ammo="M855")
+        repo.save_channel_metric(shot_id, MicPosition.SE, _metric(float("-inf")))
+
+    averages = repo.group_averages(group_id)
+    assert averages[MicPosition.SE]["laimax_db"] == float("-inf")
+
+
 def test_save_channel_metric_returns_updated_row_id_on_upsert(repo):
     """Re-saving a position must return that position's row id, not the last insert's."""
     shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", "SUP-1", "AR15", 1)

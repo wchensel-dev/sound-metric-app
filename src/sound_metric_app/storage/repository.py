@@ -512,12 +512,22 @@ class WorkflowRepository(_SqliteStore):
         cur = self._conn.execute(
             """
             SELECT cm.mic_position AS pos,
-                   AVG(cm.peak_db)         AS peak_db,
-                   AVG(cm.peak_dba)        AS peak_dba,
-                   AVG(cm.peak_impulse_db) AS peak_impulse_db,
-                   AVG(cm.laimax_db)       AS laimax_db,
-                   AVG(cm.liaeq_100ms_db)  AS liaeq_100ms_db,
-                   COUNT(*)                AS n
+                   -- The log-based levels store -inf for a silent frame (e.g. a
+                   -- dead/all-zeros channel). A single -inf poisons a plain AVG to
+                   -- -inf and discards every valid shot, so average only the finite
+                   -- levels and fall back to MIN (which is -inf) when a position has
+                   -- no finite shot at all. peak_impulse_db integrates silence to a
+                   -- finite 0, so it needs no such guard.
+                   COALESCE(AVG(CASE WHEN cm.peak_db > -1e308 THEN cm.peak_db END),
+                            MIN(cm.peak_db))                 AS peak_db,
+                   COALESCE(AVG(CASE WHEN cm.peak_dba > -1e308 THEN cm.peak_dba END),
+                            MIN(cm.peak_dba))                AS peak_dba,
+                   AVG(cm.peak_impulse_db)                   AS peak_impulse_db,
+                   COALESCE(AVG(CASE WHEN cm.laimax_db > -1e308 THEN cm.laimax_db END),
+                            MIN(cm.laimax_db))               AS laimax_db,
+                   COALESCE(AVG(CASE WHEN cm.liaeq_100ms_db > -1e308 THEN cm.liaeq_100ms_db END),
+                            MIN(cm.liaeq_100ms_db))          AS liaeq_100ms_db,
+                   COUNT(*)                                  AS n
             FROM channel_metrics cm
             JOIN shots s ON s.id = cm.shot_id
             WHERE s.group_id = ?
