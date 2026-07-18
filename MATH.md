@@ -32,9 +32,16 @@ All decibel values are sound pressure levels (SPL) referenced to `p_ref`.
 5. Metrics are computed independently per mic channel (SE, MR); channels are
    never combined at the DSP layer.
 6. A-weighting follows IEC 61672 / ANSI S1.4, normalized to 0 dB at 1 kHz.
-7. **Provisional:** the Impulse time-weighting (§6) and the LIAeq definition
-   (§7) are single-stage approximations pending validation against DewesoftX
-   reference values. Peak dB (§4) and Peak dBA (§5) are exact.
+7. **Validation status (against the DewesoftX sound-level plugin,
+   `CLAPDS_556_0001.dxd`):** Peak dB (§4) and Peak dBA (§5) are exact. The
+   A-weighting filter (§8) matches Dewesoft's `(A)` channel at correlation
+   0.999989. The single-stage Impulse detector (§6) reproduces Dewesoft's `LAIp`
+   channel, and its peak-hold **LAImax (§6.1) matches to 4 decimals** — so the
+   detector and its 35 ms / 1500 ms constants are validated, even though it is
+   nominally simpler than the two-stage IEC 61672 detector. The `peak_impulse_db`
+   dB·ms **integral** (§6) remains a home-grown quantity with no meter
+   counterpart. `LIAeq,100ms` (§7) has exact arithmetic but a different
+   averaging-window reference than Dewesoft's session `LAeq` — see §7's note.
 
 ## 3. Base operators
 
@@ -108,9 +115,29 @@ Notes:
   is always included in the total.
 - This is a **single-stage** exponential detector, not the two-stage
   (RMS-detector followed by peak-hold) Impulse detector of IEC 61672 — the
-  provisional simplification noted in §2.7.
+  simplification noted in §2.7.
 
-## 7. LIAeq,100ms — `liaeq_100ms_db` (provisional)
+## 6.1 LAImax — `laimax_db` (validated)
+
+The **peak-hold** of the Impulse time-weighted level over the frame, on the
+same `L_I[n]` from §6:
+
+```
+LAImax = max_n L_I[n]          [dB(A)]
+```
+
+Unlike `peak_impulse_db` (the dB·ms time integral, a home-grown quantity), this
+is the reading a sound-level meter's "I" detector reports and is directly
+comparable to instrumentation. A silent frame (every `L_I[n] = −∞`) yields
+`−∞`; a NaN in the input propagates so contaminated data surfaces.
+
+**Validation:** against the DewesoftX sound-level plugin's `LAIp` channel for
+`CLAPDS_556_0001.dxd`, `LAImax` matches the maximum of `LAIp` to **4 decimals**
+(105.3346 dB(A) computed vs 105.3349 reported) when our detector is fed
+Dewesoft's own A-weighted signal — confirming both the §6 detector and its
+τ_r = 35 ms / τ_f = 1500 ms constants. See §2.7.
+
+## 7. LIAeq,100ms — `liaeq_100ms_db` (validated math; see averaging-window note)
 
 A-weighted equivalent continuous level over the whole frame:
 
@@ -118,6 +145,15 @@ A-weighted equivalent continuous level over the whole frame:
 LIAeq_100ms = L_eq(p_A) = 10 · log10( (1/N · Σ_n p_A[n]²) / p_ref² )
 ```
 The averaging window is the entire frame (`T = 100 ms` nominal).
+
+**Validation / averaging-window note:** the mean-square→dB arithmetic is exact —
+fed Dewesoft's own A-weighted signal it reproduces Dewesoft's energy to the
+rounding. It does **not** match Dewesoft's `LAeq` channel value directly because
+the two use different reference times: our `T = 100 ms` frame vs Dewesoft's full
+measurement session. On `CLAPDS_556_0001.dxd` the gap is exactly
+`10 · log10(4.0 s / 0.1 s) = 16.0 dB` (ours 101.4, Dewesoft 85.4). The per-frame
+reference is the intended quantity here — a per-shot metric must not depend on
+how long the meter ran — so this is a definitional difference, not an error.
 
 ## 8. A-weighting filter — `a_weighting_sos` / `apply_a_weighting`
 

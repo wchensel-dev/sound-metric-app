@@ -22,8 +22,8 @@ class GroupAverages:
     """Per-mic averages for one group, plus how many shots fed them.
 
     ``averages`` maps each present :class:`~sound_metric_app.models.MicPosition`
-    to ``{peak_db, peak_dba, peak_impulse_db, liaeq_100ms_db, n}`` where ``n`` is
-    the number of shots contributing that position. Positions absent from the
+    to ``{peak_db, peak_dba, peak_impulse_db, laimax_db, liaeq_100ms_db, n}``
+    where ``n`` is the number of shots contributing that position. Positions absent from the
     group are omitted, so a single-mic group yields a single entry.
 
     ``shots`` is the un-averaged drill-down behind those averages: each present

@@ -63,13 +63,14 @@ CREATE TABLE IF NOT EXISTS channel_metrics (
     peak_db         REAL,
     peak_dba        REAL,
     peak_impulse_db REAL,
+    laimax_db       REAL,
     liaeq_100ms_db  REAL,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (shot_id, mic_position)
 );
 """
 
-_METRIC_FIELDS = ("peak_db", "peak_dba", "peak_impulse_db", "liaeq_100ms_db")
+_METRIC_FIELDS = ("peak_db", "peak_dba", "peak_impulse_db", "laimax_db", "liaeq_100ms_db")
 
 
 class WorkflowRepository(_SqliteStore):
@@ -82,6 +83,12 @@ class WorkflowRepository(_SqliteStore):
         # captured_at was added after the shots table shipped; back-fill the
         # column on databases created before it existed.
         self._add_column_if_missing("shots", "captured_at", "TEXT")
+
+        # laimax_db (LAImax) was added to channel_metrics after it shipped;
+        # back-fill it likewise. Pre-existing rows read back NULL (unknown), so
+        # AVG() skips them and the report renders them as an em-dash until the
+        # source files are re-processed under the new metric set.
+        self._add_column_if_missing("channel_metrics", "laimax_db", "REAL")
 
         if self._schema_version() < 1:
             # peak_impulse_db used to be the maximum Impulse level [dB]; it is
@@ -437,8 +444,8 @@ class WorkflowRepository(_SqliteStore):
             """
             INSERT INTO channel_metrics
                 (shot_id, mic_position, channel, sample_rate, n_samples,
-                 peak_db, peak_dba, peak_impulse_db, liaeq_100ms_db)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 peak_db, peak_dba, peak_impulse_db, laimax_db, liaeq_100ms_db)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (shot_id, mic_position) DO UPDATE SET
                 channel = excluded.channel,
                 sample_rate = excluded.sample_rate,
@@ -446,6 +453,7 @@ class WorkflowRepository(_SqliteStore):
                 peak_db = excluded.peak_db,
                 peak_dba = excluded.peak_dba,
                 peak_impulse_db = excluded.peak_impulse_db,
+                laimax_db = excluded.laimax_db,
                 liaeq_100ms_db = excluded.liaeq_100ms_db
             RETURNING id
             """,
@@ -458,6 +466,7 @@ class WorkflowRepository(_SqliteStore):
                 result.peak_db,
                 result.peak_dba,
                 result.peak_impulse_db,
+                result.laimax_db,
                 result.liaeq_100ms_db,
             ),
         )
@@ -497,7 +506,8 @@ class WorkflowRepository(_SqliteStore):
 
         SE and MR are never mixed: the result maps each present
         :class:`MicPosition` to ``{peak_db, peak_dba, peak_impulse_db,
-        liaeq_100ms_db, n}``. Positions absent from the group are omitted.
+        laimax_db, liaeq_100ms_db, n}``. Positions absent from the group are
+        omitted.
         """
         cur = self._conn.execute(
             """
@@ -505,6 +515,7 @@ class WorkflowRepository(_SqliteStore):
                    AVG(cm.peak_db)         AS peak_db,
                    AVG(cm.peak_dba)        AS peak_dba,
                    AVG(cm.peak_impulse_db) AS peak_impulse_db,
+                   AVG(cm.laimax_db)       AS laimax_db,
                    AVG(cm.liaeq_100ms_db)  AS liaeq_100ms_db,
                    COUNT(*)                AS n
             FROM channel_metrics cm
@@ -530,7 +541,7 @@ class WorkflowRepository(_SqliteStore):
         report can drill down from a group's SE/MR average into the individual
         shots behind it. Maps each present :class:`MicPosition` to a list of
         ``{shot_id, shot_order, source_file, peak_db, peak_dba,
-        peak_impulse_db, liaeq_100ms_db}``, ordered by shot order then id.
+        peak_impulse_db, laimax_db, liaeq_100ms_db}``, ordered by shot order then id.
         Positions absent from the group are omitted.
         """
         cur = self._conn.execute(
@@ -539,7 +550,7 @@ class WorkflowRepository(_SqliteStore):
                    s.id                  AS shot_id,
                    s.shot_order          AS shot_order,
                    s.source_file         AS source_file,
-                   cm.peak_db, cm.peak_dba, cm.peak_impulse_db, cm.liaeq_100ms_db
+                   cm.peak_db, cm.peak_dba, cm.peak_impulse_db, cm.laimax_db, cm.liaeq_100ms_db
             FROM channel_metrics cm
             JOIN shots s ON s.id = cm.shot_id
             WHERE s.group_id = ?

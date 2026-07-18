@@ -469,6 +469,7 @@ class MarkingView(_View):
             if result is not None:
                 parts.append(
                     f"{position.value}: peak {result.peak_db:.2f} dB, "
+                    f"LAImax {result.laimax_db:.2f} dBA, "
                     f"LIAeq {result.liaeq_100ms_db:.2f} dBA"
                 )
         self.status_label.setText("\n".join(parts))
@@ -812,8 +813,11 @@ class BatchTreeView(_View):
 
 
 class ReportView(_View):
-    _COLUMNS = ["Group / Shot", "Mic", "n", "Peak dB", "Peak dBA", "Peak Impulse dB·ms", "LIAeq,100ms dBA"]
-    _METRIC_KEYS = ("peak_db", "peak_dba", "peak_impulse_db", "liaeq_100ms_db")
+    _COLUMNS = [
+        "Group / Shot", "Mic", "n",
+        "Peak dB", "Peak dBA", "Peak Impulse dB·ms", "LAImax dBA", "LIAeq,100ms dBA",
+    ]
+    _METRIC_KEYS = ("peak_db", "peak_dba", "peak_impulse_db", "laimax_db", "liaeq_100ms_db")
 
     def __init__(self, controller: WorkflowController, main: "MainWindow"):
         super().__init__(controller, main)
@@ -860,7 +864,9 @@ class ReportView(_View):
             g = group_avg.group
             group_label = f"{g.test_platform} / {g.ammo}"
             if not group_avg.averages:
-                self._add_top([group_label, "—", "0", "no metrics", "", "", ""])
+                self._add_top(
+                    [group_label, "—", "0", "no metrics", *[""] * (len(self._COLUMNS) - 4)]
+                )
                 continue
             # One top-level row per mic (SE, MR kept separate), labelled with the
             # group only on the first so the pair reads as a unit; each carries

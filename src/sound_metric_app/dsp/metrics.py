@@ -58,6 +58,25 @@ def impulse_weighted_level(
         return 10.0 * np.log10(smoothed / P_REF**2)
 
 
+def impulse_max_db(pressure: np.ndarray, fs: float) -> float:
+    """LAImax: maximum of the Impulse ('I') time-weighted level over the frame (dB).
+
+    The peak-hold value of the sample-by-sample Impulse level from
+    :func:`impulse_weighted_level`. This is the standards-comparable Impulse
+    reading a sound level meter's 'I' detector reports, and it validates directly
+    against the maximum of DewesoftX's ``LAIp`` channel (matched to 4 decimals on
+    the reference capture) -- unlike :func:`peak_impulse_db`, whose dB*ms time
+    integral has no meter equivalent.
+
+    Applied to the A-weighted signal by the processor, so the result is dBA.
+    Returns ``-inf`` for a silent frame (every level ``-inf``); a NaN in the
+    input propagates to the result so contaminated data surfaces rather than
+    masquerading as a plausible level.
+    """
+    levels = impulse_weighted_level(pressure, fs)
+    return float(np.max(levels))
+
+
 def peak_impulse_db(pressure: np.ndarray, fs: float) -> float:
     """Impulse: time-integral of the Impulse time-weighted level (dB*ms).
 
