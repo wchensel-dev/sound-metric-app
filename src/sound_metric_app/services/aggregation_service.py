@@ -1,6 +1,6 @@
 """Aggregation service (BUILD_PLAN Task 7).
 
-Computes per-group averages of the four metrics, **separately for SE and MR**
+Computes per-group averages of the metrics, **separately for SE and MR**
 (README §4: positions are never mixed), and rolls the groups of a batch up into
 one report ready for the CLI/GUI report views.
 
