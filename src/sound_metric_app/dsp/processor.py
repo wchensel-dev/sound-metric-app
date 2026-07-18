@@ -7,7 +7,13 @@ import warnings
 
 from ..config import WINDOW_MS
 from ..models import Frame, MetricResult
-from .metrics import impulse_max_db, leq_db, peak_db, peak_impulse_db
+from .metrics import (
+    impulse_max_from_levels,
+    impulse_weighted_level,
+    leq_db,
+    peak_db,
+    peak_impulse_from_levels,
+)
 from .weighting import apply_a_weighting
 
 #: Fractional tolerance on frame duration before a warning is emitted. The
@@ -30,11 +36,15 @@ class MetricsProcessor:
         self._warn_if_off_nominal_duration(frame)
         p_a = apply_a_weighting(p, fs)
 
+        # The per-sample Impulse smoother is the frame's most expensive op, so
+        # run it once and derive both Impulse metrics from the shared level array.
+        impulse_levels = impulse_weighted_level(p_a, fs)
+
         return MetricResult(
             peak_db=peak_db(p),
             peak_dba=peak_db(p_a),
-            peak_impulse_db=peak_impulse_db(p_a, fs),
-            laimax_db=impulse_max_db(p_a, fs),
+            peak_impulse_db=peak_impulse_from_levels(impulse_levels, fs),
+            laimax_db=impulse_max_from_levels(impulse_levels),
             liaeq_100ms_db=leq_db(p_a),
             source_file=frame.source_file,
             channel=frame.channel,

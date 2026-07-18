@@ -58,6 +58,18 @@ def impulse_weighted_level(
         return 10.0 * np.log10(smoothed / P_REF**2)
 
 
+def impulse_max_from_levels(levels: np.ndarray) -> float:
+    """LAImax from a precomputed Impulse-level array (see :func:`impulse_max_db`)."""
+    return float(np.max(levels))
+
+
+def peak_impulse_from_levels(levels: np.ndarray, fs: float) -> float:
+    """Impulse integral from a precomputed level array (see :func:`peak_impulse_db`)."""
+    keep = levels != -np.inf
+    dt_ms = 1000.0 / fs
+    return float(np.sum(levels[keep]) * dt_ms)
+
+
 def impulse_max_db(pressure: np.ndarray, fs: float) -> float:
     """LAImax: maximum of the Impulse ('I') time-weighted level over the frame (dB).
 
@@ -73,8 +85,7 @@ def impulse_max_db(pressure: np.ndarray, fs: float) -> float:
     input propagates to the result so contaminated data surfaces rather than
     masquerading as a plausible level.
     """
-    levels = impulse_weighted_level(pressure, fs)
-    return float(np.max(levels))
+    return impulse_max_from_levels(impulse_weighted_level(pressure, fs))
 
 
 def peak_impulse_db(pressure: np.ndarray, fs: float) -> float:
@@ -90,7 +101,4 @@ def peak_impulse_db(pressure: np.ndarray, fs: float) -> float:
     NOT skipped: a NaN in the input propagates to the result so contaminated
     data surfaces instead of masquerading as a plausible level.
     """
-    levels = impulse_weighted_level(pressure, fs)
-    keep = levels != -np.inf
-    dt_ms = 1000.0 / fs
-    return float(np.sum(levels[keep]) * dt_ms)
+    return peak_impulse_from_levels(impulse_weighted_level(pressure, fs), fs)
