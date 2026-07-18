@@ -16,7 +16,6 @@ CREATE TABLE IF NOT EXISTS results (
     peak_db         REAL,
     peak_dba        REAL,
     peak_impulse_db REAL,
-    laimax_db       REAL,
     liaeq_100ms_db  REAL,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -29,11 +28,6 @@ class ResultsDatabase(_SqliteStore):
     _SCHEMA = _SCHEMA
 
     def _migrate(self) -> None:
-        # laimax_db (LAImax) was added after the results table shipped; back-fill
-        # the column on databases created before it existed. Pre-existing rows
-        # read back NULL (unknown) rather than being wrong.
-        self._add_column_if_missing("results", "laimax_db", "REAL")
-
         if self._schema_version() < 1:
             # Same unit change as the workflow store's channel_metrics: rows
             # written before peak_impulse_db became dB*ms hold a plain dB level
@@ -48,10 +42,10 @@ class ResultsDatabase(_SqliteStore):
             """
             INSERT INTO results
                 (source_file, channel, timestamp, sample_rate, n_samples,
-                 peak_db, peak_dba, peak_impulse_db, laimax_db, liaeq_100ms_db)
+                 peak_db, peak_dba, peak_impulse_db, liaeq_100ms_db)
             VALUES
                 (:source_file, :channel, :timestamp, :sample_rate, :n_samples,
-                 :peak_db, :peak_dba, :peak_impulse_db, :laimax_db, :liaeq_100ms_db)
+                 :peak_db, :peak_dba, :peak_impulse_db, :liaeq_100ms_db)
             """,
             row,
         )

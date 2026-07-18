@@ -94,7 +94,6 @@ def test_metric_result_as_row_has_no_mic_position():
         peak_db=1.0,
         peak_dba=2.0,
         peak_impulse_db=3.0,
-        laimax_db=3.5,
         liaeq_100ms_db=4.0,
         source_file="f.dxd",
         channel="AI 1",

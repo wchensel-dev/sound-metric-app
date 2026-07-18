@@ -7,7 +7,7 @@ import warnings
 
 from ..config import WINDOW_MS
 from ..models import Frame, MetricResult
-from .metrics import impulse_max_db, leq_db, peak_db, peak_impulse_db
+from .metrics import leq_db, peak_db, peak_impulse_db
 from .weighting import apply_a_weighting
 
 #: Fractional tolerance on frame duration before a warning is emitted. The
@@ -18,7 +18,7 @@ _DURATION_REL_TOL = 0.01
 
 
 class MetricsProcessor:
-    """Compute Peak dB, Peak dBA, Peak Impulse, LAImax, and LIAeq100ms for a frame.
+    """Compute Peak dB, Peak dBA, Peak Impulse, and LIAeq100ms for a frame.
 
     Stateless by design: each DewesoftX file is one self-contained 100 ms frame,
     so no filter/integrator state is carried between frames.
@@ -34,7 +34,6 @@ class MetricsProcessor:
             peak_db=peak_db(p),
             peak_dba=peak_db(p_a),
             peak_impulse_db=peak_impulse_db(p_a, fs),
-            laimax_db=impulse_max_db(p_a, fs),
             liaeq_100ms_db=leq_db(p_a),
             source_file=frame.source_file,
             channel=frame.channel,

@@ -127,7 +127,6 @@ def _cmd_mark(args: argparse.Namespace, repo: WorkflowRepository) -> int:
             f"  {position.value}: peak {result.peak_db:7.2f} dB   "
             f"peakA {result.peak_dba:7.2f} dBA   "
             f"impulse {result.peak_impulse_db:9.2f} dB*ms   "
-            f"LAImax {result.laimax_db:7.2f} dBA   "
             f"LIAeq {result.liaeq_100ms_db:7.2f} dBA"
         )
     return 0
@@ -211,7 +210,6 @@ def _print_group_averages(group_avg, *, indent: str = "") -> None:
             f"peak {avg['peak_db']:7.2f} dB   "
             f"peakA {avg['peak_dba']:7.2f} dBA   "
             f"impulse {avg['peak_impulse_db']:9.2f} dB*ms   "
-            f"LAImax {avg['laimax_db']:7.2f} dBA   "
             f"LIAeq {avg['liaeq_100ms_db']:7.2f} dBA"
         )
 
