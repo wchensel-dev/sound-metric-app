@@ -65,7 +65,6 @@ class PeakProcessor:
             peak_db=v,
             peak_dba=v,
             peak_impulse_db=v,
-            laimax_db=v,
             liaeq_100ms_db=v,
             source_file=frame.source_file,
             channel=frame.channel,

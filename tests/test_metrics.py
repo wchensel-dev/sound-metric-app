@@ -10,7 +10,6 @@ from scipy import signal
 
 from sound_metric_app.config import P_REF, WINDOW_MS
 from sound_metric_app.dsp.metrics import (
-    impulse_max_db,
     impulse_weighted_level,
     leq_db,
     peak_db,
@@ -84,28 +83,6 @@ def test_peak_impulse_db_nan_input_surfaces_as_nan():
     x = _sine(1000.0, amp_pa=1.0, dur_s=0.1)
     x[len(x) // 2] = np.nan
     assert np.isnan(peak_impulse_db(x, FS))
-
-
-def test_impulse_max_db_is_peak_of_the_impulse_level():
-    # LAImax is exactly the maximum of the sample-by-sample Impulse level, so it
-    # tracks the peak-hold reading a meter's 'I' detector reports.
-    x = _sine(1000.0, amp_pa=1.0, dur_s=0.1)
-    levels = impulse_weighted_level(x, FS)
-    assert impulse_max_db(x, FS) == pytest.approx(float(np.max(levels)))
-
-
-def test_impulse_max_db_silent_frame_is_neg_inf():
-    # A silent frame has every Impulse level at -inf; its max is -inf, the honest
-    # "no level" value (unlike peak_impulse_db, whose integral is 0 for silence).
-    x = np.zeros(int(FS * 0.1), dtype=np.float64)
-    assert impulse_max_db(x, FS) == float("-inf")
-
-
-def test_impulse_max_db_nan_input_surfaces_as_nan():
-    # A NaN must propagate rather than masquerade as a plausible peak level.
-    x = _sine(1000.0, amp_pa=1.0, dur_s=0.1)
-    x[len(x) // 2] = np.nan
-    assert np.isnan(impulse_max_db(x, FS))
 
 
 def _frame(n_samples: int) -> Frame:
