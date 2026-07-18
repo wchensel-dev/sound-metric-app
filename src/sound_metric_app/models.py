@@ -143,6 +143,7 @@ class MetricResult:
     peak_db: float
     peak_dba: float
     peak_impulse_db: float
+    laimax_db: float
     liaeq_100ms_db: float
     source_file: str
     channel: str
@@ -161,6 +162,7 @@ class MetricResult:
             "peak_db": self.peak_db,
             "peak_dba": self.peak_dba,
             "peak_impulse_db": self.peak_impulse_db,
+            "laimax_db": self.laimax_db,
             "liaeq_100ms_db": self.liaeq_100ms_db,
         }
 

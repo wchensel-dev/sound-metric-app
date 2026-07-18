@@ -94,6 +94,7 @@ def test_processor_produces_finite_metrics():
         result.peak_db,
         result.peak_dba,
         result.peak_impulse_db,
+        result.laimax_db,
         result.liaeq_100ms_db,
     ):
         assert value == value  # not NaN

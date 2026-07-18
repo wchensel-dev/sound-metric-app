@@ -16,6 +16,7 @@ def _metric(peak: float, channel: str = "AI 1") -> MetricResult:
         peak_db=peak,
         peak_dba=peak,
         peak_impulse_db=peak,
+        laimax_db=peak,
         liaeq_100ms_db=peak,
         source_file="f.dxd",
         channel=channel,
@@ -361,7 +362,7 @@ def test_group_averages_keep_se_and_mr_separate(repo):
     assert averages[MicPosition.MR]["peak_db"] == pytest.approx(155.0)
     assert averages[MicPosition.SE]["n"] == 2
     # All four metrics averaged the same way in this fixture.
-    for field in ("peak_dba", "peak_impulse_db", "liaeq_100ms_db"):
+    for field in ("peak_dba", "peak_impulse_db", "laimax_db", "liaeq_100ms_db"):
         assert averages[MicPosition.SE][field] == pytest.approx(165.0)
 
 
