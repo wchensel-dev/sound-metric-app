@@ -124,9 +124,11 @@ def _cmd_mark(args: argparse.Namespace, repo: WorkflowRepository) -> int:
         if result is None:
             continue
         print(
-            f"  {position.value}: peak {result.peak_db:7.2f} dB   "
+            f"  {position.value}: peakPa {result.peak_pa:8.2f} Pa   "
+            f"peak {result.peak_db:7.2f} dB   "
             f"peakA {result.peak_dba:7.2f} dBA   "
-            f"impulse {result.peak_impulse_db:9.2f} dB*ms   "
+            f"impulse {result.impulse_pa_ms:7.2f} Pa*ms ({result.peak_impulse_db:6.2f} dB*ms)   "
+            f"Leq10ms {result.leq10ms_db:7.2f} dBA   "
             f"LIAeq {result.liaeq_100ms_db:7.2f} dBA"
         )
     return 0
@@ -195,6 +197,17 @@ def _cmd_report(args: argparse.Namespace, repo: WorkflowRepository) -> int:
     return 0
 
 
+def _fmt(value: float | None, width: int = 7) -> str:
+    """Fixed-width metric value; a blanked (None) average renders as an em-dash.
+
+    Group averages come back ``None`` for any metric whose column is all-NULL over
+    the group — e.g. after the v2 migration blanks a legacy database's metrics but
+    before the shots are re-marked. Mirrors the GUI's ``_format_metric`` so the CLI
+    report degrades to "—" instead of crashing on ``f"{None:.2f}"``.
+    """
+    return f"{'—':>{width}}" if value is None else f"{value:{width}.2f}"
+
+
 def _print_group_averages(group_avg, *, indent: str = "") -> None:
     g = group_avg.group
     print(f"{indent}Group #{g.id}  {g.test_platform} / {g.ammo}  ({group_avg.n_shots} shot(s))")
@@ -207,10 +220,12 @@ def _print_group_averages(group_avg, *, indent: str = "") -> None:
             continue
         print(
             f"{indent}  {position.value} (n={avg['n']}): "
-            f"peak {avg['peak_db']:7.2f} dB   "
-            f"peakA {avg['peak_dba']:7.2f} dBA   "
-            f"impulse {avg['peak_impulse_db']:9.2f} dB*ms   "
-            f"LIAeq {avg['liaeq_100ms_db']:7.2f} dBA"
+            f"peakPa {_fmt(avg['peak_pa'], 8)} Pa   "
+            f"peak {_fmt(avg['peak_db'])} dB   "
+            f"peakA {_fmt(avg['peak_dba'])} dBA   "
+            f"impulse {_fmt(avg['impulse_pa_ms'])} Pa*ms ({_fmt(avg['peak_impulse_db'], 6)} dB*ms)   "
+            f"Leq10ms {_fmt(avg['leq10ms_db'])} dBA   "
+            f"LIAeq {_fmt(avg['liaeq_100ms_db'])} dBA"
         )
 
 

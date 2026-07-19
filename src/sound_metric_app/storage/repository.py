@@ -10,12 +10,15 @@ Standard-library ``sqlite3`` only. Foreign keys are enforced per connection.
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 
+from ..config import P_REF
 from ..models import Batch, Group, MetricResult, MicPosition, Shot
 from ._base import _SqliteStore
+from .database import _METRIC_COLUMNS
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS batches (
@@ -60,16 +63,47 @@ CREATE TABLE IF NOT EXISTS channel_metrics (
     channel         TEXT NOT NULL,   -- raw source channel name
     sample_rate     REAL NOT NULL,
     n_samples       INTEGER NOT NULL,
+    peak_pa         REAL,
     peak_db         REAL,
+    peak_a_pa       REAL,
     peak_dba        REAL,
+    impulse_pa_ms   REAL,
     peak_impulse_db REAL,
+    leq10ms_pa      REAL,
+    leq10ms_db      REAL,
+    liaeq_pa        REAL,
     liaeq_100ms_db  REAL,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (shot_id, mic_position)
 );
 """
 
-_METRIC_FIELDS = ("peak_db", "peak_dba", "peak_impulse_db", "liaeq_100ms_db")
+#: Every stored metric column (linear magnitude + its dB level), shared with the
+#: flat ResultsDatabase so both stores' schemas stay in lockstep.
+_METRIC_FIELDS = _METRIC_COLUMNS
+
+#: Linear-magnitude column -> the dB column derived from its group-average. Group
+#: aggregation averages the linear magnitude, then converts once (MATH.md §9).
+_LINEAR_TO_DB = {
+    "peak_pa": "peak_db",
+    "peak_a_pa": "peak_dba",
+    "impulse_pa_ms": "peak_impulse_db",
+    "leq10ms_pa": "leq10ms_db",
+    "liaeq_pa": "liaeq_100ms_db",
+}
+
+
+def _pa_to_db(magnitude: float | None) -> float | None:
+    """dB level of a group-averaged linear magnitude (Pa or Pa·ms), or None.
+
+    Returns ``None`` when the average is unavailable (no non-NULL rows) and
+    ``-inf`` for a non-positive average, so a silent group never taints the log.
+    """
+    if magnitude is None:
+        return None
+    if magnitude <= 0.0:
+        return float("-inf")
+    return 20.0 * math.log10(magnitude / P_REF)
 
 
 class WorkflowRepository(_SqliteStore):
@@ -83,16 +117,25 @@ class WorkflowRepository(_SqliteStore):
         # column on databases created before it existed.
         self._add_column_if_missing("shots", "captured_at", "TEXT")
 
+        # The linear-magnitude / new-metric columns were added after
+        # channel_metrics first shipped; back-fill them on older databases.
+        for column in _METRIC_COLUMNS:
+            self._add_column_if_missing("channel_metrics", column, "REAL")
+
         if self._schema_version() < 1:
-            # peak_impulse_db used to be the maximum Impulse level [dB]; it is
-            # now that level integrated over the frame [dB*ms] (MATH.md §6).
-            # Older rows cannot be converted -- the integral needs the waveform,
-            # not the stored scalar -- so blank them rather than let AVG() mix
-            # the two unit systems into a number that looks plausible and means
-            # nothing. NULL reads as "unknown" and AVG() skips it. Re-processing
-            # the source files repopulates these rows in the new units.
+            # peak_impulse_db used to be a plain Impulse level [dB]; a later
+            # revision made it dB*ms. Older rows cannot be converted, so blank them.
             self._conn.execute("UPDATE channel_metrics SET peak_impulse_db = NULL")
             self._set_schema_version(1)
+        if self._schema_version() < 2:
+            # Metrics were realigned to TBAC's onset-anchored definitions and now
+            # store a linear magnitude per metric (MATH.md §6/§7/§9). Old rows hold
+            # values under the previous whole-frame definitions with no linear
+            # companion, so blank every metric column; re-marking a shot
+            # re-processes the capture and repopulates them.
+            cols = ", ".join(f"{c} = NULL" for c in _METRIC_COLUMNS)
+            self._conn.execute(f"UPDATE channel_metrics SET {cols}")
+            self._set_schema_version(2)
 
     #: True while a :meth:`transaction` block is active, so the individual
     #: mutating methods defer their commit to the enclosing block.
@@ -433,20 +476,21 @@ class WorkflowRepository(_SqliteStore):
         self, shot_id: int, mic_position: MicPosition, result: MetricResult
     ) -> int:
         """Persist one mic's metrics for a shot. Upserts on (shot, position)."""
+        row = result.as_row()
+        metric_cols = ", ".join(_METRIC_COLUMNS)
+        placeholders = ", ".join("?" * len(_METRIC_COLUMNS))
+        updates = ", ".join(f"{c} = excluded.{c}" for c in _METRIC_COLUMNS)
         cur = self._conn.execute(
-            """
+            f"""
             INSERT INTO channel_metrics
                 (shot_id, mic_position, channel, sample_rate, n_samples,
-                 peak_db, peak_dba, peak_impulse_db, liaeq_100ms_db)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 {metric_cols})
+            VALUES (?, ?, ?, ?, ?, {placeholders})
             ON CONFLICT (shot_id, mic_position) DO UPDATE SET
                 channel = excluded.channel,
                 sample_rate = excluded.sample_rate,
                 n_samples = excluded.n_samples,
-                peak_db = excluded.peak_db,
-                peak_dba = excluded.peak_dba,
-                peak_impulse_db = excluded.peak_impulse_db,
-                liaeq_100ms_db = excluded.liaeq_100ms_db
+                {updates}
             RETURNING id
             """,
             (
@@ -455,10 +499,7 @@ class WorkflowRepository(_SqliteStore):
                 result.channel,
                 result.sample_rate,
                 result.n_samples,
-                result.peak_db,
-                result.peak_dba,
-                result.peak_impulse_db,
-                result.liaeq_100ms_db,
+                *(row[c] for c in _METRIC_COLUMNS),
             ),
         )
         row_id = int(cur.fetchone()[0])
@@ -495,18 +536,28 @@ class WorkflowRepository(_SqliteStore):
     def group_averages(self, group_id: int) -> dict[MicPosition, dict]:
         """Average each metric across a group's shots, separately per mic position.
 
+        Averaging is done in the **linear domain** (MATH.md §9): each metric's
+        per-shot linear magnitude (Pa, or Pa·ms for the impulse) is meaned, then
+        that mean is converted once to its dB level — not a mean of the dB values.
         SE and MR are never mixed: the result maps each present
-        :class:`MicPosition` to ``{peak_db, peak_dba, peak_impulse_db,
-        liaeq_100ms_db, n}``. Positions absent from the group are omitted.
+        :class:`MicPosition` to a dict carrying every metric's averaged linear
+        magnitude and dB level plus ``n``. Positions absent from the group are
+        omitted.
+
+        ``n`` is ``COUNT(*)`` — the shot count for the position — while each
+        ``AVG`` divides by the count of *non-NULL* values. In normal operation
+        every shot's metrics are populated, so the two coincide (MATH.md §10). They
+        diverge only in edge states: a partially re-processed group (some shots
+        still blanked by the v2 migration) or a NaN-contaminated metric (stored as
+        NULL, hence skipped by ``AVG`` and shown as "—" per shot). In those cases a
+        metric's average is a mean over the available shots, not all ``n``.
         """
+        linear_avgs = ", ".join(f"AVG(cm.{c}) AS {c}" for c in _LINEAR_TO_DB)
         cur = self._conn.execute(
-            """
+            f"""
             SELECT cm.mic_position AS pos,
-                   AVG(cm.peak_db)         AS peak_db,
-                   AVG(cm.peak_dba)        AS peak_dba,
-                   AVG(cm.peak_impulse_db) AS peak_impulse_db,
-                   AVG(cm.liaeq_100ms_db)  AS liaeq_100ms_db,
-                   COUNT(*)                AS n
+                   {linear_avgs},
+                   COUNT(*) AS n
             FROM channel_metrics cm
             JOIN shots s ON s.id = cm.shot_id
             WHERE s.group_id = ?
@@ -516,10 +567,11 @@ class WorkflowRepository(_SqliteStore):
         )
         out: dict[MicPosition, dict] = {}
         for r in cur.fetchall():
-            out[MicPosition(r["pos"])] = {
-                **{k: r[k] for k in _METRIC_FIELDS},
-                "n": int(r["n"]),
-            }
+            entry: dict = {"n": int(r["n"])}
+            for linear, db in _LINEAR_TO_DB.items():
+                entry[linear] = r[linear]
+                entry[db] = _pa_to_db(r[linear])
+            out[MicPosition(r["pos"])] = entry
         return out
 
     def shot_metrics_for_group(self, group_id: int) -> dict[MicPosition, list[dict]]:
@@ -529,17 +581,17 @@ class WorkflowRepository(_SqliteStore):
         mean per position, returns every contributing shot's own metrics so a
         report can drill down from a group's SE/MR average into the individual
         shots behind it. Maps each present :class:`MicPosition` to a list of
-        ``{shot_id, shot_order, source_file, peak_db, peak_dba,
-        peak_impulse_db, liaeq_100ms_db}``, ordered by shot order then id.
-        Positions absent from the group are omitted.
+        ``{shot_id, shot_order, source_file, <every metric column>}``, ordered by
+        shot order then id. Positions absent from the group are omitted.
         """
+        metric_select = ", ".join(f"cm.{c}" for c in _METRIC_COLUMNS)
         cur = self._conn.execute(
-            """
+            f"""
             SELECT cm.mic_position       AS pos,
                    s.id                  AS shot_id,
                    s.shot_order          AS shot_order,
                    s.source_file         AS source_file,
-                   cm.peak_db, cm.peak_dba, cm.peak_impulse_db, cm.liaeq_100ms_db
+                   {metric_select}
             FROM channel_metrics cm
             JOIN shots s ON s.id = cm.shot_id
             WHERE s.group_id = ?

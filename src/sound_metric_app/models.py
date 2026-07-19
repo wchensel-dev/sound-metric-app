@@ -135,14 +135,26 @@ class MicChannel:
 class MetricResult:
     """Computed acoustic metrics for a single :class:`Frame`.
 
+    Each metric carries both its **linear magnitude** (a pressure in Pa, or the
+    positive-phase impulse in Pa·ms) and the **dB level** derived from it. The
+    linear value is the source of truth: group aggregation averages the linear
+    magnitudes and converts to dB once (MATH.md §9), while a per-shot view shows
+    the stored dB directly. ``dB = 20*log10(magnitude / p_ref)`` in every case.
+
     Mic position is not carried here: the DSP layer works on bare frames and has
     no concept of SE/MR. The tagged position lives on :class:`MicChannel` and is
     passed explicitly to storage when the metrics are persisted.
     """
 
+    peak_pa: float  # raw signed peak pressure, Pa (positive overpressure)
     peak_db: float
+    peak_a_pa: float  # A-weighted signed peak pressure, Pa
     peak_dba: float
-    peak_impulse_db: float
+    impulse_pa_ms: float  # positive-phase acoustic impulse, Pa·ms
+    peak_impulse_db: float  # 20*log10(impulse_pa_ms / p_ref), dB·ms
+    leq10ms_pa: float  # peak 10 ms-Leq (A-weighted RMS), Pa
+    leq10ms_db: float
+    liaeq_pa: float  # LIAeq,100ms (A-weighted RMS), Pa
     liaeq_100ms_db: float
     source_file: str
     channel: str
@@ -158,9 +170,15 @@ class MetricResult:
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             "sample_rate": self.sample_rate,
             "n_samples": self.n_samples,
+            "peak_pa": self.peak_pa,
             "peak_db": self.peak_db,
+            "peak_a_pa": self.peak_a_pa,
             "peak_dba": self.peak_dba,
+            "impulse_pa_ms": self.impulse_pa_ms,
             "peak_impulse_db": self.peak_impulse_db,
+            "leq10ms_pa": self.leq10ms_pa,
+            "leq10ms_db": self.leq10ms_db,
+            "liaeq_pa": self.liaeq_pa,
             "liaeq_100ms_db": self.liaeq_100ms_db,
         }
 

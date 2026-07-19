@@ -9,16 +9,46 @@ from pathlib import Path
 # Reference sound pressure for dB SPL (20 micropascals).
 P_REF: float = 20e-6
 
-# Analysis window (LIAeq is reported per 100 ms).
-WINDOW_MS: float = 100.0
+# --------------------------------------------------------------------------- #
+# Acquisition & analysis windows
+# --------------------------------------------------------------------------- #
+# Every metric is computed over a fixed window anchored to the detected shot
+# onset (first raw-pressure sample above ONSET_THRESHOLD_PA), aligning with
+# TBAC's process_string.m. See MATH.md §2/§6/§7.
 
-# Nominal DewesoftX acquisition parameters (used for validation warnings only).
+# Shot onset: first raw-pressure sample above this level (Pa). TBAC uses 1 Pa.
+ONSET_THRESHOLD_PA: float = 1.0
+
+# Peak/impulse search window after onset (ms): the signed peak and the
+# positive-phase impulse are found within [onset, onset + PEAK_WINDOW_MS].
+PEAK_WINDOW_MS: float = 75.0
+
+# Peak 10 ms-Leq: rectangular running-Leq integration time (s), and the
+# post-onset span its running maximum is searched over (ms).
+LEQ_TAU_S: float = 0.010
+LEQ_SEARCH_MS: float = 25.0
+
+# Proprietary LIAeq: A-weighted equivalent level over the free-field energy
+# window [onset, onset + LIAEQ_WINDOW_MS] (MATH.md §7).
+LIAEQ_WINDOW_MS: float = 100.0
+
+# Nominal DewesoftX acquisition standard: a 1 Pa trigger with a 10 ms
+# pre-trigger lead and 200 ms post-trigger capture (T = 210 ms, N = 42 000 at
+# fs = 200 kHz). These are the config source-of-record constants behind
+# MATH.md §1's `fs`/`N`/`T` rows and §2.3; the formulas use each file's actual
+# fs and N, so of this set only CAPTURE_MS is read at runtime — the "no onset"
+# warning cites it as the expected frame length.
 EXPECTED_FS: float = 200_000.0
-EXPECTED_SAMPLES: int = 20_000
+LEAD_MS: float = 10.0
+POST_MS: float = 200.0
+CAPTURE_MS: float = LEAD_MS + POST_MS  # 210 ms nominal frame
+EXPECTED_SAMPLES: int = 42_000  # CAPTURE_MS at EXPECTED_FS
 
-# Impulse ("I") time-weighting constants, IEC 61672.
-IMPULSE_RISE_S: float = 0.035
-IMPULSE_FALL_S: float = 1.5
+# Exponential RMS time-weighting constants for SPL-over-time display, IEC 61672.
+# "Fast" and "Slow" are the standard sound-level-meter time constants; they turn
+# the per-cycle swing of the raw waveform into a continuous level envelope.
+FAST_TIME_S: float = 0.125
+SLOW_TIME_S: float = 1.0
 
 # Default local SQLite database file (relative to working dir).
 DEFAULT_DB_PATH: str = "sound_metrics.db"

@@ -99,6 +99,41 @@ def test_full_ingest_mark_close_report_cycle(env, capture_reader, capsys):
     assert "[closed]" in capsys.readouterr().out
 
 
+def test_report_does_not_crash_on_blanked_metric_averages(env, capture_reader, capsys):
+    # After the v2 migration blanks a legacy database's metric columns, a report
+    # run before the shots are re-marked must degrade to "—", not crash on
+    # f"{None:.2f}". The group's averages dict is non-empty (positions present),
+    # so the "no metrics" guard does not catch this.
+    db, inbox = env
+    _touch(inbox, "SUP-1_AR15_001.dxd")
+    workflow_cli.main(["ingest", str(inbox), "--db", db, "--no-validate"])
+    workflow_cli.main(
+        ["mark", "1", "--ammo", "M855", "--se", "AI 1", "--mr", "AI 2", "--db", db]
+    )
+    capsys.readouterr()
+
+    # Simulate the blanked (post-migration, pre-re-mark) state.
+    with WorkflowRepository(db) as repo:
+        cols = ", ".join(
+            f"{c} = NULL"
+            for c in (
+                "peak_pa", "peak_db", "peak_a_pa", "peak_dba", "impulse_pa_ms",
+                "peak_impulse_db", "leq10ms_pa", "leq10ms_db", "liaeq_pa", "liaeq_100ms_db",
+            )
+        )
+        repo._conn.execute(f"UPDATE channel_metrics SET {cols}")
+        repo._conn.commit()
+        group_id = repo.groups_for_batch(1)[0].id
+
+    # Both the --batch and --group report paths must survive and show em-dashes.
+    assert workflow_cli.main(["report", "--batch", "1", "--db", db]) == 0
+    batch_out = capsys.readouterr().out
+    assert "SE (n=1)" in batch_out and "—" in batch_out
+
+    assert workflow_cli.main(["report", "--group", str(group_id), "--db", db]) == 0
+    assert "—" in capsys.readouterr().out
+
+
 # --------------------------------------------------------------------------- #
 # ingest
 # --------------------------------------------------------------------------- #

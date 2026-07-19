@@ -91,6 +91,7 @@ def test_processor_produces_finite_metrics():
     frame = read_frame(SAMPLE)
     result = MetricsProcessor().process(frame)
     for value in (
+        result.peak_pa,
         result.peak_db,
         result.peak_dba,
         result.peak_impulse_db,

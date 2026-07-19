@@ -1,12 +1,13 @@
 """Aggregation service (BUILD_PLAN Task 7).
 
-Computes per-group averages of the four metrics, **separately for SE and MR**
+Computes per-group averages of the metrics, **separately for SE and MR**
 (README §4: positions are never mixed), and rolls the groups of a batch up into
 one report ready for the CLI/GUI report views.
 
-Averaging in dB is done as a plain arithmetic mean of the per-shot metric values
-— the same convention the underlying store uses — so a group's SE average is the
-mean of its shots' SE values and likewise for MR.
+Averaging is done in the **linear domain** (MATH.md §9), matching TBAC: each
+metric's per-shot linear magnitude (Pa, or Pa·ms for the impulse) is meaned and
+the mean converted once to its dB level — not a mean of the dB values. The
+underlying store does this; the service just wraps it per group and per batch.
 """
 
 from __future__ import annotations
@@ -22,9 +23,12 @@ class GroupAverages:
     """Per-mic averages for one group, plus how many shots fed them.
 
     ``averages`` maps each present :class:`~sound_metric_app.models.MicPosition`
-    to ``{peak_db, peak_dba, peak_impulse_db, liaeq_100ms_db, n}`` where ``n`` is
-    the number of shots contributing that position. Positions absent from the
-    group are omitted, so a single-mic group yields a single entry.
+    to a dict carrying every metric's group-averaged linear magnitude and dB level
+    (``peak_pa``/``peak_db``, ``peak_a_pa``/``peak_dba``,
+    ``impulse_pa_ms``/``peak_impulse_db``, ``leq10ms_pa``/``leq10ms_db``,
+    ``liaeq_pa``/``liaeq_100ms_db``) plus ``n``, the number of shots contributing
+    that position. Positions absent from the group are omitted, so a single-mic
+    group yields a single entry.
 
     ``shots`` is the un-averaged drill-down behind those averages: each present
     position maps to a list of the individual shot metric rows the average was
