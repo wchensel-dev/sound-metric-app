@@ -224,6 +224,22 @@ def test_processor_10ms_leq_exceeds_100ms_liaeq_for_a_transient():
     assert r.leq10ms_db > r.liaeq_100ms_db
 
 
+def test_leq10ms_peak_invariant_to_pre_trigger_lead():
+    # The running-Leq ramp normalises partial (zero-padded) windows by the full L,
+    # so a short pre-trigger lead (< LEQ_TAU_S) lets the onset-anchored search
+    # window overlap the ramp. That must NOT depress the peak: the blast is far
+    # louder than the sub-1 Pa lead, so the running RMS peaks past the ramp
+    # (i >= L) and the window max is the true trailing-window peak regardless of
+    # lead. Locks the lead-invariance so the ramp is never "fixed" into a bias.
+    peaks = [
+        MetricsProcessor().process(_blast_frame(peak_pa=2000.0, lead_ms=lead)).leq10ms_pa
+        for lead in (0.5, 2.0, 5.0, 10.0, 20.0)
+    ]
+    ref = peaks[-1]  # 20 ms lead: search window sits fully past the 10 ms ramp
+    for peak in peaks:
+        assert peak == pytest.approx(ref, rel=1e-3)
+
+
 def test_processor_warns_when_no_onset():
     frame = Frame(
         samples=np.full(42_000, 0.5), sample_rate=FS, channel="AI 1", source_file="q.dxd"

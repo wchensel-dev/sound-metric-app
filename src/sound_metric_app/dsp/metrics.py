@@ -141,8 +141,14 @@ def running_leq_rms(pressure: np.ndarray, fs: float, tau_s: float = LEQ_TAU_S) -
     (the mean-square is a boxcar sum divided by ``L``, then square-rooted). Unlike
     ``Leq_fast``'s FFT (circular) convolution this is strictly causal, so the
     leading ``L`` samples ramp up from zero state rather than wrapping the array
-    tail; an onset-anchored search window sits past that ramp, so reported maxima
-    match. The caller takes the max over its search window.
+    tail. That ramp (``csum[:L] / L``) is the correct *zero-padded* energy for a
+    trailing window predating capture start, not a bias — it can never exceed a
+    full ``L``-sample window over the same blast. Because the sub-1 Pa pre-onset
+    lead carries far less energy than the blast, the running RMS climbs through the
+    ramp and peaks at ``i >= L``, so the caller's onset-anchored max is the true
+    trailing-window peak even when a short (< ``tau``) pre-trigger lead lets its
+    search window dip into the ramp. The caller takes the max over its search
+    window.
     """
     p = np.asarray(pressure, dtype=float)
     n = p.size
