@@ -41,7 +41,14 @@ from ..config import (
     SLOW_TIME_S,
 )
 from ..models import Frame
-from .metrics import find_onset, pa_to_db, rms_pa, running_leq_rms, window_samples
+from .metrics import (
+    _positive_phase_impulse,
+    find_onset,
+    pa_to_db,
+    rms_pa,
+    running_leq_rms,
+    window_samples,
+)
 from .weighting import apply_a_weighting
 
 #: SPL-over-time rendering modes for :func:`build_metric_trace`.
@@ -203,19 +210,10 @@ def build_metric_trace(
         # window; the marker sits at the peak of the positive phase (the reported
         # value), found before the running integral turns over into its minimum.
         start, stop = _onset_window(fs, onset, PEAK_WINDOW_MS)
-        seg = p[start:stop]
-        dt_ms = 1000.0 / fs
-        if seg.size >= 2:
-            q = np.concatenate(([0.0], np.cumsum((seg[:-1] + seg[1:]) * 0.5 * dt_ms)))
-        else:
-            q = np.zeros(seg.size)
+        q, local_peak = _positive_phase_impulse(p[start:stop], fs)
         values = np.full(p.shape[0], np.nan)
         values[start : start + q.size] = q
-        peak_index = None
-        if q.size:
-            i_min = int(np.argmin(q))
-            upper = q if i_min == 0 else q[: i_min + 1]
-            peak_index = start + int(np.argmax(upper))
+        peak_index = start + local_peak if local_peak is not None else None
         return MetricTrace(
             t_ms, values, "Impulse ∫p·dt (Pa·ms)", "Peak Impulse",
             peak_index=peak_index, connected=True,

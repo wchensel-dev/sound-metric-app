@@ -74,6 +74,32 @@ def rms_pa(pressure: np.ndarray) -> float:
     return float(np.sqrt(np.mean(p**2)))
 
 
+def _positive_phase_impulse(segment: np.ndarray, fs: float) -> tuple[np.ndarray, int | None]:
+    """Running impulse ``∫p·dt`` (Pa·ms) of a segment and its positive-phase peak.
+
+    Single source of truth shared by :func:`positive_phase_impulse_pa_ms` (which
+    reports the scalar peak) and the Report graph's Impulse trace (which draws the
+    ``q`` curve and marks the peak) so the two can never drift. Returns
+    ``(q, peak_index)`` where ``q`` is the cumulative-trapezoid integral (same
+    length as ``segment``, ``q[0] = 0``) and ``peak_index`` indexes ``q`` at the
+    positive-phase peak — the max of ``q`` up to its minimum (the end of the
+    negative phase), per TBAC's min-bounding rule. ``peak_index`` is ``None`` only
+    for an empty segment.
+    """
+    seg = np.asarray(segment, dtype=float)
+    n = seg.size
+    if n == 0:
+        return np.zeros(0), None
+    if n < 2:
+        return np.zeros(n), 0
+    dt_ms = 1000.0 / fs
+    # Cumulative trapezoidal integral, same length as seg, q[0] = 0 (no scipy dep).
+    q = np.concatenate(([0.0], np.cumsum((seg[:-1] + seg[1:]) * 0.5 * dt_ms)))
+    i_min = int(np.argmin(q))
+    upper = q if i_min == 0 else q[: i_min + 1]
+    return q, int(np.argmax(upper))
+
+
 def positive_phase_impulse_pa_ms(pressure: np.ndarray, fs: float) -> float:
     """Peak positive-phase acoustic impulse ``∫p·dt`` over the segment, in Pa·ms.
 
@@ -99,17 +125,12 @@ def positive_phase_impulse_pa_ms(pressure: np.ndarray, fs: float) -> float:
     (whose ``dB*ms`` is ``pa_to_db`` of this value). A NaN in the input propagates
     so contaminated data surfaces instead of a plausible-looking value.
     """
-    p = np.asarray(pressure, dtype=float)
-    if p.size < 2:
+    q, peak_index = _positive_phase_impulse(pressure, fs)
+    if peak_index is None or q.size < 2:
         return 0.0
-    dt_ms = 1000.0 / fs
-    # Cumulative trapezoidal integral, same length as p, q[0] = 0 (no scipy dep).
-    q = np.concatenate(([0.0], np.cumsum((p[:-1] + p[1:]) * 0.5 * dt_ms)))
     if np.isnan(q).any():
         return float("nan")
-    i_min = int(np.argmin(q))
-    upper = q if i_min == 0 else q[: i_min + 1]
-    return max(float(np.max(upper)), 0.0)
+    return max(float(q[peak_index]), 0.0)
 
 
 def running_leq_rms(pressure: np.ndarray, fs: float, tau_s: float = LEQ_TAU_S) -> np.ndarray:

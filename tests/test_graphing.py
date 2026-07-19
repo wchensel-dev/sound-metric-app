@@ -12,7 +12,13 @@ from sound_metric_app.dsp import (
     SMOOTHING_SLOW,
     build_metric_trace,
 )
-from sound_metric_app.dsp.metrics import find_onset, pa_to_db, rms_pa, window_samples
+from sound_metric_app.dsp.metrics import (
+    find_onset,
+    pa_to_db,
+    positive_phase_impulse_pa_ms,
+    rms_pa,
+    window_samples,
+)
 from sound_metric_app.dsp.weighting import apply_a_weighting
 from sound_metric_app.models import Frame
 
@@ -88,6 +94,19 @@ def test_impulse_trace_is_the_cumulative_integral_curve():
     # The marker sits on the positive-phase peak, with a positive impulse value.
     assert trace.peak_index is not None
     assert trace.values[trace.peak_index] > 0.0
+
+
+def test_impulse_marker_equals_reported_scalar():
+    # Regression guard: the graph's Impulse marker must land on exactly the value
+    # positive_phase_impulse_pa_ms reports. Both now share one implementation
+    # (_positive_phase_impulse), so a change to the min-bounding rule can't move
+    # the marker off the reported number.
+    frame = _shot_frame()
+    trace = build_metric_trace(frame, "peak_impulse_db")
+    start, stop = _onset_window(frame.samples)
+    reported = positive_phase_impulse_pa_ms(frame.samples[start:stop], FS)
+    assert trace.peak_index is not None
+    assert trace.values[trace.peak_index] == pytest.approx(reported)
 
 
 def test_impulse_pa_ms_key_graphs_the_same_curve():
