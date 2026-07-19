@@ -91,13 +91,18 @@ def test_batch_group_shot_defaults():
 def test_metric_result_as_row_has_no_mic_position():
     # Mic position is not a DSP-result concern; storage receives it separately.
     r = MetricResult(
-        peak_db=1.0,
-        peak_dba=2.0,
-        peak_impulse_db=3.0,
-        liaeq_100ms_db=4.0,
+        peak_pa=5.0, peak_db=1.0,
+        peak_a_pa=6.0, peak_dba=2.0,
+        impulse_pa_ms=7.0, peak_impulse_db=3.0,
+        leq10ms_pa=8.0, leq10ms_db=9.0,
+        liaeq_pa=10.0, liaeq_100ms_db=4.0,
         source_file="f.dxd",
         channel="AI 1",
         sample_rate=200_000.0,
-        n_samples=20_000,
+        n_samples=42_000,
     )
-    assert "mic_position" not in r.as_row()
+    row = r.as_row()
+    assert "mic_position" not in row
+    # Every metric carries both its linear magnitude and its dB level.
+    for key in ("peak_pa", "peak_a_pa", "impulse_pa_ms", "leq10ms_pa", "leq10ms_db", "liaeq_pa"):
+        assert key in row

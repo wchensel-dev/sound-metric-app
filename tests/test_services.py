@@ -13,6 +13,7 @@ from datetime import datetime
 import numpy as np
 import pytest
 
+from sound_metric_app.dsp.metrics import pa_to_db
 from sound_metric_app.models import Frame, MetricResult, MicPosition
 from sound_metric_app.services import (
     AggregationService,
@@ -57,15 +58,21 @@ class FakeCaptureReader:
 
 
 class PeakProcessor:
-    """Deterministic DSP double: every metric equals the frame's peak sample."""
+    """Deterministic DSP double: every linear magnitude equals the frame's peak.
+
+    dB fields are the matching ``pa_to_db``, mirroring a real MetricResult so the
+    store's linear-then-dB averaging is exercised faithfully.
+    """
 
     def process(self, frame: Frame) -> MetricResult:
         v = float(np.max(np.abs(frame.samples)))
+        db = pa_to_db(v)
         return MetricResult(
-            peak_db=v,
-            peak_dba=v,
-            peak_impulse_db=v,
-            liaeq_100ms_db=v,
+            peak_pa=v, peak_db=db,
+            peak_a_pa=v, peak_dba=db,
+            impulse_pa_ms=v, peak_impulse_db=db,
+            leq10ms_pa=v, leq10ms_db=db,
+            liaeq_pa=v, liaeq_100ms_db=db,
             source_file=frame.source_file,
             channel=frame.channel,
             sample_rate=frame.sample_rate,
@@ -503,14 +510,17 @@ def test_group_and_batch_report_keep_se_mr_separate(repo):
     group = agg.group_averages(group_id)
     assert group.n_shots == 2
     assert set(group.averages) == {MicPosition.SE, MicPosition.MR}
-    assert group.averages[MicPosition.SE]["peak_db"] == pytest.approx(165.0)
-    assert group.averages[MicPosition.MR]["peak_db"] == pytest.approx(155.0)
+    # Linear-Pa mean (165 / 155), then converted once to dB.
+    assert group.averages[MicPosition.SE]["peak_pa"] == pytest.approx(165.0)
+    assert group.averages[MicPosition.SE]["peak_db"] == pytest.approx(pa_to_db(165.0))
+    assert group.averages[MicPosition.MR]["peak_pa"] == pytest.approx(155.0)
+    assert group.averages[MicPosition.MR]["peak_db"] == pytest.approx(pa_to_db(155.0))
     assert group.averages[MicPosition.SE]["n"] == 2
 
     report = agg.batch_report(batch_id)
     assert report.batch.id == batch_id
     assert len(report.groups) == 1
-    assert report.groups[0].averages[MicPosition.SE]["peak_db"] == pytest.approx(165.0)
+    assert report.groups[0].averages[MicPosition.SE]["peak_pa"] == pytest.approx(165.0)
 
 
 def test_batch_report_covers_multiple_groups(repo):

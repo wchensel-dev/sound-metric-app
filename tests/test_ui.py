@@ -13,6 +13,9 @@ import numpy as np
 import pytest
 
 pytest.importorskip("PySide6")
+pytest.importorskip("pyqtgraph")
+
+from PySide6 import QtCore  # noqa: E402
 
 from sound_metric_app.ingestion import ChannelInfo  # noqa: E402
 from sound_metric_app.models import Frame  # noqa: E402
@@ -93,6 +96,108 @@ def test_selecting_shot_with_null_keys_does_not_crash_mark_tab(window):
     assert mv._current_shot_id() == shot_id
     assert mv.sku_edit.placeholderText() == ""
     assert mv.platform_edit.placeholderText() == ""
+
+
+def _mark_all_shots(window, qtbot):
+    """Ingest the fixture inbox and mark every shot (SE=AI 1, MR=AI 2)."""
+    window.ingest_view._ingest()
+    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)
+    while window.ingest_view.table.rowCount() > 0:
+        first_id = int(window.ingest_view.table.item(0, 0).text())
+        window.open_marking_for(first_id)
+        mv = window.marking_view
+        qtbot.waitUntil(
+            lambda: mv.se_combo.isEnabled() and mv.se_combo.count() >= 3, timeout=5000
+        )
+        mv.ammo_combo.setCurrentText("M855")
+        before = window.ingest_view.table.rowCount()
+        mv._mark()
+        qtbot.waitUntil(
+            lambda: window.ingest_view.table.rowCount() < before, timeout=5000
+        )
+
+
+def test_clicking_metric_cell_graphs_that_shot(window, qtbot):
+    from sound_metric_app.models import MicPosition
+
+    _mark_all_shots(window, qtbot)
+
+    rv = window.report_view
+    rv.refresh()
+    qtbot.waitUntil(lambda: rv.tree.topLevelItemCount() >= 2, timeout=5000)
+
+    # Drill into an SE average row and grab one of its shot children.
+    se_top = next(
+        rv.tree.topLevelItem(i)
+        for i in range(rv.tree.topLevelItemCount())
+        if rv.tree.topLevelItem(i).text(1) == "SE"
+    )
+    shot_item = se_top.child(0)
+    kind, _shot_id, position = shot_item.data(0, QtCore.Qt.UserRole)
+    assert kind == "shot" and position == MicPosition.SE
+
+    # Click the first metric cell (Peak Pa) -> one curve is drawn.
+    peak_col = rv._FIRST_METRIC_COL
+    rv._on_cell_clicked(shot_item, peak_col)
+    qtbot.waitUntil(lambda: len(rv.graph._plot.listDataItems()) >= 1, timeout=5000)
+
+    # Auto Frame becomes usable once a trace is drawn, and snaps X to the shot
+    # window's full width (first/last sample), which the yellow bounds mark.
+    assert rv.graph._auto_frame_btn.isEnabled()
+    assert rv.graph._x_bounds is not None
+    x0, x1 = rv.graph._x_bounds
+    rv.graph.auto_frame()
+    view_x0, view_x1 = rv.graph._plot.getViewBox().viewRange()[0]
+    assert view_x0 == pytest.approx(x0)
+    assert view_x1 == pytest.approx(x1)
+
+    # Clicking a non-metric column just prompts; it doesn't graph, and Auto Frame
+    # goes back to disabled with no bounds.
+    rv._on_cell_clicked(shot_item, 0)
+    assert len(rv.graph._plot.listDataItems()) == 0
+    assert not rv.graph._auto_frame_btn.isEnabled()
+    assert rv.graph._x_bounds is None
+
+
+def test_graph_point_readout_shows_value_and_clears(qtbot):
+    from sound_metric_app.dsp.graphing import MetricTrace
+    from sound_metric_app.ui.main_window import MetricGraph, _unit_of
+
+    assert _unit_of("SPL (dBA)") == "dBA"
+    assert _unit_of("Pressure (Pa)") == "Pa"
+    assert _unit_of("no parens") == "no parens"
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+
+    trace = MetricTrace(
+        t_ms=np.array([0.0, 1.0, 2.0]),
+        values=np.array([100.0, 142.5, np.nan]),
+        y_label="SPL (dBA)",
+        title="Peak dBA",
+        peak_index=1,
+    )
+    graph.show_trace(trace)
+    # Nothing picked yet: the readout box is hidden.
+    assert not graph._readout_label.isVisible()
+    assert graph._pick_marker is None
+
+    # Picking a sample fills the box with its value + unit + time and marks it.
+    graph._show_readout(1, 142.5)
+    assert graph._pick_marker is not None
+    text = graph._readout_label.text()
+    assert "142.500" in text and "dBA" in text and "1.00 ms" in text
+
+    # Clear removes the marker and hides the box.
+    graph.clear_readout()
+    assert graph._pick_marker is None
+    assert not graph._readout_label.isVisible()
+
+    # Drawing a fresh trace also drops any prior pick.
+    graph._show_readout(0, 100.0)
+    graph.show_trace(trace)
+    assert graph._pick_marker is None
+    assert not graph._readout_label.isVisible()
 
 
 def test_full_workflow_through_widgets(window, qtbot):

@@ -6,21 +6,35 @@ import sqlite3
 
 import pytest
 
+from sound_metric_app.dsp.metrics import pa_to_db
 from sound_metric_app.models import MetricResult, MicPosition
 from sound_metric_app.storage import ResultsDatabase, WorkflowRepository
 
+#: Every stored metric column (linear magnitude + its derived dB level).
+_METRIC_KEYS_ALL = (
+    "peak_pa", "peak_db", "peak_a_pa", "peak_dba",
+    "impulse_pa_ms", "peak_impulse_db",
+    "leq10ms_pa", "leq10ms_db", "liaeq_pa", "liaeq_100ms_db",
+)
 
-def _metric(peak: float, channel: str = "AI 1") -> MetricResult:
-    """A MetricResult whose four metrics all equal ``peak`` (easy to average)."""
+
+def _metric(pa: float, channel: str = "AI 1") -> MetricResult:
+    """A MetricResult whose every linear magnitude equals ``pa`` (easy to average).
+
+    dB fields are the matching ``pa_to_db(pa)``, so a group's linear-then-dB
+    average of identical shots is ``pa`` (linear) and ``pa_to_db(pa)`` (dB).
+    """
+    db = pa_to_db(pa)
     return MetricResult(
-        peak_db=peak,
-        peak_dba=peak,
-        peak_impulse_db=peak,
-        liaeq_100ms_db=peak,
+        peak_pa=pa, peak_db=db,
+        peak_a_pa=pa, peak_dba=db,
+        impulse_pa_ms=pa, peak_impulse_db=db,
+        leq10ms_pa=pa, leq10ms_db=db,
+        liaeq_pa=pa, liaeq_100ms_db=db,
         source_file="f.dxd",
         channel=channel,
         sample_rate=200_000.0,
-        n_samples=20_000,
+        n_samples=42_000,
     )
 
 
@@ -85,41 +99,68 @@ def test_migrate_adds_captured_at_to_legacy_shots_table(tmp_path):
         assert "captured_at" in cols
 
 
-def test_migrate_blanks_pre_dbms_impulse_values(tmp_path):
-    # peak_impulse_db changed from a max level [dB] to a time integral [dB*ms].
-    # Rows stored under the old definition are unconvertible, so opening the
-    # repo must blank them -- otherwise AVG() averages dB against dB*ms.
+def test_migrate_v2_blanks_pre_alignment_metric_columns(tmp_path):
+    # The metrics were realigned to TBAC's onset-anchored definitions and now
+    # store a linear magnitude per metric. Rows written before the realignment
+    # can't be converted, so opening the repo blanks every metric column.
     db_path = tmp_path / "stale.db"
     with WorkflowRepository(db_path) as repo:
         batch_id = repo.create_batch("SUP-1")
         group_id = repo.upsert_group(batch_id, "AR15", "M855")
         shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", shot_order=1)
         repo.mark_shot(shot_id, group_id=group_id, ammo="M855", se_channel="AI 1")
-        repo.save_channel_metric(shot_id, MicPosition.SE, _metric(150.0))
-        # Pretend this row predates the unit change.
+        repo.save_channel_metric(shot_id, MicPosition.SE, _metric(200.0))
+        # Pretend the row predates the realignment.
         repo._conn.execute("DELETE FROM schema_version")
         repo._conn.commit()
 
     with WorkflowRepository(db_path) as repo:
-        avgs = repo.group_averages(group_id)
-        assert avgs[MicPosition.SE]["peak_impulse_db"] is None
-        # Only the impulse column is affected; the true-dB metrics are untouched.
-        assert avgs[MicPosition.SE]["peak_db"] == 150.0
-        assert repo._schema_version() == 1
+        se = repo.group_averages(group_id)[MicPosition.SE]
+        for key in _METRIC_KEYS_ALL:
+            assert se[key] is None
+        assert repo._schema_version() == 2
 
 
-def test_migrate_leaves_current_impulse_values_alone(tmp_path):
-    # A row written after the stamp exists must survive later re-opens.
+def test_migrate_leaves_current_metric_values_alone(tmp_path):
+    # A row written at the current version must survive later re-opens.
     db_path = tmp_path / "current.db"
     with WorkflowRepository(db_path) as repo:
         batch_id = repo.create_batch("SUP-1")
         group_id = repo.upsert_group(batch_id, "AR15", "M855")
         shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", shot_order=1)
         repo.mark_shot(shot_id, group_id=group_id, ammo="M855", se_channel="AI 1")
-        repo.save_channel_metric(shot_id, MicPosition.SE, _metric(15000.0))
+        repo.save_channel_metric(shot_id, MicPosition.SE, _metric(200.0))
 
     with WorkflowRepository(db_path) as repo:
-        assert repo.group_averages(group_id)[MicPosition.SE]["peak_impulse_db"] == 15000.0
+        se = repo.group_averages(group_id)[MicPosition.SE]
+        assert se["peak_pa"] == pytest.approx(200.0)
+        assert se["peak_db"] == pytest.approx(pa_to_db(200.0))
+
+
+def test_migrate_backfills_missing_linear_column(tmp_path):
+    # A database whose channel_metrics predates a linear column must gain it on
+    # open. Because the group dB is *derived* from the linear magnitude, dropping
+    # peak_pa nulls both its average and the peak_db derived from it — while a
+    # metric whose linear column survives still averages.
+    db_path = tmp_path / "no_peak_pa.db"
+    with WorkflowRepository(db_path) as repo:
+        batch_id = repo.create_batch("SUP-1")
+        group_id = repo.upsert_group(batch_id, "AR15", "M855")
+        shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", shot_order=1)
+        repo.mark_shot(shot_id, group_id=group_id, ammo="M855", se_channel="AI 1")
+        repo.save_channel_metric(shot_id, MicPosition.SE, _metric(150.0))
+        repo._conn.execute("ALTER TABLE channel_metrics DROP COLUMN peak_pa")
+        repo._conn.commit()
+        cols = {r["name"] for r in repo._conn.execute("PRAGMA table_info(channel_metrics)")}
+        assert "peak_pa" not in cols
+
+    with WorkflowRepository(db_path) as repo:
+        cols = {r["name"] for r in repo._conn.execute("PRAGMA table_info(channel_metrics)")}
+        assert "peak_pa" in cols
+        se = repo.group_averages(group_id)[MicPosition.SE]
+        assert se["peak_pa"] is None
+        assert se["peak_db"] is None  # derived from the now-null peak_pa
+        assert se["peak_dba"] == pytest.approx(pa_to_db(150.0))  # untouched
 
 
 def test_both_stores_migrate_when_sharing_one_file(tmp_path):
@@ -134,14 +175,16 @@ def test_both_stores_migrate_when_sharing_one_file(tmp_path):
         repo._conn.execute("DELETE FROM schema_version")
         repo._conn.commit()
 
-    # WorkflowRepository connects first and stamps itself...
+    # WorkflowRepository connects first and blanks its own stale metric columns...
     with WorkflowRepository(db_path) as repo:
-        row = repo._conn.execute("SELECT peak_impulse_db FROM channel_metrics").fetchone()
-        assert row["peak_impulse_db"] is None
+        row = repo._conn.execute(
+            "SELECT peak_impulse_db, peak_pa FROM channel_metrics"
+        ).fetchone()
+        assert row["peak_impulse_db"] is None and row["peak_pa"] is None
     # ...which must not stop ResultsDatabase from blanking its own stale row.
     with ResultsDatabase(db_path) as db:
-        assert db.all_results()[0]["peak_impulse_db"] is None
-        assert db.all_results()[0]["peak_db"] == 150.0
+        r0 = db.all_results()[0]
+        assert r0["peak_impulse_db"] is None and r0["peak_pa"] is None
 
 
 def test_batch_group_shot_metrics_round_trip(repo):
@@ -357,12 +400,21 @@ def test_group_averages_keep_se_and_mr_separate(repo):
 
     averages = repo.group_averages(group_id)
     assert set(averages) == {MicPosition.SE, MicPosition.MR}
-    assert averages[MicPosition.SE]["peak_db"] == pytest.approx(165.0)
-    assert averages[MicPosition.MR]["peak_db"] == pytest.approx(155.0)
+    # Linear-Pa mean (165), then converted to dB — not a mean of the dB values.
+    assert averages[MicPosition.SE]["peak_pa"] == pytest.approx(165.0)
+    assert averages[MicPosition.SE]["peak_db"] == pytest.approx(pa_to_db(165.0))
+    assert averages[MicPosition.MR]["peak_pa"] == pytest.approx(155.0)
+    assert averages[MicPosition.MR]["peak_db"] == pytest.approx(pa_to_db(155.0))
     assert averages[MicPosition.SE]["n"] == 2
-    # All four metrics averaged the same way in this fixture.
-    for field in ("peak_dba", "peak_impulse_db", "liaeq_100ms_db"):
-        assert averages[MicPosition.SE][field] == pytest.approx(165.0)
+    # Every metric averages its linear magnitude, then converts once.
+    for lin, db in (
+        ("peak_a_pa", "peak_dba"),
+        ("impulse_pa_ms", "peak_impulse_db"),
+        ("leq10ms_pa", "leq10ms_db"),
+        ("liaeq_pa", "liaeq_100ms_db"),
+    ):
+        assert averages[MicPosition.SE][lin] == pytest.approx(165.0)
+        assert averages[MicPosition.SE][db] == pytest.approx(pa_to_db(165.0))
 
 
 def test_save_channel_metric_returns_updated_row_id_on_upsert(repo):

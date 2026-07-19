@@ -12,8 +12,8 @@ from .storage import ResultsDatabase
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="sma-analyze",
-        description="Compute Peak dB, Peak dBA, Peak Impulse, and LIAeq100ms "
-        "for a DewesoftX .dxd/.d7d file.",
+        description="Compute Peak dB, Peak dBA, Peak Impulse, Peak Leq(10ms) and "
+        "LIAeq,100ms for a DewesoftX .dxd/.d7d file.",
     )
     parser.add_argument("file", help="Path to a .dxd / .d7d file")
     parser.add_argument("-c", "--channel", help="Channel name (auto-detected if omitted)")
@@ -31,10 +31,13 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"File     : {result.source_file}")
     print(f"Channel  : {result.channel}  ({result.sample_rate:.0f} Hz, {result.n_samples} samples)")
+    print(f"  Peak Pa               : {result.peak_pa:8.2f} Pa")
     print(f"  Peak dB               : {result.peak_db:8.2f} dB")
     print(f"  Peak dBA              : {result.peak_dba:8.2f} dB(A)")
-    print(f"  Impulse [prov.]       : {result.peak_impulse_db:10.2f} dB*ms")
-    print(f"  LIAeq,100ms  [prov.]  : {result.liaeq_100ms_db:8.2f} dB(A)")
+    print(f"  Peak Impulse          : {result.impulse_pa_ms:8.2f} Pa*ms "
+          f"({result.peak_impulse_db:.2f} dB*ms)")
+    print(f"  Peak Leq(10ms) dBA    : {result.leq10ms_db:8.2f} dB(A)")
+    print(f"  LIAeq,100ms  dBA      : {result.liaeq_100ms_db:8.2f} dB(A)")
 
     if args.store:
         with ResultsDatabase(args.store) as db:

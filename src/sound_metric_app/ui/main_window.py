@@ -21,8 +21,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from PySide6 import QtCore, QtWidgets
+import numpy as np
+import pyqtgraph as pg
+from PySide6 import QtCore, QtGui, QtWidgets
 
+from ..dsp import SMOOTHING_FAST, SMOOTHING_INSTANT, SMOOTHING_SLOW
 from ..models import MicPosition, Shot
 from .controller import WorkflowController
 
@@ -811,12 +814,296 @@ class BatchTreeView(_View):
 # --------------------------------------------------------------------------- #
 
 
+class MetricGraph(QtWidgets.QWidget):
+    """The Report tab's right-hand pane: one metric's time series for one shot.
+
+    A thin wrapper over a :class:`pyqtgraph.PlotWidget`, with a header row above
+    it: the graph title on the left and a level-weighting dropdown on the right.
+    That dropdown chooses how the SPL-over-time curve is drawn — the raw
+    per-sample level (a point cloud) or a Fast/Slow time-weighted RMS envelope (a
+    continuous line). It emits :attr:`smoothingChanged` when the user switches so
+    the owning view can re-request the trace. Colours track the active light/dark
+    palette so the plot doesn't clash with the rest of the window.
+
+    Clicking a point on the drawn curve snaps to the nearest sample and shows its
+    value (with the trace's unit) and time in a small readout box at the bottom
+    right, plus a highlight ring on the picked sample. The box has a Clear button
+    that dismisses both.
+    """
+
+    #: Emitted when the user picks a different level-weighting from the dropdown.
+    smoothingChanged = QtCore.Signal()
+
+    #: Dropdown entries: (label, ``build_metric_trace`` smoothing mode).
+    _SMOOTHING_OPTIONS = (
+        ("Instantaneous", SMOOTHING_INSTANT),
+        ("Fast (125 ms)", SMOOTHING_FAST),
+        ("Slow (1 s)", SMOOTHING_SLOW),
+    )
+
+    #: Small dots so the thousands of samples read as a point cloud, not a mass.
+    _DOT_BRUSH = pg.mkBrush(66, 135, 245)
+    #: A joined line for the time-weighted envelope (the smooth SLM-style curve).
+    _LINE_PEN = pg.mkPen((66, 135, 245), width=1)
+    _MARK_PEN = pg.mkPen((214, 90, 70), width=1)
+    #: Yellow dotted verticals on the first/last sample — the shot window bounds.
+    _BOUND_PEN = pg.mkPen((240, 200, 0), width=1, style=QtCore.Qt.DotLine)
+    #: Highlight ring drawn on the sample the user clicks to read out.
+    _PICK_BRUSH = pg.mkBrush(240, 200, 0)
+    _PICK_PEN = pg.mkPen((30, 30, 30), width=1)
+    #: How near (screen pixels) a click must land to a sample to select it.
+    _PICK_TOLERANCE_PX = 20.0
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Header: title on the left, level-weighting dropdown on the right.
+        header = QtWidgets.QHBoxLayout()
+        self._title_label = QtWidgets.QLabel("")
+        self._title_label.setStyleSheet("font-weight: 600;")
+        header.addWidget(self._title_label)
+        header.addStretch(1)
+        header.addWidget(QtWidgets.QLabel("Level:"))
+        self._smoothing_combo = QtWidgets.QComboBox()
+        for label, mode in self._SMOOTHING_OPTIONS:
+            self._smoothing_combo.addItem(label, mode)
+        self._smoothing_combo.setToolTip(
+            "How the SPL-over-time curve is drawn.\n"
+            "Instantaneous: raw per-sample level (a point cloud).\n"
+            "Fast / Slow: time-weighted RMS envelope (a smooth line)."
+        )
+        self._smoothing_combo.currentIndexChanged.connect(
+            lambda *_: self.smoothingChanged.emit()
+        )
+        header.addWidget(self._smoothing_combo)
+        layout.addLayout(header)
+
+        self._plot = pg.PlotWidget()
+        # Keep redraws cheap on a full 20k-sample frame: clip to the view and let
+        # pyqtgraph peak-downsample when zoomed out.
+        self._plot.setClipToView(True)
+        self._plot.setDownsampling(auto=True, mode="peak")
+        self._plot.showGrid(x=True, y=True, alpha=0.15)
+        self._plot.setLabel("bottom", "Time (ms)")
+        layout.addWidget(self._plot)
+
+        # Bottom toolbar: ease-of-use view controls for the plot above, plus the
+        # point-readout box pinned to the right.
+        toolbar = QtWidgets.QHBoxLayout()
+        self._auto_frame_btn = QtWidgets.QPushButton("Auto Frame")
+        self._auto_frame_btn.setToolTip(
+            "Snap the X range to the full width of the shot window\n"
+            "(first to last data sample)."
+        )
+        self._auto_frame_btn.setEnabled(False)
+        self._auto_frame_btn.clicked.connect(self.auto_frame)
+        toolbar.addWidget(self._auto_frame_btn)
+        toolbar.addStretch(1)
+
+        # Readout box (bottom right): shows the clicked sample's value + time. The
+        # label and its Clear button are hidden until a point is actually picked.
+        self._readout_label = QtWidgets.QLabel("")
+        self._readout_label.setStyleSheet(
+            "QLabel {"
+            " border: 1px solid palette(mid);"
+            " border-radius: 3px;"
+            " background: palette(base);"
+            " padding: 2px 6px; }"
+        )
+        self._readout_label.setToolTip("Click a point on the graph to read its value.")
+        self._readout_clear_btn = QtWidgets.QPushButton("Clear")
+        self._readout_clear_btn.setToolTip("Dismiss the point readout.")
+        self._readout_clear_btn.clicked.connect(self.clear_readout)
+        toolbar.addWidget(self._readout_label)
+        toolbar.addWidget(self._readout_clear_btn)
+        layout.addLayout(toolbar)
+
+        #: (x_first_ms, x_last_ms) of the current trace, or None when no trace is
+        #: shown. Drives both Auto Frame and the yellow shot-window bound lines.
+        self._x_bounds: tuple[float, float] | None = None
+        #: The trace currently drawn, kept so a plot click can find the sample it
+        #: landed on. None whenever the plot shows a message rather than a curve.
+        self._trace = None
+        #: Scatter item marking the picked sample, or None when nothing is picked.
+        self._pick_marker: pg.ScatterPlotItem | None = None
+
+        # A click anywhere on the plot scene tries to select the nearest sample.
+        self._plot.scene().sigMouseClicked.connect(self._on_plot_clicked)
+
+        self._apply_theme()
+        self.show_message("Click a metric cell on a shot row to graph it.")
+
+    def current_smoothing(self) -> str:
+        """The ``build_metric_trace`` smoothing mode currently selected."""
+        return self._smoothing_combo.currentData()
+
+    def _apply_theme(self) -> None:
+        pal = self.palette()
+        self._fg = pal.color(QtGui.QPalette.Text)
+        self._plot.setBackground(pal.color(QtGui.QPalette.Base))
+        for name in ("left", "bottom"):
+            axis = self._plot.getAxis(name)
+            axis.setPen(self._fg)
+            axis.setTextPen(self._fg)
+
+    def show_message(self, text: str) -> None:
+        """Clear the plot and show a short prompt in place of a graph."""
+        self._plot.clear()
+        self._title_label.setText(text)
+        self._plot.setLabel("left", "")
+        self._x_bounds = None
+        self._trace = None
+        self.clear_readout()
+        self._auto_frame_btn.setEnabled(False)
+
+    def auto_frame(self) -> None:
+        """Snap the X range to the shot window's full width (first to last sample).
+
+        A no-op when no trace is shown. Y is left on autorange so the fitted
+        width still shows the curve's full vertical extent.
+        """
+        if self._x_bounds is None:
+            return
+        x0, x1 = self._x_bounds
+        self._plot.setXRange(x0, x1, padding=0)
+        self._plot.enableAutoRange(axis="y")
+
+    def show_trace(self, trace, subtitle: str = "") -> None:
+        """Render a :class:`~sound_metric_app.dsp.MetricTrace` as the sole graph."""
+        self._plot.clear()
+        self._title_label.setText(subtitle or trace.title)
+        self._plot.setLabel("left", trace.y_label)
+        # A new curve invalidates any prior point pick (different samples/units).
+        self._trace = trace
+        self.clear_readout()
+        if trace.connected:
+            # Time-weighted envelope: a joined line reads as the continuous level
+            # a meter shows. NaN samples break the line into gaps.
+            self._plot.plot(trace.t_ms, trace.values, pen=self._LINE_PEN)
+        else:
+            # One dot per sample, no connecting line (pen=None). NaN samples
+            # (silent Impulse tail) simply don't plot a point. pxMode keeps dots
+            # a fixed screen size regardless of zoom.
+            self._plot.plot(
+                trace.t_ms,
+                trace.values,
+                pen=None,
+                symbol="o",
+                symbolSize=2,
+                symbolPen=None,
+                symbolBrush=self._DOT_BRUSH,
+                pxMode=True,
+            )
+        if trace.peak_index is not None:
+            x = float(trace.t_ms[trace.peak_index])
+            self._plot.addItem(pg.InfiniteLine(pos=x, angle=90, pen=self._MARK_PEN))
+        if trace.level is not None:
+            self._plot.addItem(
+                pg.InfiniteLine(
+                    pos=trace.level, angle=0,
+                    pen=pg.mkPen((214, 90, 70), width=1, style=QtCore.Qt.DashLine),
+                )
+            )
+        # Yellow dotted verticals bracket the shot window (first/last sample), so
+        # the captured extent stays visible however far the user pans or zooms.
+        if trace.t_ms.size:
+            x0 = float(trace.t_ms[0])
+            x1 = float(trace.t_ms[-1])
+            self._x_bounds = (x0, x1)
+            for x in (x0, x1):
+                self._plot.addItem(pg.InfiniteLine(pos=x, angle=90, pen=self._BOUND_PEN))
+            self._auto_frame_btn.setEnabled(True)
+        else:
+            self._x_bounds = None
+            self._auto_frame_btn.setEnabled(False)
+        self._plot.enableAutoRange()
+
+    # ---- point readout -------------------------------------------------- #
+
+    def _on_plot_clicked(self, event) -> None:
+        """Select the sample nearest the click and show its value + time.
+
+        Snaps to the nearest sample in time, then keeps the pick only if the
+        click landed within :data:`_PICK_TOLERANCE_PX` screen pixels of that
+        sample — so clicking empty space leaves any current readout untouched.
+        """
+        if self._trace is None or self._trace.t_ms.size == 0:
+            return
+        scene_pos = event.scenePos()
+        if not self._plot.sceneBoundingRect().contains(scene_pos):
+            return
+        vb = self._plot.getPlotItem().vb
+        view_pos = vb.mapSceneToView(scene_pos)
+
+        t = self._trace.t_ms
+        # t_ms is sorted ascending; find the nearer of the two bracketing samples.
+        i = int(np.searchsorted(t, view_pos.x()))
+        candidates = [j for j in (i - 1, i) if 0 <= j < t.size]
+        idx = min(candidates, key=lambda j: abs(t[j] - view_pos.x()))
+
+        value = float(self._trace.values[idx])
+        if not np.isfinite(value):
+            return  # a silent/NaN gap (e.g. Impulse tail) has no level to show
+
+        # Reject clicks that only landed near in time but far from the sample: map
+        # the sample back to screen space and measure the true pixel distance.
+        point_scene = vb.mapViewToScene(QtCore.QPointF(float(t[idx]), value))
+        if np.hypot(point_scene.x() - scene_pos.x(), point_scene.y() - scene_pos.y()) > self._PICK_TOLERANCE_PX:
+            return
+
+        self._show_readout(idx, value)
+
+    def _show_readout(self, idx: int, value: float) -> None:
+        """Mark sample ``idx`` on the plot and fill the readout box."""
+        x = float(self._trace.t_ms[idx])
+        if self._pick_marker is not None:
+            self._plot.removeItem(self._pick_marker)
+        self._pick_marker = pg.ScatterPlotItem(
+            [x], [value], size=11, brush=self._PICK_BRUSH, pen=self._PICK_PEN, pxMode=True
+        )
+        self._plot.addItem(self._pick_marker)
+
+        unit = _unit_of(self._trace.y_label)
+        unit_suffix = f" {unit}" if unit else ""
+        self._readout_label.setText(f"{value:.3f}{unit_suffix}  @ {x:.2f} ms")
+        self._readout_label.setVisible(True)
+        self._readout_clear_btn.setVisible(True)
+
+    def clear_readout(self) -> None:
+        """Remove the picked-point marker and hide the readout box."""
+        if self._pick_marker is not None:
+            self._plot.removeItem(self._pick_marker)
+            self._pick_marker = None
+        self._readout_label.clear()
+        self._readout_label.setVisible(False)
+        self._readout_clear_btn.setVisible(False)
+
+
 class ReportView(_View):
-    _COLUMNS = ["Group / Shot", "Mic", "n", "Peak dB", "Peak dBA", "Peak Impulse dB·ms", "LIAeq,100ms dBA"]
-    _METRIC_KEYS = ("peak_db", "peak_dba", "peak_impulse_db", "liaeq_100ms_db")
+    _COLUMNS = [
+        "Group / Shot", "Mic", "n",
+        "Peak Pa", "Peak dB", "Peak dBA",
+        "Impulse Pa·ms", "Impulse dB·ms",
+        "Peak Leq10ms dBA", "LIAeq,100ms dBA",
+    ]
+    _METRIC_KEYS = (
+        "peak_pa", "peak_db", "peak_dba",
+        "impulse_pa_ms", "peak_impulse_db",
+        "leq10ms_db", "liaeq_100ms_db",
+    )
+    #: Metric columns begin here; columns 0-2 are label / mic / n.
+    _FIRST_METRIC_COL = 3
 
     def __init__(self, controller: WorkflowController, main: "MainWindow"):
         super().__init__(controller, main)
+        #: Bumped on each graph request so a slow capture read for an earlier
+        #: click is discarded when a newer cell is clicked.
+        self._graph_token = 0
+        #: The last graphed (shot_id, position, metric_key, subtitle), so the
+        #: graph can be re-rendered when the level-weighting dropdown changes.
+        self._current_request: tuple | None = None
         layout = QtWidgets.QVBoxLayout(self)
 
         picker_row = QtWidgets.QHBoxLayout()
@@ -826,14 +1113,27 @@ class ReportView(_View):
         picker_row.addWidget(self.batch_combo, 1)
         layout.addLayout(picker_row)
 
+        # Left half: the report tree. Right half: the single-metric graph. A
+        # splitter lets the user trade width between the two.
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+
         # A tree, not a flat table: each group's SE/MR average is a top-level
         # row that expands to reveal the individual shots it averages over.
         self.tree = QtWidgets.QTreeWidget()
         self.tree.setColumnCount(len(self._COLUMNS))
         self.tree.setHeaderLabels(self._COLUMNS)
         self.tree.setRootIsDecorated(True)
+        self.tree.itemClicked.connect(self._on_cell_clicked)
         _style_grid_tree(self.tree)
-        layout.addWidget(self.tree)
+        split.addWidget(self.tree)
+
+        self.graph = MetricGraph()
+        # Re-graph the same cell with the new weighting when the dropdown changes.
+        self.graph.smoothingChanged.connect(self._render_current)
+        split.addWidget(self.graph)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 1)
+        layout.addWidget(split)
 
     def refresh(self) -> None:
         current = self.batch_combo.currentData()
@@ -852,6 +1152,9 @@ class ReportView(_View):
 
     def _load_report(self, *_args) -> None:
         self.tree.clear()
+        self._graph_token += 1  # abandon any in-flight graph for the old report
+        self._current_request = None
+        self.graph.show_message("Click a metric cell on a shot row to graph it.")
         batch_id = self.batch_combo.currentData()
         if batch_id is None:
             return
@@ -878,22 +1181,75 @@ class ReportView(_View):
                     ]
                 )
                 for shot in group_avg.shots.get(position, ()):
-                    avg_item.addChild(self._shot_item(shot))
+                    avg_item.addChild(self._shot_item(shot, position))
                 group_label = ""  # only label the first mic row of each group
         for col in range(len(self._COLUMNS)):
             self.tree.resizeColumnToContents(col)
 
-    def _shot_item(self, shot: dict) -> QtWidgets.QTreeWidgetItem:
+    def _shot_item(self, shot: dict, position: MicPosition) -> QtWidgets.QTreeWidgetItem:
         order = shot.get("shot_order")
         label = f"Shot {order}" if order is not None else Path(shot["source_file"]).name
-        return QtWidgets.QTreeWidgetItem(
+        item = QtWidgets.QTreeWidgetItem(
             [label, "", "", *(_format_metric(shot[k]) for k in self._METRIC_KEYS)]
         )
+        # Carry the identity a graph request needs: the shot to re-read and which
+        # mic's channel to pull. Only shot rows get this tag, so a click on an
+        # average (top-level) row is easy to tell apart.
+        item.setData(0, QtCore.Qt.UserRole, ("shot", shot["shot_id"], position))
+        return item
 
     def _add_top(self, values: list[str]) -> QtWidgets.QTreeWidgetItem:
         item = QtWidgets.QTreeWidgetItem(values)
         self.tree.addTopLevelItem(item)
         return item
+
+    # ---- graph ---------------------------------------------------------- #
+
+    def _on_cell_clicked(self, item: QtWidgets.QTreeWidgetItem, column: int) -> None:
+        """Graph the clicked metric for the clicked shot (one graph at a time)."""
+        entry = item.data(0, QtCore.Qt.UserRole)
+        if not entry or entry[0] != "shot":
+            self._current_request = None
+            self.graph.show_message("Select a metric cell on an individual shot row.")
+            return
+        if column < self._FIRST_METRIC_COL:
+            self._current_request = None
+            self.graph.show_message("Click a metric column (Peak dB, Peak dBA, …).")
+            return
+
+        _kind, shot_id, position = entry
+        metric_key = self._METRIC_KEYS[column - self._FIRST_METRIC_COL]
+        metric_label = self._COLUMNS[column]
+        subtitle = f"Shot #{shot_id} · {position.value} · {metric_label}"
+        self._current_request = (shot_id, position, metric_key, subtitle)
+        self._render_current()
+
+    def _render_current(self) -> None:
+        """(Re)draw the last-clicked cell using the graph's current weighting.
+
+        Called both on a fresh cell click and when the level-weighting dropdown
+        changes; a no-op if no cell has been graphed yet.
+        """
+        if self._current_request is None:
+            return
+        shot_id, position, metric_key, subtitle = self._current_request
+
+        self._graph_token += 1
+        token = self._graph_token
+        smoothing = self.graph.current_smoothing()
+        self.graph.show_message("Loading…")
+
+        def done(trace) -> None:
+            if token != self._graph_token:
+                return  # a newer request superseded this one; drop the stale trace
+            self.graph.show_trace(trace, subtitle)
+
+        self._run_async(
+            lambda: self.controller.metric_trace(
+                shot_id, position, metric_key, smoothing=smoothing
+            ),
+            done,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -966,7 +1322,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, controller: WorkflowController | None = None):
         super().__init__()
         self.setWindowTitle("Sound Metric App — Workflow")
-        self.resize(820, 560)
+        # Wider than the other tabs need: the Report tab splits into a tree on the
+        # left and a metric graph on the right, so give both room by default.
+        self.resize(1100, 620)
         self.controller = controller or WorkflowController()
 
         self.ingest_view = IngestView(self.controller, self)
@@ -1021,6 +1379,20 @@ class MainWindow(QtWidgets.QMainWindow):
 def _str_or_empty(value) -> str:
     """Render an optional field for a pre-filled edit box (``None`` -> "")."""
     return "" if value is None else str(value)
+
+
+def _unit_of(y_label: str) -> str:
+    """Pull the unit out of a trace's y-axis label for the point readout.
+
+    Trace labels carry the unit in trailing parentheses — ``"SPL (dBA)"`` ->
+    ``"dBA"``, ``"Pressure (Pa)"`` -> ``"Pa"``. Falls back to the whole label if
+    it has no parenthesised unit, so the readout always shows something sensible.
+    """
+    start = y_label.rfind("(")
+    end = y_label.rfind(")")
+    if start != -1 and end > start:
+        return y_label[start + 1 : end].strip()
+    return y_label.strip()
 
 
 def _format_metric(value) -> str:

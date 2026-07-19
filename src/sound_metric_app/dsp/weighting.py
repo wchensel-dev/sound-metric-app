@@ -39,6 +39,14 @@ def a_weighting_sos(fs: float) -> np.ndarray:
 
 
 def apply_a_weighting(x: np.ndarray, fs: float) -> np.ndarray:
-    """Apply the A-weighting filter to a pressure signal (Pascals in/out)."""
+    """Apply the A-weighting filter to a pressure signal (Pascals in/out).
+
+    An empty input passes straight through: there is nothing to filter, and
+    ``sosfilt`` cannot reshape a zero-length array. This keeps the degenerate
+    empty-frame path graceful (matching ``find_onset``'s empty guard).
+    """
+    x = np.asarray(x)
+    if x.size == 0:
+        return x
     sos = a_weighting_sos(fs)
     return signal.sosfilt(sos, x)

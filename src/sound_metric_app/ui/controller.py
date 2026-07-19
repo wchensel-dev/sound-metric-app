@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Iterator
 
 from .. import config
+from ..dsp import SMOOTHING_INSTANT, MetricTrace, build_metric_trace
 from ..ingestion import ChannelInfo, list_channels, read_capture
 from ..models import Batch, Group, MicPosition, Shot
 from ..services import (
@@ -282,3 +283,40 @@ class WorkflowController:
     def group_averages(self, group_id: int) -> GroupAverages:
         with self._repo() as repo:
             return AggregationService(repo).group_averages(group_id)
+
+    # ---- report graph --------------------------------------------------- #
+
+    def metric_trace(
+        self,
+        shot_id: int,
+        position: MicPosition,
+        metric_key: str,
+        smoothing: str = SMOOTHING_INSTANT,
+    ) -> MetricTrace:
+        """The time-series a Report graph draws for one shot/mic/metric.
+
+        Re-reads the shot's capture (the raw samples are not stored, only the
+        scalar metrics are) and builds the metric's curve. ``smoothing`` picks
+        how the SPL-over-time curve is drawn (instantaneous vs Fast/Slow
+        time-weighted); see :func:`~sound_metric_app.dsp.build_metric_trace`. The
+        DB read and the capture read + DSP are both done here so the whole thing
+        can run on a worker thread. Raises ``LookupError`` if the shot is gone and
+        ``ValueError`` if the mic position has no channel or the channel is
+        missing from the capture.
+        """
+        with self._repo() as repo:
+            shot = repo.get_shot(shot_id)
+        if shot is None:
+            raise LookupError(f"No shot with id {shot_id}")
+
+        channel = shot.se_channel if position is MicPosition.SE else shot.mr_channel
+        if not channel:
+            raise ValueError(f"Shot #{shot_id} has no {position.value} channel to graph.")
+
+        frames = self._capture_reader(shot.source_file)
+        frame = next((f for f in frames if f.channel == channel), None)
+        if frame is None:
+            raise ValueError(
+                f"Channel {channel!r} not found in {Path(shot.source_file).name}."
+            )
+        return build_metric_trace(frame, metric_key, smoothing)

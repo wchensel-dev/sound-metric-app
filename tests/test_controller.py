@@ -210,6 +210,33 @@ def test_report_unknown_batch_raises(controller):
         controller.batch_report(42)
 
 
+def test_metric_trace_reads_the_shots_capture(controller, inbox):
+    shot_id = _ingest_and_mark_one(controller, inbox)
+
+    trace = controller.metric_trace(shot_id, MicPosition.SE, "peak_db")
+
+    # A full-length curve over the capture, with a peak marker for a peak metric.
+    assert trace.t_ms.shape == (20_000,)
+    assert trace.values.shape == (20_000,)
+    assert trace.peak_index is not None
+
+
+def test_metric_trace_missing_mic_raises(controller, inbox):
+    # Mark only SE, then ask for the MR graph the shot doesn't have.
+    _touch(inbox, "SUP-1_AR15_001.dxd")
+    controller.ingest(inbox, validate=False)
+    shot = controller.unmarked_shots()[0]
+    controller.mark(shot.id, ammo="M855", channel_map={"AI 1": MicPosition.SE})
+
+    with pytest.raises(ValueError, match="no MR channel"):
+        controller.metric_trace(shot.id, MicPosition.MR, "peak_db")
+
+
+def test_metric_trace_unknown_shot_raises(controller):
+    with pytest.raises(LookupError):
+        controller.metric_trace(999, MicPosition.SE, "peak_db")
+
+
 def _ingest_and_mark_one(controller, inbox, name="SUP-1_AR15_001.dxd", ammo="M855"):
     _touch(inbox, name)
     controller.ingest(inbox, validate=False)
