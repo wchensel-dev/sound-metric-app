@@ -32,8 +32,12 @@ LEQ_SEARCH_MS: float = 25.0
 # window [onset, onset + LIAEQ_WINDOW_MS] (MATH.md §7).
 LIAEQ_WINDOW_MS: float = 100.0
 
-# Nominal DewesoftX acquisition standard (validation warnings only): a 1 Pa
-# trigger with 10 ms pre-trigger lead and 200 ms post-trigger capture.
+# Nominal DewesoftX acquisition standard: a 1 Pa trigger with a 10 ms
+# pre-trigger lead and 200 ms post-trigger capture (T = 210 ms, N = 42 000 at
+# fs = 200 kHz). These are the config source-of-record constants behind
+# MATH.md §1's `fs`/`N`/`T` rows and §2.3; the formulas use each file's actual
+# fs and N, so of this set only CAPTURE_MS is read at runtime — the "no onset"
+# warning cites it as the expected frame length.
 EXPECTED_FS: float = 200_000.0
 LEAD_MS: float = 10.0
 POST_MS: float = 200.0
