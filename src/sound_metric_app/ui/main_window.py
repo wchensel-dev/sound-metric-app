@@ -1163,7 +1163,11 @@ class ReportView(_View):
             g = group_avg.group
             group_label = f"{g.test_platform} / {g.ammo}"
             if not group_avg.averages:
-                self._add_top([group_label, "—", "0", "no metrics", "", "", ""])
+                # "no metrics" occupies the first metric column; pad the rest so
+                # the row spans all of _COLUMNS and nothing shifts left.
+                self._add_top(
+                    [group_label, "—", "0", "no metrics", *[""] * (len(self._METRIC_KEYS) - 1)]
+                )
                 continue
             # One top-level row per mic (SE, MR kept separate), labelled with the
             # group only on the first so the pair reads as a unit; each carries

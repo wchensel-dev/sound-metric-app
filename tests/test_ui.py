@@ -77,6 +77,41 @@ def test_format_metric_blanks_null_instead_of_raising():
     assert _format_metric(0) == "0.00"
 
 
+def test_report_no_metrics_row_spans_all_columns(window, monkeypatch):
+    # A group with no averages renders a "no metrics" placeholder row. It must
+    # carry a cell for every column so it stays aligned with the widened header
+    # (and keeps tracking _METRIC_KEYS if the metric set grows again), rather
+    # than under-filling and leaving trailing columns without a cell.
+    from sound_metric_app.models import Batch, Group
+    from sound_metric_app.services.aggregation_service import BatchReport, GroupAverages
+
+    rv = window.report_view
+    report = BatchReport(
+        batch=Batch(sku="SUP-1", id=1),
+        groups=[
+            GroupAverages(
+                group=Group(test_platform="AR15", ammo="M855", id=1),
+                n_shots=0,
+                averages={},
+                shots={},
+            )
+        ],
+    )
+    monkeypatch.setattr(rv.controller, "batch_report", lambda _batch_id: report)
+    rv.batch_combo.blockSignals(True)
+    rv.batch_combo.addItem("#1", 1)  # give _load_report a non-None batch id
+    rv.batch_combo.blockSignals(False)
+
+    rv._load_report()
+
+    assert rv.tree.topLevelItemCount() == 1
+    item = rv.tree.topLevelItem(0)
+    # Every column has a cell -> nothing shifts left; the row matches the header.
+    assert item.columnCount() == len(rv._COLUMNS)
+    assert item.text(0) == "AR15 / M855"
+    assert item.text(rv._FIRST_METRIC_COL) == "no metrics"
+
+
 def test_window_builds_with_four_tabs(window):
     assert window.tabs.count() == 4
     assert [window.tabs.tabText(i) for i in range(4)] == ["Ingest", "Mark", "Batches", "Report"]
