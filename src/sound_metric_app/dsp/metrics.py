@@ -117,9 +117,12 @@ def positive_phase_impulse_pa_ms(pressure: np.ndarray, fs: float) -> float:
     phase drives Q below its start** (``i_min > 0``) — the usual free-field case,
     where the rarefaction pulls the running integral negative after the positive
     peak. When Q never dips below its start (``i_min == 0``), the impulse is the
-    global max over the whole window; a within-window reflection could then inflate
-    it. Free-field capture (no early reflections) is what makes this safe here;
-    MATH.md §6 spells out the caveat.
+    global max over the *whole* caller-supplied segment — the full 100 ms of
+    ``PEAK_WINDOW_MS`` — so anything rising within those 100 ms could inflate it,
+    and nothing here detects or flags that case. Free-field capture discipline
+    (MATH.md §2.8: one shot, no comparable
+    transient within the window) is the only thing bounding it; MATH.md §6 spells
+    out the caveat.
 
     Time is integrated in **milliseconds**, so the result is Pa·ms — matching TBAC
     (whose ``dB*ms`` is ``pa_to_db`` of this value). A NaN in the input propagates

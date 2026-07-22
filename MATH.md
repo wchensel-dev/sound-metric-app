@@ -128,10 +128,15 @@ The min-bounding rejects a later (e.g. reflected) rise **only when the rarefacti
 drives `Q` below its start** (`i_min > 0`) — the usual free-field case. When `Q`
 stays non-negative over the whole window (`i_min = 0`, e.g. a blast whose
 rarefaction never pulls the running integral negative), the impulse is the global
-window max, and a within-window reflection could in principle inflate it.
-Free-field capture (no early reflections within the window) is what makes this
-safe; TBAC clips to a short window instead for exactly this reason in a reverberant
-space (§12). A NaN in the input propagates so contaminated data surfaces.
+max over the **entire `W_peak = 100 ms` window**, and any rise within those 100 ms
+— a reflection, a second blast — could in principle inflate it. The capture
+discipline of §2.8 (one shot, no comparable transient within `W` of onset) is the
+*only* thing that bounds it. Nothing in the code detects or flags an `i_min = 0`
+frame, so a violation of §2.8 shows up as a silently high impulse rather than a
+warning — inspect the Report graph's `Q` trace (which marks the peak) when an
+impulse reads implausibly high. TBAC clips to a short window instead for exactly
+this reason in a reverberant space (§12). A NaN in the input propagates so
+contaminated data surfaces.
 
 ## 7. LIAeq,100ms — `liaeq_pa`, `liaeq_100ms_db` (proprietary divergence)
 
