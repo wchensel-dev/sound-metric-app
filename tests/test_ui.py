@@ -194,6 +194,32 @@ def test_clicking_metric_cell_graphs_that_shot(window, qtbot):
     assert rv.graph._x_bounds is None
 
 
+def test_auto_frame_bounds_track_finite_curve_extent(qtbot):
+    # A NaN-padded curve (the Impulse ∫p·dt trace lives only in its onset window)
+    # must frame to where the curve actually exists, not the full sample axis --
+    # otherwise Auto Frame stretches X across a sea of empty samples.
+    from sound_metric_app.dsp.graphing import MetricTrace
+    from sound_metric_app.ui.main_window import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+
+    trace = MetricTrace(
+        t_ms=np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+        values=np.array([np.nan, 10.0, 20.0, 15.0, np.nan]),
+        y_label="Impulse ∫p·dt (Pa·ms)",
+        title="Peak Impulse",
+        connected=True,
+    )
+    graph.show_trace(trace)
+    # Bounds bracket the finite span [1.0, 3.0], not the raw axis [0.0, 4.0].
+    assert graph._x_bounds == (1.0, 3.0)
+    graph.auto_frame()
+    view_x0, view_x1 = graph._plot.getViewBox().viewRange()[0]
+    assert view_x0 == pytest.approx(1.0)
+    assert view_x1 == pytest.approx(3.0)
+
+
 def test_graph_point_readout_shows_value_and_clears(qtbot):
     from sound_metric_app.dsp.graphing import MetricTrace
     from sound_metric_app.ui.main_window import MetricGraph, _unit_of

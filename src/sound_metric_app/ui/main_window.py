@@ -894,8 +894,8 @@ class MetricGraph(QtWidgets.QWidget):
         toolbar = QtWidgets.QHBoxLayout()
         self._auto_frame_btn = QtWidgets.QPushButton("Auto Frame")
         self._auto_frame_btn.setToolTip(
-            "Snap the X range to the full width of the shot window\n"
-            "(first to last data sample)."
+            "Snap the X range to the drawn curve's extent\n"
+            "(first to last sample carrying a value)."
         )
         self._auto_frame_btn.setEnabled(False)
         self._auto_frame_btn.clicked.connect(self.auto_frame)
@@ -920,8 +920,9 @@ class MetricGraph(QtWidgets.QWidget):
         toolbar.addWidget(self._readout_clear_btn)
         layout.addLayout(toolbar)
 
-        #: (x_first_ms, x_last_ms) of the current trace, or None when no trace is
-        #: shown. Drives both Auto Frame and the yellow shot-window bound lines.
+        #: (x_first_ms, x_last_ms) of the current trace's finite (non-NaN) span, or
+        #: None when no trace is shown. Drives both Auto Frame and the yellow curve-
+        #: extent bound lines.
         self._x_bounds: tuple[float, float] | None = None
         #: The trace currently drawn, kept so a plot click can find the sample it
         #: landed on. None whenever the plot shows a message rather than a curve.
@@ -959,7 +960,7 @@ class MetricGraph(QtWidgets.QWidget):
         self._auto_frame_btn.setEnabled(False)
 
     def auto_frame(self) -> None:
-        """Snap the X range to the shot window's full width (first to last sample).
+        """Snap the X range to the drawn curve's extent (first to last live sample).
 
         A no-op when no trace is shown. Y is left on autorange so the fitted
         width still shows the curve's full vertical extent.
@@ -1006,11 +1007,18 @@ class MetricGraph(QtWidgets.QWidget):
                     pen=pg.mkPen((214, 90, 70), width=1, style=QtCore.Qt.DashLine),
                 )
             )
-        # Yellow dotted verticals bracket the shot window (first/last sample), so
-        # the captured extent stays visible however far the user pans or zooms.
-        if trace.t_ms.size:
-            x0 = float(trace.t_ms[0])
-            x1 = float(trace.t_ms[-1])
+        # Yellow dotted verticals bracket the drawn curve's extent (first/last
+        # sample that actually carries a value), so the data stays visible however
+        # far the user pans or zooms. Use the finite (non-NaN) span rather than the
+        # raw sample axis: the Impulse ∫p·dt curve is NaN outside its onset window,
+        # so framing to the full frame would leave the curve a sliver in a sea of
+        # empty X. Full-frame SPL traces are all-finite, so their bounds are
+        # unchanged.
+        finite = np.isfinite(trace.values)
+        if finite.any():
+            xs = trace.t_ms[finite]
+            x0 = float(xs[0])
+            x1 = float(xs[-1])
             self._x_bounds = (x0, x1)
             for x in (x0, x1):
                 self._plot.addItem(pg.InfiniteLine(pos=x, angle=90, pen=self._BOUND_PEN))
