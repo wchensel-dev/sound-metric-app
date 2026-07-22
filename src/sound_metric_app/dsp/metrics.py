@@ -133,6 +133,18 @@ def positive_phase_impulse_pa_ms(pressure: np.ndarray, fs: float) -> float:
     return max(float(q[peak_index]), 0.0)
 
 
+def leq_window_samples(fs: float, tau_s: float = LEQ_TAU_S) -> int:
+    """Length ``L`` of :func:`running_leq_rms`'s trailing window, in samples.
+
+    ``floor(fs*tau)``, floored at 1 to match ``running_leq_rms``'s degenerate
+    branch (a sub-sample window there reduces to ``|p|``, a 1-sample window).
+    Exposed so callers that *annotate* the running Leq — the graph layer drawing
+    the calculation window — can account for the ``L-1`` samples of lookback each
+    reported value integrates over.
+    """
+    return max(1, int(np.floor(fs * tau_s)))
+
+
 def running_leq_rms(pressure: np.ndarray, fs: float, tau_s: float = LEQ_TAU_S) -> np.ndarray:
     """Rectangular running RMS (Pa), same length as the input.
 
@@ -152,9 +164,9 @@ def running_leq_rms(pressure: np.ndarray, fs: float, tau_s: float = LEQ_TAU_S) -
     """
     p = np.asarray(pressure, dtype=float)
     n = p.size
-    L = int(np.floor(fs * tau_s))
-    if L < 1 or n == 0:
+    if int(np.floor(fs * tau_s)) < 1 or n == 0:
         return np.abs(p)
+    L = leq_window_samples(fs, tau_s)
     csum = np.cumsum(p**2)
     ms = np.empty(n, dtype=float)
     upto = min(L, n)

@@ -14,6 +14,7 @@ from sound_metric_app.dsp import (
 )
 from sound_metric_app.dsp.metrics import (
     find_onset,
+    leq_window_samples,
     pa_to_db,
     positive_phase_impulse_pa_ms,
     rms_pa,
@@ -137,14 +138,29 @@ def test_impulse_curve_is_drawn_past_the_calculation_window():
 )
 def test_window_markers_bracket_each_metrics_own_window(metric_key, window_ms):
     # The end is per-metric, not a global 100 ms: Peak-10 ms-Leq closes at 25 ms.
-    # The start is the onset for all of them, and is strictly inside the frame
+    # The start is the onset for all of them except Peak-10 ms-Leq, whose trailing
+    # RMS backs it off by L-1 samples. Both edges are strictly inside the frame
     # (the fixture has a 10 ms quiet lead), so both markers are drawable.
     frame = _shot_frame()
     trace = build_metric_trace(frame, metric_key)
     onset = find_onset(frame.samples) or 0
     assert onset > 0
-    assert trace.window_start_index == onset
+    lookback = leq_window_samples(FS) - 1 if metric_key == "leq10ms_db" else 0
+    assert trace.window_start_index == onset - lookback
     assert trace.window_end_index == onset + window_samples(FS, window_ms)
+
+
+def test_leq_window_marker_covers_every_sample_that_fed_the_peak():
+    # Regression: the running Leq is a *trailing* 10 ms RMS, so a peak sitting
+    # near the onset averages pre-onset samples. The drawn window must contain
+    # them, or the graph tells the operator a contaminant was excluded when the
+    # reported number integrated it.
+    frame = _shot_frame()
+    trace = build_metric_trace(frame, "leq10ms_db")
+    L = leq_window_samples(FS)
+    earliest = trace.peak_index - L + 1  # first sample in the peak's trailing RMS
+    assert trace.window_start_index <= earliest
+    assert trace.window_end_index >= trace.peak_index
 
 
 def test_late_event_outside_the_window_changes_the_drawn_curve_not_the_metrics():

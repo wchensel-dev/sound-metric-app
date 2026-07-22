@@ -1065,8 +1065,9 @@ class MetricGraph(QtWidgets.QWidget):
         # a pre-onset or late event stays visible, but only samples *between* them
         # reached the reported number — the labels say so, since a curve that
         # simply continues would otherwise read as all-included. The start also
-        # shows where onset detection fired, which is why it is drawn even though
-        # it is the same time for every metric.
+        # shows where onset detection fired — the same time for every metric bar
+        # Peak-10 ms-Leq, which opens its window a trailing-RMS length earlier so
+        # the bracket still contains every sample that fed the reported number.
         window_xs: list[float] = []
         for index, text in (
             (trace.window_start_index, "calc window starts"),

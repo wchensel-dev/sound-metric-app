@@ -51,6 +51,7 @@ from ..models import Frame
 from .metrics import (
     _positive_phase_impulse,
     find_onset,
+    leq_window_samples,
     pa_to_db,
     rms_pa,
     running_leq_rms,
@@ -83,9 +84,17 @@ class MetricTrace:
     onset-anchored calculation window — the samples that produced the reported
     number, inside the whole capture that every curve now draws. They are purely
     annotations: no value in ``values`` depends on either. The start is the
-    detected onset and is shared by every metric; the end is not (Peak-10 ms-Leq
-    closes at 25 ms, the rest at 100 ms), so both are stored per trace rather
-    than read from a single constant.
+    detected onset for every metric except Peak-10 ms-Leq, whose trailing 10 ms
+    RMS makes its peak integrate up to ``L-1`` pre-onset samples and so opens the
+    window that much earlier; the end differs too (Peak-10 ms-Leq closes at
+    25 ms, the rest at 100 ms). Both are therefore stored per trace rather than
+    read from a single constant.
+
+    The A-weighted traces carry a residual caveat the brackets cannot express:
+    :func:`~sound_metric_app.dsp.weighting.apply_a_weighting` is an IIR filter
+    run over the whole capture, so pre-window pressure influences the weighted
+    samples inside it with an exponentially decaying tail rather than a bounded
+    lookback.
     """
 
     t_ms: np.ndarray  # time axis, milliseconds from capture start
@@ -273,7 +282,15 @@ def build_metric_trace(
         with np.errstate(divide="ignore"):
             values = 20.0 * np.log10(np.maximum(rms, P_REF) / P_REF)
         start, stop = _onset_window(fs, onset, LEQ_SEARCH_MS)
-        w_start, w_end = _window_bounds(start, stop, p.shape[0])
+        # Each running-Leq value is a *trailing* 10 ms RMS, so a peak found at
+        # `start + k` with k < L integrates L-1-k samples from before the onset.
+        # Draw the window from `start - (L-1)`: the earliest sample that can feed
+        # any value in the search span, which keeps the "only samples between the
+        # lines reached the reported number" reading true (a superset — samples
+        # after the marked peak contribute nothing either). This is the one metric
+        # whose window start is not the onset itself.
+        lookback = leq_window_samples(fs) - 1
+        w_start, w_end = _window_bounds(max(0, start - lookback), stop, p.shape[0])
         seg = rms[start:stop]
         peak_index = start + int(np.argmax(seg)) if seg.size else None
         return MetricTrace(
