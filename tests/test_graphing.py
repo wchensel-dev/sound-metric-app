@@ -147,7 +147,24 @@ def test_window_markers_bracket_each_metrics_own_window(metric_key, window_ms):
     assert onset > 0
     lookback = leq_window_samples(FS) - 1 if metric_key == "leq10ms_db" else 0
     assert trace.window_start_index == onset - lookback
-    assert trace.window_end_index == onset + window_samples(FS, window_ms)
+    # Inclusive: the last sample the metric sliced, one before the exclusive stop.
+    assert trace.window_end_index == onset + window_samples(FS, window_ms) - 1
+
+
+def test_window_end_marker_survives_a_window_closing_at_the_capture_end():
+    # Regression: the end marker used to be the *exclusive* slice bound, so a
+    # capture trimmed to exactly the window's end indexed one past the last
+    # sample and the marker was dropped entirely — the operator saw no window
+    # end on the tightest, most common trim.
+    full = _shot_frame()
+    onset = find_onset(full.samples) or 0
+    n = onset + window_samples(FS, PEAK_WINDOW_MS)  # last window sample is the last sample
+    assert n <= N
+    frame = Frame(
+        samples=full.samples[:n], sample_rate=FS, channel="AI 1", source_file="x.dxd"
+    )
+    trace = build_metric_trace(frame, "peak_db")
+    assert trace.window_end_index == n - 1
 
 
 def test_leq_window_marker_covers_every_sample_that_fed_the_peak():

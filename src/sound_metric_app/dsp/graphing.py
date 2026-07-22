@@ -83,7 +83,9 @@ class MetricTrace:
 
     ``window_start_index`` and ``window_end_index`` bracket *this* metric's
     onset-anchored calculation window — the samples that produced the reported
-    number, inside the whole capture that every curve now draws. They are purely
+    number, inside the whole capture that every curve now draws. Both bounds are
+    *inclusive*: ``window_end_index`` is the last sample the metric used, not the
+    exclusive slice bound. They are purely
     annotations: no value in ``values`` depends on either. The start is the
     detected onset for every metric except Peak-10 ms-Leq, whose trailing 10 ms
     RMS makes its peak integrate up to ``L-1`` pre-onset samples and so opens the
@@ -106,7 +108,7 @@ class MetricTrace:
     level: float | None = None  # y for a horizontal reference line
     connected: bool = False  # draw as a joined line (envelope) vs a point cloud
     window_start_index: int | None = None  # sample index where the window opens
-    window_end_index: int | None = None  # sample index where this metric's window ends
+    window_end_index: int | None = None  # last sample index inside this metric's window
 
 
 def _spl_db(pressure: np.ndarray) -> np.ndarray:
@@ -162,13 +164,21 @@ def _onset_window(fs: float, onset: int | None, window_ms: float) -> tuple[int, 
 def _window_bounds(start: int, stop: int, n_samples: int) -> tuple[int | None, int | None]:
     """Sample indices to draw the calculation window's start/end markers at.
 
+    ``stop`` is the exclusive bound the metrics slice with, so the end marker
+    goes at ``stop - 1`` — the last sample that actually fed the reported
+    number. Marking ``stop`` itself would put the line one sample past the data
+    it brackets, and would drop the marker whenever the window ends exactly at
+    the capture end (``stop == n_samples``), which is the common case.
+
     Either is ``None`` when that edge falls outside the capture, since there is
     then no boundary inside the plot to mark — a window running past the last
     sample means the whole tail is window, with nothing to separate it from.
+    An empty window (``stop <= start``) has no last sample and so no end marker.
     """
+    last = stop - 1
     return (
         start if 0 <= start < n_samples else None,
-        stop if 0 <= stop < n_samples else None,
+        last if start <= last < n_samples else None,
     )
 
 
