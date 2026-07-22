@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from sound_metric_app.config import LIAEQ_WINDOW_MS, PEAK_WINDOW_MS
+from sound_metric_app.config import LEQ_SEARCH_MS, LIAEQ_WINDOW_MS, PEAK_WINDOW_MS
 from sound_metric_app.dsp import (
     SMOOTHING_FAST,
     SMOOTHING_INSTANT,
@@ -14,6 +14,7 @@ from sound_metric_app.dsp import (
 )
 from sound_metric_app.dsp.metrics import (
     find_onset,
+    leq_window_samples,
     pa_to_db,
     positive_phase_impulse_pa_ms,
     rms_pa,
@@ -86,7 +87,8 @@ def test_peak_pa_time_weighted_is_a_connected_pascal_envelope():
 def test_impulse_trace_is_the_cumulative_integral_curve():
     frame = _shot_frame()
     trace = build_metric_trace(frame, "peak_impulse_db")
-    # ∫p·dt is drawn only over the onset window; the rest is NaN gaps.
+    # ∫p·dt is drawn from the onset to the end of the capture; only the
+    # pre-onset lead (outside the integral's domain) is a NaN gap.
     assert "Pa·ms" in trace.y_label
     assert trace.connected is True
     assert np.any(np.isnan(trace.values))
@@ -107,6 +109,114 @@ def test_impulse_marker_equals_reported_scalar():
     reported = positive_phase_impulse_pa_ms(frame.samples[start:stop], FS)
     assert trace.peak_index is not None
     assert trace.values[trace.peak_index] == pytest.approx(reported)
+
+
+def test_impulse_curve_is_drawn_past_the_calculation_window():
+    # The curve spans onset -> end of capture so a late event is visible; only
+    # the pre-onset lead is NaN. Guards against re-truncating it to the window.
+    frame = _shot_frame()
+    trace = build_metric_trace(frame, "peak_impulse_db")
+    onset, stop = _onset_window(frame.samples)
+
+    finite = np.flatnonzero(np.isfinite(trace.values))
+    assert finite[0] == onset
+    assert finite[-1] == N - 1
+    assert stop < N - 1, "window must end inside the frame for this to mean anything"
+    assert np.all(np.isnan(trace.values[:onset]))
+
+
+@pytest.mark.parametrize(
+    "metric_key,window_ms",
+    [
+        ("peak_pa", PEAK_WINDOW_MS),
+        ("peak_db", PEAK_WINDOW_MS),
+        ("peak_dba", PEAK_WINDOW_MS),
+        ("peak_impulse_db", PEAK_WINDOW_MS),
+        ("leq10ms_db", LEQ_SEARCH_MS),
+        ("liaeq_100ms_db", LIAEQ_WINDOW_MS),
+    ],
+)
+def test_window_markers_bracket_each_metrics_own_window(metric_key, window_ms):
+    # The end is per-metric, not a global 100 ms: Peak-10 ms-Leq closes at 25 ms.
+    # The start is the onset for all of them except Peak-10 ms-Leq, whose trailing
+    # RMS backs it off by L-1 samples. Both edges are strictly inside the frame
+    # (the fixture has a 10 ms quiet lead), so both markers are drawable.
+    frame = _shot_frame()
+    trace = build_metric_trace(frame, metric_key)
+    onset = find_onset(frame.samples) or 0
+    assert onset > 0
+    lookback = leq_window_samples(FS) - 1 if metric_key == "leq10ms_db" else 0
+    assert trace.window_start_index == onset - lookback
+    # Inclusive: the last sample the metric sliced, one before the exclusive stop.
+    assert trace.window_end_index == onset + window_samples(FS, window_ms) - 1
+
+
+@pytest.mark.parametrize(
+    "metric_key",
+    ["peak_pa", "peak_db", "peak_dba", "peak_impulse_db", "leq10ms_db", "liaeq_100ms_db"],
+)
+def test_undetected_onset_is_flagged_on_the_trace(metric_key):
+    # A frame with nothing above the 1 Pa threshold still gets a window (from the
+    # frame start), but the trace must say the start was a fallback — otherwise
+    # the graph labels 0 ms as a detected onset on a silent or mis-triggered
+    # capture, which is exactly the case the processor warns about.
+    quiet = Frame(
+        samples=np.full(N, 0.01), sample_rate=FS, channel="AI 1", source_file="x.dxd"
+    )
+    assert find_onset(quiet.samples) is None
+    assert build_metric_trace(quiet, metric_key).onset_detected is False
+    assert build_metric_trace(_shot_frame(), metric_key).onset_detected is True
+
+
+def test_window_end_marker_survives_a_window_closing_at_the_capture_end():
+    # Regression: the end marker used to be the *exclusive* slice bound, so a
+    # capture trimmed to exactly the window's end indexed one past the last
+    # sample and the marker was dropped entirely — the operator saw no window
+    # end on the tightest, most common trim.
+    full = _shot_frame()
+    onset = find_onset(full.samples) or 0
+    n = onset + window_samples(FS, PEAK_WINDOW_MS)  # last window sample is the last sample
+    assert n <= N
+    frame = Frame(
+        samples=full.samples[:n], sample_rate=FS, channel="AI 1", source_file="x.dxd"
+    )
+    trace = build_metric_trace(frame, "peak_db")
+    assert trace.window_end_index == n - 1
+
+
+def test_leq_window_marker_covers_every_sample_that_fed_the_peak():
+    # Regression: the running Leq is a *trailing* 10 ms RMS, so a peak sitting
+    # near the onset averages pre-onset samples. The drawn window must contain
+    # them, or the graph tells the operator a contaminant was excluded when the
+    # reported number integrated it.
+    frame = _shot_frame()
+    trace = build_metric_trace(frame, "leq10ms_db")
+    L = leq_window_samples(FS)
+    earliest = trace.peak_index - L + 1  # first sample in the peak's trailing RMS
+    assert trace.window_start_index <= earliest
+    assert trace.window_end_index >= trace.peak_index
+
+
+def test_late_event_outside_the_window_changes_the_drawn_curve_not_the_metrics():
+    # The whole point of the full-span redraw: a blast landing after the window
+    # closes must show up in the curve and move no reported number.
+    clean = _shot_frame()
+    contaminated = _shot_frame()
+    _, stop = _onset_window(clean.samples)
+    late = stop + int(0.010 * FS)  # 10 ms past the window's end
+    td = (np.arange(N - late)) / FS
+    contaminated.samples[late:] += 4000.0 * (1 - td / 0.0008) * np.exp(-td / 0.0008)
+
+    for key in ("peak_pa", "peak_db", "peak_dba", "peak_impulse_db", "leq10ms_db"):
+        a = build_metric_trace(clean, key)
+        b = build_metric_trace(contaminated, key)
+        assert a.peak_index == b.peak_index, f"{key} marker moved"
+        assert a.values[a.peak_index] == pytest.approx(b.values[b.peak_index]), key
+    a = build_metric_trace(clean, "liaeq_100ms_db")
+    b = build_metric_trace(contaminated, "liaeq_100ms_db")
+    assert a.level == pytest.approx(b.level)
+    # ...but the contaminant is visible in what gets drawn.
+    assert np.nanmax(b.values[late:]) > np.nanmax(a.values[late:])
 
 
 def test_impulse_pa_ms_key_graphs_the_same_curve():

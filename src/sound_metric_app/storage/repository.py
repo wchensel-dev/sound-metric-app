@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from ..config import P_REF
 from ..models import Batch, Group, MetricResult, MicPosition, Shot
 from ._base import _SqliteStore
-from .database import _METRIC_COLUMNS
+from .database import _METRIC_COLUMNS, _PEAK_WINDOW_COLUMNS
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS batches (
@@ -136,6 +136,16 @@ class WorkflowRepository(_SqliteStore):
             cols = ", ".join(f"{c} = NULL" for c in _METRIC_COLUMNS)
             self._conn.execute(f"UPDATE channel_metrics SET {cols}")
             self._set_schema_version(2)
+        if self._schema_version() < 3:
+            # PEAK_WINDOW_MS widened from 75 ms to 100 ms (MATH.md §2.8), so peak,
+            # peak dBA and the impulse integral are no longer comparable with rows
+            # computed under the old window — averaging the two together would
+            # quietly mix definitions. Blank them; re-marking a shot re-processes
+            # the capture and repopulates them. The Leq/LIAeq columns have their
+            # own windows and are left alone.
+            cols = ", ".join(f"{c} = NULL" for c in _PEAK_WINDOW_COLUMNS)
+            self._conn.execute(f"UPDATE channel_metrics SET {cols}")
+            self._set_schema_version(3)
 
     #: True while a :meth:`transaction` block is active, so the individual
     #: mutating methods defer their commit to the enclosing block.

@@ -18,7 +18,7 @@ reference, with the deliberate divergences noted in §12.
 | `p_ref` | Reference pressure, Pa | 20 × 10⁻⁶ | `P_REF` |
 | `p_A[n]` | A-weighted pressure signal | — | `apply_a_weighting` |
 | `θ` | Onset threshold, Pa | 1.0 | `ONSET_THRESHOLD_PA` |
-| `W_peak` | Peak/impulse search window, ms | 75 | `PEAK_WINDOW_MS` |
+| `W_peak` | Peak/impulse search window, ms | 100 | `PEAK_WINDOW_MS` |
 | `τ_L` | Leq rectangular integration time, s | 0.010 | `LEQ_TAU_S` |
 | `W_Leq` | Peak-10 ms-Leq search window, ms | 25 | `LEQ_SEARCH_MS` |
 | `W_LIAeq` | LIAeq energy window, ms | 100 | `LIAEQ_WINDOW_MS` |
@@ -48,6 +48,14 @@ All decibel values are sound pressure levels (SPL) referenced to `p_ref`.
    never combined at the DSP layer.
 7. A-weighting follows IEC 61672 / ANSI S1.4, normalized to 0 dB at 1 kHz, and
    matches TBAC's `adsgn.m` (§8).
+8. **One shot per analysis window.** The operator controls the range so no
+   second blast, reflection, or comparable transient lands within `W = 100 ms`
+   of onset. All onset-anchored metrics share that one window (§3), so this
+   assumption is what makes "largest sample in the window" (§4) and "the shot's
+   peak" the same quantity, and what keeps `LIAeq,100ms` (§7) attributable to a
+   single shot. A contaminating event is not truncated away — an event inside
+   the window is inside every metric, by design, so a frame that violates this
+   is visible rather than silently partitioned.
 
 ## 3. Onset, windows, and base operators
 
@@ -82,7 +90,9 @@ rms(x) = sqrt( (1/M) · Σ_n x[n]² )     [Pa],  M = len(x)
 peak_pa = peak( W(p, W_peak) )                 [Pa]
 peak_db = L(peak_pa)                            [dB]
 ```
-Largest signed raw pressure in the 75 ms window after onset.
+Largest signed raw pressure in the 100 ms window after onset. This is the
+largest sample *in the window*, not "the shot's peak" by construction — the two
+coincide because capture discipline keeps one shot per frame (§2.8).
 
 ## 5. Peak dBA — `peak_a_pa`, `peak_dba`
 
@@ -118,10 +128,15 @@ The min-bounding rejects a later (e.g. reflected) rise **only when the rarefacti
 drives `Q` below its start** (`i_min > 0`) — the usual free-field case. When `Q`
 stays non-negative over the whole window (`i_min = 0`, e.g. a blast whose
 rarefaction never pulls the running integral negative), the impulse is the global
-window max, and a within-window reflection could in principle inflate it.
-Free-field capture (no early reflections within the window) is what makes this
-safe; TBAC clips to a short window instead for exactly this reason in a reverberant
-space (§12). A NaN in the input propagates so contaminated data surfaces.
+max over the **entire `W_peak = 100 ms` window**, and any rise within those 100 ms
+— a reflection, a second blast — could in principle inflate it. The capture
+discipline of §2.8 (one shot, no comparable transient within `W` of onset) is the
+*only* thing that bounds it. Nothing in the code detects or flags an `i_min = 0`
+frame, so a violation of §2.8 shows up as a silently high impulse rather than a
+warning — inspect the Report graph's `Q` trace (which marks the peak) when an
+impulse reads implausibly high. TBAC clips to a short window instead for exactly
+this reason in a reverberant space (§12). A NaN in the input propagates so
+contaminated data surfaces.
 
 ## 7. LIAeq,100ms — `liaeq_pa`, `liaeq_100ms_db` (proprietary divergence)
 
@@ -245,5 +260,6 @@ exact-normalization form of the FFT-based `Leq_fast` running-RMS routine
 | Impulse | `∫p·dt` positive phase, unweighted, Pa·ms + dB·ms | same | aligned |
 | Peak 10 ms-Leq | max 10 ms rectangular running Leq within 25 ms of onset | same (§8) | aligned |
 | Energy window | 10 ms-Leq only (rejects reflections) | **+ LIAeq,100ms** full free-field decay (§7) | deliberate |
+| Peak/impulse window | short, clipped to reject reverberant reflections | **100 ms, equal to the energy window** (§2.8) | deliberate |
 | Averaging | linear Pa/Pa·ms mean → dB | same (§10) | aligned |
 | A-weighting | `adsgn.m` (IEC 1672) | same prototype (§9) | aligned |

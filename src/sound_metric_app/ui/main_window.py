@@ -846,8 +846,32 @@ class MetricGraph(QtWidgets.QWidget):
     #: A joined line for the time-weighted envelope (the smooth SLM-style curve).
     _LINE_PEN = pg.mkPen((66, 135, 245), width=1)
     _MARK_PEN = pg.mkPen((214, 90, 70), width=1)
-    #: Yellow dotted verticals on the first/last sample — the shot window bounds.
+    #: Yellow dotted verticals on the first/last sample — the drawn-curve extent.
     _BOUND_PEN = pg.mkPen((240, 200, 0), width=1, style=QtCore.Qt.DotLine)
+    #: Dashed verticals on *both* edges of the metric's calculation window.
+    #: Everything outside them is drawn for context and fed into no reported number.
+    _WINDOW_PEN = pg.mkPen((150, 150, 160), width=1, style=QtCore.Qt.DashLine)
+    #: Both window labels run vertically up their line and sit at the top of the
+    #: view. ``rotateAxis`` is given in the *line's own* coordinates, and the line
+    #: item already carries the 90° rotation that stands it upright -- so (1, 0),
+    #: its local x-axis, is the direction along the line, and pyqtgraph then picks
+    #: above/below anchors that flip the label to the inside near a view edge.
+    #: ``position`` is measured along the line within the view, so ~1.0 pins the
+    #: text to the top however the user pans or zooms (0.99 leaves a few px of
+    #: inset). The explicit ``anchors`` are what make it *top*-aligned rather than
+    #: top-centred: pyqtgraph's default pair for rotated text centres the label on
+    #: ``position``, which hangs half of it above the view and clips it. Anchoring
+    #: the text's far end (x = 1) instead pins its top edge and lets it hang down;
+    #: the y component still flips the label to the line's other side near an edge.
+    #: Vertical text keeps both labels legible when the window is narrow --
+    #: Peak-10 ms-Leq's is only 25 ms wide.
+    _WINDOW_LABEL_OPTS = {
+        "position": 0.99,
+        "rotateAxis": (1, 0),
+        "anchors": [(1, 0), (1, 1)],
+        "color": (150, 150, 160),
+        "movable": False,
+    }
     #: Highlight ring drawn on the sample the user clicks to read out.
     _PICK_BRUSH = pg.mkBrush(240, 200, 0)
     _PICK_PEN = pg.mkPen((30, 30, 30), width=1)
@@ -900,6 +924,14 @@ class MetricGraph(QtWidgets.QWidget):
         self._auto_frame_btn.setEnabled(False)
         self._auto_frame_btn.clicked.connect(self.auto_frame)
         toolbar.addWidget(self._auto_frame_btn)
+        self._frame_window_btn = QtWidgets.QPushButton("Frame Calc Window")
+        self._frame_window_btn.setToolTip(
+            "Snap the X range to the calculation window\n"
+            "(the samples this metric's number came from)."
+        )
+        self._frame_window_btn.setEnabled(False)
+        self._frame_window_btn.clicked.connect(self.frame_calc_window)
+        toolbar.addWidget(self._frame_window_btn)
         toolbar.addStretch(1)
 
         # Readout box (bottom right): shows the clicked sample's value + time. The
@@ -924,6 +956,10 @@ class MetricGraph(QtWidgets.QWidget):
         #: None when no trace is shown. Drives both Auto Frame and the yellow curve-
         #: extent bound lines.
         self._x_bounds: tuple[float, float] | None = None
+        #: (x_start_ms, x_end_ms) of the current trace's calculation window -- the
+        #: same two times the dashed window lines mark -- or None when no trace is
+        #: shown or the window has no width to frame. Drives Frame Calc Window.
+        self._window_x_bounds: tuple[float, float] | None = None
         #: The trace currently drawn, kept so a plot click can find the sample it
         #: landed on. None whenever the plot shows a message rather than a curve.
         self._trace = None
@@ -955,9 +991,11 @@ class MetricGraph(QtWidgets.QWidget):
         self._title_label.setText(text)
         self._plot.setLabel("left", "")
         self._x_bounds = None
+        self._window_x_bounds = None
         self._trace = None
         self.clear_readout()
         self._auto_frame_btn.setEnabled(False)
+        self._frame_window_btn.setEnabled(False)
 
     def auto_frame(self) -> None:
         """Snap the X range to the drawn curve's extent (first to last live sample).
@@ -969,6 +1007,22 @@ class MetricGraph(QtWidgets.QWidget):
             return
         x0, x1 = self._x_bounds
         self._plot.setXRange(x0, x1, padding=0)
+        self._plot.enableAutoRange(axis="y")
+
+    def frame_calc_window(self) -> None:
+        """Snap the X range to the calculation window's start/end lines.
+
+        The zoomed-in counterpart to :meth:`auto_frame`: same behaviour, but
+        bracketing only the samples that fed the reported number. A little
+        padding is kept so both window lines stay visible at the edges rather
+        than sitting exactly on the frame. A no-op when the trace carries no
+        window. Y is left on autorange, so the framed slice shows its own
+        vertical extent rather than the whole curve's.
+        """
+        if self._window_x_bounds is None:
+            return
+        x0, x1 = self._window_x_bounds
+        self._plot.setXRange(x0, x1, padding=0.02)
         self._plot.enableAutoRange(axis="y")
 
     def show_trace(self, trace, subtitle: str = "") -> None:
@@ -1007,13 +1061,54 @@ class MetricGraph(QtWidgets.QWidget):
                     pen=pg.mkPen((214, 90, 70), width=1, style=QtCore.Qt.DashLine),
                 )
             )
+        # The calculation window's edges. The curve runs straight through both so
+        # a pre-onset or late event stays visible, but only samples *between* them
+        # reached the reported number — the labels say so, since a curve that
+        # simply continues would otherwise read as all-included. The start also
+        # shows where onset detection fired — the same time for every metric bar
+        # Peak-10 ms-Leq, which opens its window a trailing-RMS length earlier so
+        # the bracket still contains every sample that fed the reported number.
+        # When nothing crossed the onset threshold the window falls back to the
+        # frame start, so the start label says that outright — otherwise a
+        # mis-triggered or silent capture reads as a confident onset at 0 ms.
+        start_text = (
+            "calc window starts"
+            if trace.onset_detected
+            else "calc window starts (no onset detected)"
+        )
+        window_xs: list[float] = []
+        for index, text in (
+            (trace.window_start_index, start_text),
+            (trace.window_end_index, "calc window ends"),
+        ):
+            if index is None:
+                continue
+            x = float(trace.t_ms[index])
+            window_xs.append(x)
+            self._plot.addItem(
+                pg.InfiniteLine(
+                    pos=x, angle=90, pen=self._WINDOW_PEN,
+                    label=text,
+                    labelOpts=self._WINDOW_LABEL_OPTS,
+                )
+            )
+        # Frame Calc Window needs both edges to have a span to zoom to: a trace
+        # with only one line (or a zero-width window) has nothing to frame.
+        if len(window_xs) == 2 and window_xs[1] > window_xs[0]:
+            self._window_x_bounds = (window_xs[0], window_xs[1])
+            self._frame_window_btn.setEnabled(True)
+        else:
+            self._window_x_bounds = None
+            self._frame_window_btn.setEnabled(False)
         # Yellow dotted verticals bracket the drawn curve's extent (first/last
         # sample that actually carries a value), so the data stays visible however
         # far the user pans or zooms. Use the finite (non-NaN) span rather than the
-        # raw sample axis: the Impulse ∫p·dt curve is NaN outside its onset window,
-        # so framing to the full frame would leave the curve a sliver in a sea of
-        # empty X. Full-frame SPL traces are all-finite, so their bounds are
-        # unchanged.
+        # raw sample axis: the Impulse ∫p·dt curve is NaN before the onset (the
+        # integral is undefined there), so framing to the full frame would open
+        # with dead space at the left. Full-frame SPL traces are all-finite, so
+        # their bounds are unchanged. Note this is the *drawn* extent, which now
+        # runs to the end of the capture — the calculation window's end is the
+        # separate dashed line above.
         finite = np.isfinite(trace.values)
         if finite.any():
             xs = trace.t_ms[finite]

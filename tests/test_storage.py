@@ -118,7 +118,34 @@ def test_migrate_v2_blanks_pre_alignment_metric_columns(tmp_path):
         se = repo.group_averages(group_id)[MicPosition.SE]
         for key in _METRIC_KEYS_ALL:
             assert se[key] is None
-        assert repo._schema_version() == 2
+        assert repo._schema_version() == 3
+
+
+def test_migrate_v3_blanks_only_peak_window_columns(tmp_path):
+    # PEAK_WINDOW_MS widened 75 ms -> 100 ms, so peak / peak dBA / impulse rows
+    # written under the old window are not comparable and must be blanked, while
+    # the Leq and LIAeq columns (their own windows) survive untouched.
+    db_path = tmp_path / "old_window.db"
+    with WorkflowRepository(db_path) as repo:
+        batch_id = repo.create_batch("SUP-1")
+        group_id = repo.upsert_group(batch_id, "AR15", "M855")
+        shot_id = repo.add_unmarked_shot("SUP-1_AR15_001.dxd", shot_order=1)
+        repo.mark_shot(shot_id, group_id=group_id, ammo="M855", se_channel="AI 1")
+        repo.save_channel_metric(shot_id, MicPosition.SE, _metric(200.0))
+        # Pretend the row was computed under the 75 ms window (v2, pre-widening).
+        repo._set_schema_version(2)
+        repo._conn.commit()
+
+    with WorkflowRepository(db_path) as repo:
+        se = repo.group_averages(group_id)[MicPosition.SE]
+        for key in ("peak_pa", "peak_db", "peak_a_pa", "peak_dba",
+                    "impulse_pa_ms", "peak_impulse_db"):
+            assert se[key] is None, key
+        for key in ("leq10ms_pa", "leq10ms_db", "liaeq_pa", "liaeq_100ms_db"):
+            assert se[key] is not None, key
+        assert se["leq10ms_pa"] == pytest.approx(200.0)
+        assert se["liaeq_100ms_db"] == pytest.approx(pa_to_db(200.0))
+        assert repo._schema_version() == 3
 
 
 def test_migrate_leaves_current_metric_values_alone(tmp_path):
@@ -185,6 +212,23 @@ def test_both_stores_migrate_when_sharing_one_file(tmp_path):
     with ResultsDatabase(db_path) as db:
         r0 = db.all_results()[0]
         assert r0["peak_impulse_db"] is None and r0["peak_pa"] is None
+
+
+def test_results_db_migrate_v3_blanks_only_peak_window_columns(tmp_path):
+    # The flat CLI store carries the same peak-window widening as the workflow one.
+    db_path = tmp_path / "flat_old_window.db"
+    with ResultsDatabase(db_path) as db:
+        db.add_result(_metric(150.0))
+        db._set_schema_version(2)  # pretend the row predates the 100 ms window
+        db._conn.commit()
+
+    with ResultsDatabase(db_path) as db:
+        row = db.all_results()[0]
+        assert row["peak_pa"] is None and row["impulse_pa_ms"] is None
+        assert row["peak_dba"] is None
+        assert row["leq10ms_pa"] == pytest.approx(150.0)  # own window, untouched
+        assert row["liaeq_pa"] == pytest.approx(150.0)
+        assert db._schema_version() == 3
 
 
 def test_batch_group_shot_metrics_round_trip(repo):

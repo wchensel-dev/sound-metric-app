@@ -95,9 +95,24 @@ def _positive_phase_impulse(segment: np.ndarray, fs: float) -> tuple[np.ndarray,
     dt_ms = 1000.0 / fs
     # Cumulative trapezoidal integral, same length as seg, q[0] = 0 (no scipy dep).
     q = np.concatenate(([0.0], np.cumsum((seg[:-1] + seg[1:]) * 0.5 * dt_ms)))
+    return q, positive_phase_peak_index(q)
+
+
+def positive_phase_peak_index(q: np.ndarray) -> int | None:
+    """Index of the positive-phase peak within a running impulse curve ``q``.
+
+    The max of ``q`` up to its minimum (the end of the negative phase), per
+    TBAC's min-bounding rule; ``None`` for an empty ``q``. Split out of
+    :func:`_positive_phase_impulse` so a caller holding a longer ``q`` can locate
+    the peak of a shorter *prefix* of it — the cumulative integral of a segment
+    is by construction the prefix of the cumulative integral of anything starting
+    at the same sample — without integrating the same samples a second time.
+    """
+    if q.size == 0:
+        return None
     i_min = int(np.argmin(q))
     upper = q if i_min == 0 else q[: i_min + 1]
-    return q, int(np.argmax(upper))
+    return int(np.argmax(upper))
 
 
 def positive_phase_impulse_pa_ms(pressure: np.ndarray, fs: float) -> float:
@@ -117,9 +132,12 @@ def positive_phase_impulse_pa_ms(pressure: np.ndarray, fs: float) -> float:
     phase drives Q below its start** (``i_min > 0``) — the usual free-field case,
     where the rarefaction pulls the running integral negative after the positive
     peak. When Q never dips below its start (``i_min == 0``), the impulse is the
-    global max over the whole window; a within-window reflection could then inflate
-    it. Free-field capture (no early reflections) is what makes this safe here;
-    MATH.md §6 spells out the caveat.
+    global max over the *whole* caller-supplied segment — the full 100 ms of
+    ``PEAK_WINDOW_MS`` — so anything rising within those 100 ms could inflate it,
+    and nothing here detects or flags that case. Free-field capture discipline
+    (MATH.md §2.8: one shot, no comparable
+    transient within the window) is the only thing bounding it; MATH.md §6 spells
+    out the caveat.
 
     Time is integrated in **milliseconds**, so the result is Pa·ms — matching TBAC
     (whose ``dB*ms`` is ``pa_to_db`` of this value). A NaN in the input propagates
@@ -131,6 +149,18 @@ def positive_phase_impulse_pa_ms(pressure: np.ndarray, fs: float) -> float:
     if np.isnan(q).any():
         return float("nan")
     return max(float(q[peak_index]), 0.0)
+
+
+def leq_window_samples(fs: float, tau_s: float = LEQ_TAU_S) -> int:
+    """Length ``L`` of :func:`running_leq_rms`'s trailing window, in samples.
+
+    ``floor(fs*tau)``, floored at 1 to match ``running_leq_rms``'s degenerate
+    branch (a sub-sample window there reduces to ``|p|``, a 1-sample window).
+    Exposed so callers that *annotate* the running Leq — the graph layer drawing
+    the calculation window — can account for the ``L-1`` samples of lookback each
+    reported value integrates over.
+    """
+    return max(1, int(np.floor(fs * tau_s)))
 
 
 def running_leq_rms(pressure: np.ndarray, fs: float, tau_s: float = LEQ_TAU_S) -> np.ndarray:
@@ -152,9 +182,9 @@ def running_leq_rms(pressure: np.ndarray, fs: float, tau_s: float = LEQ_TAU_S) -
     """
     p = np.asarray(pressure, dtype=float)
     n = p.size
-    L = int(np.floor(fs * tau_s))
-    if L < 1 or n == 0:
+    if int(np.floor(fs * tau_s)) < 1 or n == 0:
         return np.abs(p)
+    L = leq_window_samples(fs, tau_s)
     csum = np.cumsum(p**2)
     ms = np.empty(n, dtype=float)
     upto = min(L, n)
