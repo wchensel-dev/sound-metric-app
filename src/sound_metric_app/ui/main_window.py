@@ -846,11 +846,11 @@ class MetricGraph(QtWidgets.QWidget):
     #: A joined line for the time-weighted envelope (the smooth SLM-style curve).
     _LINE_PEN = pg.mkPen((66, 135, 245), width=1)
     _MARK_PEN = pg.mkPen((214, 90, 70), width=1)
-    #: Yellow dotted verticals on the first/last sample — the shot window bounds.
+    #: Yellow dotted verticals on the first/last sample — the drawn-curve extent.
     _BOUND_PEN = pg.mkPen((240, 200, 0), width=1, style=QtCore.Qt.DotLine)
-    #: Dashed verticals bracketing the metric's calculation window. Everything
-    #: outside them is drawn for context and fed into no reported number.
-    _WINDOW_END_PEN = pg.mkPen((150, 150, 160), width=1, style=QtCore.Qt.DashLine)
+    #: Dashed verticals on *both* edges of the metric's calculation window.
+    #: Everything outside them is drawn for context and fed into no reported number.
+    _WINDOW_PEN = pg.mkPen((150, 150, 160), width=1, style=QtCore.Qt.DashLine)
     #: Both window labels run vertically up their line and sit at the top of the
     #: view. ``rotateAxis`` is given in the *line's own* coordinates, and the line
     #: item already carries the 90° rotation that stands it upright -- so (1, 0),
@@ -1087,7 +1087,7 @@ class MetricGraph(QtWidgets.QWidget):
             window_xs.append(x)
             self._plot.addItem(
                 pg.InfiniteLine(
-                    pos=x, angle=90, pen=self._WINDOW_END_PEN,
+                    pos=x, angle=90, pen=self._WINDOW_PEN,
                     label=text,
                     labelOpts=self._WINDOW_LABEL_OPTS,
                 )
