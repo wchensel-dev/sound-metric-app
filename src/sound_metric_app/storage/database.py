@@ -15,6 +15,15 @@ _METRIC_COLUMNS = (
     "liaeq_pa", "liaeq_100ms_db",
 )
 
+#: The subset of :data:`_METRIC_COLUMNS` computed over ``PEAK_WINDOW_MS``. A
+#: change to that window changes these values and only these — the 10 ms-Leq and
+#: LIAeq columns have their own windows (``LEQ_SEARCH_MS``/``LIAEQ_WINDOW_MS``).
+_PEAK_WINDOW_COLUMNS = (
+    "peak_pa", "peak_db",
+    "peak_a_pa", "peak_dba",
+    "impulse_pa_ms", "peak_impulse_db",
+)
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,6 +72,15 @@ class ResultsDatabase(_SqliteStore):
             cols = ", ".join(f"{c} = NULL" for c in _METRIC_COLUMNS)
             self._conn.execute(f"UPDATE results SET {cols}")
             self._set_schema_version(2)
+        if self._schema_version() < 3:
+            # PEAK_WINDOW_MS widened from 75 ms to 100 ms, so peak, peak dBA and
+            # the impulse integral are no longer comparable with rows computed
+            # under the old window. Blank them; re-processing the source file
+            # repopulates them. The Leq/LIAeq columns keep their own windows and
+            # are left alone.
+            cols = ", ".join(f"{c} = NULL" for c in _PEAK_WINDOW_COLUMNS)
+            self._conn.execute(f"UPDATE results SET {cols}")
+            self._set_schema_version(3)
 
     def add_result(self, result: MetricResult) -> int:
         row = result.as_row()
