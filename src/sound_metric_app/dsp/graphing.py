@@ -53,6 +53,7 @@ from .metrics import (
     find_onset,
     leq_window_samples,
     pa_to_db,
+    positive_phase_peak_index,
     rms_pa,
     running_leq_rms,
     window_samples,
@@ -256,17 +257,18 @@ def build_metric_trace(
         # running integral turns over into its minimum.
         #
         # The curve is drawn from onset to the end of the capture, but the
-        # reported peak comes from the window alone: `q_draw` and `peak` are two
-        # separate calls precisely so extending the drawn curve cannot reach the
-        # marker. The window's own `q` is a prefix of `q_draw` (a cumulative sum
-        # of the same samples), so the two agree everywhere they overlap and the
-        # drawn curve continues past the marker rather than restarting. Pre-onset
+        # reported peak comes from the window alone: the peak search runs over
+        # `q_draw[: stop - start]`, not all of `q_draw`, precisely so extending
+        # the drawn curve cannot reach the marker. That slice *is* the window's
+        # own integral — a cumulative sum of the same samples from the same
+        # start — so the marker matches the reported scalar exactly while the
+        # drawn curve continues past it rather than restarting. Pre-onset
         # samples stay NaN: ∫p·dt is defined from the onset, so a flat 0 there
         # would draw a value the integral does not have.
         start, stop = _onset_window(fs, onset, PEAK_WINDOW_MS)
         w_start, w_end = _window_bounds(start, stop, p.shape[0])
         q_draw, _ = _positive_phase_impulse(p[start:], fs)
-        _, local_peak = _positive_phase_impulse(p[start:stop], fs)
+        local_peak = positive_phase_peak_index(q_draw[: stop - start])
         values = np.full(p.shape[0], np.nan)
         values[start : start + q_draw.size] = q_draw
         peak_index = start + local_peak if local_peak is not None else None

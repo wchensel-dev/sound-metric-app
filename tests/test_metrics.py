@@ -20,9 +20,11 @@ from sound_metric_app.config import (
     P_REF,
 )
 from sound_metric_app.dsp.metrics import (
+    _positive_phase_impulse,
     find_onset,
     pa_to_db,
     positive_phase_impulse_pa_ms,
+    positive_phase_peak_index,
     rms_pa,
     running_leq_rms,
     signed_peak_pa,
@@ -139,6 +141,26 @@ def test_positive_phase_impulse_stops_before_negative_phase():
     expected = A * 300 * dt_ms  # positive-phase area (≈, trapezoid ends aside)
     got = positive_phase_impulse_pa_ms(seg, FS)
     assert got == pytest.approx(expected, rel=1e-2)
+
+
+def test_positive_phase_impulse_of_a_segment_is_a_prefix_of_the_longer_one():
+    # The graph layer marks the window's peak by slicing the *drawn* curve rather
+    # than integrating the window a second time. That is only sound because the
+    # cumulative integral of a segment is exactly the prefix of the cumulative
+    # integral of anything starting at the same sample; pin that identity here.
+    seg = np.concatenate([np.full(300, 500.0), np.full(300, -500.0), _sine(200.0, 80.0)])
+    n_window = 400
+    q_long, _ = _positive_phase_impulse(seg, FS)
+    q_window, peak_window = _positive_phase_impulse(seg[:n_window], FS)
+
+    assert np.array_equal(q_long[:n_window], q_window)
+    assert positive_phase_peak_index(q_long[:n_window]) == peak_window
+    # ...and the longer curve's own peak really can differ, so the slice matters.
+    assert positive_phase_peak_index(q_long) is not None
+
+
+def test_positive_phase_peak_index_of_empty_curve_is_none():
+    assert positive_phase_peak_index(np.zeros(0)) is None
 
 
 def test_positive_phase_impulse_nan_propagates():

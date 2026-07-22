@@ -95,9 +95,24 @@ def _positive_phase_impulse(segment: np.ndarray, fs: float) -> tuple[np.ndarray,
     dt_ms = 1000.0 / fs
     # Cumulative trapezoidal integral, same length as seg, q[0] = 0 (no scipy dep).
     q = np.concatenate(([0.0], np.cumsum((seg[:-1] + seg[1:]) * 0.5 * dt_ms)))
+    return q, positive_phase_peak_index(q)
+
+
+def positive_phase_peak_index(q: np.ndarray) -> int | None:
+    """Index of the positive-phase peak within a running impulse curve ``q``.
+
+    The max of ``q`` up to its minimum (the end of the negative phase), per
+    TBAC's min-bounding rule; ``None`` for an empty ``q``. Split out of
+    :func:`_positive_phase_impulse` so a caller holding a longer ``q`` can locate
+    the peak of a shorter *prefix* of it — the cumulative integral of a segment
+    is by construction the prefix of the cumulative integral of anything starting
+    at the same sample — without integrating the same samples a second time.
+    """
+    if q.size == 0:
+        return None
     i_min = int(np.argmin(q))
     upper = q if i_min == 0 else q[: i_min + 1]
-    return q, int(np.argmax(upper))
+    return int(np.argmax(upper))
 
 
 def positive_phase_impulse_pa_ms(pressure: np.ndarray, fs: float) -> float:
