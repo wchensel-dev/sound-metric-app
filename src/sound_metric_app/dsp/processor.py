@@ -4,7 +4,7 @@ Every metric is anchored to a single detected onset (first raw-pressure sample
 above the 1 Pa threshold) and computed over a fixed window from there, matching
 TBAC's ``process_string.m``:
 
-* Peak dB / Peak dBA — largest *signed* pressure in ``[onset, onset+75 ms]``;
+* Peak dB / Peak dBA — largest *signed* pressure in ``[onset, onset+100 ms]``;
 * Peak Impulse — positive-phase ``∫p·dt`` (unweighted) in the same window;
 * Peak 10 ms-Leq — max of the rectangular 10 ms running Leq (A-weighted) within
   ``[onset, onset+25 ms]``;

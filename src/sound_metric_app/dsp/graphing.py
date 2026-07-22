@@ -13,6 +13,13 @@ single annotation that explains where the reported number comes from:
 * the energy-average metric (LIAeq) has no single peak, so it carries a
   horizontal reference line at the reported level instead.
 
+Every curve spans the whole capture, not just the window its metric was computed
+over, so the operator can see what the rest of the frame was doing — a second
+blast or a reflection is visible even when it lands outside the window and
+therefore changes nothing. ``window_start_index`` and ``window_end_index`` bracket
+that window, separating the samples the reported number came from from the ones
+drawn for context only. Widening the *drawn* span never widens a *computed* one.
+
 Each SPL-over-time metric can be drawn two ways, chosen by the caller's
 ``smoothing`` argument: the raw per-sample instantaneous level
 (:data:`SMOOTHING_INSTANT`), or an exponentially time-weighted RMS envelope at
@@ -71,6 +78,14 @@ class MetricTrace:
     metric sets ``peak_index`` (vertical marker) and leaves ``level`` ``None``; the
     energy-average metric sets ``level`` (horizontal marker) and leaves
     ``peak_index`` ``None``. Either may be ``None`` (e.g. a fully silent frame).
+
+    ``window_start_index`` and ``window_end_index`` bracket *this* metric's
+    onset-anchored calculation window — the samples that produced the reported
+    number, inside the whole capture that every curve now draws. They are purely
+    annotations: no value in ``values`` depends on either. The start is the
+    detected onset and is shared by every metric; the end is not (Peak-10 ms-Leq
+    closes at 25 ms, the rest at 100 ms), so both are stored per trace rather
+    than read from a single constant.
     """
 
     t_ms: np.ndarray  # time axis, milliseconds from capture start
@@ -80,6 +95,8 @@ class MetricTrace:
     peak_index: int | None = None  # sample index for a vertical peak marker
     level: float | None = None  # y for a horizontal reference line
     connected: bool = False  # draw as a joined line (envelope) vs a point cloud
+    window_start_index: int | None = None  # sample index where the window opens
+    window_end_index: int | None = None  # sample index where this metric's window ends
 
 
 def _spl_db(pressure: np.ndarray) -> np.ndarray:
@@ -132,6 +149,19 @@ def _onset_window(fs: float, onset: int | None, window_ms: float) -> tuple[int, 
     return start, start + window_samples(fs, window_ms)
 
 
+def _window_bounds(start: int, stop: int, n_samples: int) -> tuple[int | None, int | None]:
+    """Sample indices to draw the calculation window's start/end markers at.
+
+    Either is ``None`` when that edge falls outside the capture, since there is
+    then no boundary inside the plot to mark — a window running past the last
+    sample means the whole tail is window, with nothing to separate it from.
+    """
+    return (
+        start if 0 <= start < n_samples else None,
+        stop if 0 <= stop < n_samples else None,
+    )
+
+
 def _signed_peak_index(signal: np.ndarray, start: int, stop: int) -> int | None:
     """Index of the largest *signed* sample in ``signal[start:stop]``, or None.
 
@@ -178,6 +208,7 @@ def build_metric_trace(
         # Raw pressure, unconverted. Instantaneous is the literal waveform (Pa);
         # Fast/Slow is the RMS pressure envelope in the same units.
         start, stop = _onset_window(fs, onset, PEAK_WINDOW_MS)
+        w_start, w_end = _window_bounds(start, stop, p.shape[0])
         if smoothing == SMOOTHING_INSTANT:
             values, connected = p, False
         else:
@@ -186,37 +217,54 @@ def build_metric_trace(
         return MetricTrace(
             t_ms, values, "Pressure (Pa)", "Peak Pa",
             peak_index=_signed_peak_index(p, start, stop), connected=connected,
+            window_start_index=w_start, window_end_index=w_end,
         )
 
     if metric_key == "peak_db":
         start, stop = _onset_window(fs, onset, PEAK_WINDOW_MS)
+        w_start, w_end = _window_bounds(start, stop, p.shape[0])
         values, connected = spl(p)
         return MetricTrace(
             t_ms, values, "SPL (dB)", "Peak dB",
             peak_index=_signed_peak_index(p, start, stop), connected=connected,
+            window_start_index=w_start, window_end_index=w_end,
         )
 
     if metric_key == "peak_dba":
         p_a = apply_a_weighting(p, fs)
         start, stop = _onset_window(fs, onset, PEAK_WINDOW_MS)
+        w_start, w_end = _window_bounds(start, stop, p.shape[0])
         values, connected = spl(p_a)
         return MetricTrace(
             t_ms, values, "SPL (dBA)", "Peak dBA",
             peak_index=_signed_peak_index(p_a, start, stop), connected=connected,
+            window_start_index=w_start, window_end_index=w_end,
         )
 
     if metric_key in ("peak_impulse_db", "impulse_pa_ms"):
-        # The cumulative positive-phase impulse ∫p·dt (Pa·ms) over the onset
-        # window; the marker sits at the peak of the positive phase (the reported
-        # value), found before the running integral turns over into its minimum.
+        # The cumulative positive-phase impulse ∫p·dt (Pa·ms); the marker sits at
+        # the peak of the positive phase (the reported value), found before the
+        # running integral turns over into its minimum.
+        #
+        # The curve is drawn from onset to the end of the capture, but the
+        # reported peak comes from the window alone: `q_draw` and `peak` are two
+        # separate calls precisely so extending the drawn curve cannot reach the
+        # marker. The window's own `q` is a prefix of `q_draw` (a cumulative sum
+        # of the same samples), so the two agree everywhere they overlap and the
+        # drawn curve continues past the marker rather than restarting. Pre-onset
+        # samples stay NaN: ∫p·dt is defined from the onset, so a flat 0 there
+        # would draw a value the integral does not have.
         start, stop = _onset_window(fs, onset, PEAK_WINDOW_MS)
-        q, local_peak = _positive_phase_impulse(p[start:stop], fs)
+        w_start, w_end = _window_bounds(start, stop, p.shape[0])
+        q_draw, _ = _positive_phase_impulse(p[start:], fs)
+        _, local_peak = _positive_phase_impulse(p[start:stop], fs)
         values = np.full(p.shape[0], np.nan)
-        values[start : start + q.size] = q
+        values[start : start + q_draw.size] = q_draw
         peak_index = start + local_peak if local_peak is not None else None
         return MetricTrace(
             t_ms, values, "Impulse ∫p·dt (Pa·ms)", "Peak Impulse",
             peak_index=peak_index, connected=True,
+            window_start_index=w_start, window_end_index=w_end,
         )
 
     if metric_key == "leq10ms_db":
@@ -225,20 +273,24 @@ def build_metric_trace(
         with np.errstate(divide="ignore"):
             values = 20.0 * np.log10(np.maximum(rms, P_REF) / P_REF)
         start, stop = _onset_window(fs, onset, LEQ_SEARCH_MS)
+        w_start, w_end = _window_bounds(start, stop, p.shape[0])
         seg = rms[start:stop]
         peak_index = start + int(np.argmax(seg)) if seg.size else None
         return MetricTrace(
             t_ms, values, "Leq 10 ms (dBA)", "Peak Leq 10 ms",
             peak_index=peak_index, connected=True,
+            window_start_index=w_start, window_end_index=w_end,
         )
 
     if metric_key == "liaeq_100ms_db":
         p_a = apply_a_weighting(p, fs)
         start, stop = _onset_window(fs, onset, LIAEQ_WINDOW_MS)
+        w_start, w_end = _window_bounds(start, stop, p.shape[0])
         values, connected = spl(p_a)
         return MetricTrace(
             t_ms, values, "SPL (dBA)", "LIAeq,100ms",
             level=pa_to_db(rms_pa(p_a[start:stop])), connected=connected,
+            window_start_index=w_start, window_end_index=w_end,
         )
 
     raise ValueError(f"Unknown metric key: {metric_key!r}")

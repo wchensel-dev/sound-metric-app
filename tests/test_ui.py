@@ -195,7 +195,7 @@ def test_clicking_metric_cell_graphs_that_shot(window, qtbot):
 
 
 def test_auto_frame_bounds_track_finite_curve_extent(qtbot):
-    # A NaN-padded curve (the Impulse ∫p·dt trace lives only in its onset window)
+    # A NaN-padded curve (the Impulse ∫p·dt trace is NaN before the onset)
     # must frame to where the curve actually exists, not the full sample axis --
     # otherwise Auto Frame stretches X across a sea of empty samples.
     from sound_metric_app.dsp.graphing import MetricTrace
@@ -218,6 +218,129 @@ def test_auto_frame_bounds_track_finite_curve_extent(qtbot):
     view_x0, view_x1 = graph._plot.getViewBox().viewRange()[0]
     assert view_x0 == pytest.approx(1.0)
     assert view_x1 == pytest.approx(3.0)
+
+
+def test_graph_draws_calculation_window_markers(qtbot):
+    # The dashed verticals that separate "samples the metric used" from the
+    # context drawn either side. Also exercises the InfiniteLine label options.
+    import pyqtgraph as pg
+
+    from sound_metric_app.dsp.graphing import MetricTrace
+    from sound_metric_app.ui.main_window import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+
+    def verticals():
+        return [
+            item.value()
+            for item in graph._plot.getPlotItem().items
+            if isinstance(item, pg.InfiniteLine) and item.angle == 90
+        ]
+
+    trace = MetricTrace(
+        t_ms=np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+        values=np.array([1.0, 2.0, 3.0, 2.0, 1.0]),
+        y_label="SPL (dB)",
+        title="Peak dB",
+        peak_index=2,
+        window_start_index=1,
+        window_end_index=3,
+    )
+    graph.show_trace(trace)
+    drawn = verticals()
+    assert 1.0 in drawn, "no vertical at the window start"
+    assert 3.0 in drawn, "no vertical at the window end"
+
+    # Each is independent: an edge outside the capture simply isn't drawn.
+    trace.window_end_index = None
+    graph.show_trace(trace)
+    drawn = verticals()
+    assert 1.0 in drawn
+    assert 3.0 not in drawn
+
+
+def test_frame_calc_window_zooms_to_the_window_edges(qtbot):
+    # Frame Calc Window is Auto Frame's zoomed-in counterpart: it snaps X to the
+    # two dashed window lines rather than the curve's full extent, and needs both
+    # edges to have something to frame.
+    from sound_metric_app.dsp.graphing import MetricTrace
+    from sound_metric_app.ui.main_window import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+
+    trace = MetricTrace(
+        t_ms=np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+        values=np.array([1.0, 2.0, 3.0, 2.0, 1.0]),
+        y_label="SPL (dB)",
+        title="Peak dB",
+        window_start_index=1,
+        window_end_index=3,
+    )
+    graph.show_trace(trace)
+    assert graph._frame_window_btn.isEnabled()
+    assert graph._window_x_bounds == (1.0, 3.0)
+    graph.frame_calc_window()
+    view_x0, view_x1 = graph._plot.getViewBox().viewRange()[0]
+    # Framed to the window, not the curve's [0.0, 4.0] extent; the small padding
+    # keeps both lines off the very edge.
+    assert 0.0 < view_x0 < 1.0
+    assert 3.0 < view_x1 < 4.0
+
+    # A trace with only one window edge -- or none at all -- has no span to
+    # frame, so the button goes back to disabled.
+    trace.window_end_index = None
+    graph.show_trace(trace)
+    assert not graph._frame_window_btn.isEnabled()
+    assert graph._window_x_bounds is None
+
+    graph.show_message("nothing graphed")
+    assert not graph._frame_window_btn.isEnabled()
+
+
+def test_window_marker_labels_run_vertically_from_the_top(qtbot):
+    # The labels are rotated parallel to their line and top-aligned. Guards the
+    # anchor choice: pyqtgraph's default anchors for rotated text centre the
+    # label on `position`, which with position~1.0 hangs half of it above the
+    # view and clips it. Anchoring the far end pins the top edge instead.
+    import pyqtgraph as pg
+
+    from sound_metric_app.dsp.graphing import MetricTrace
+    from sound_metric_app.ui.main_window import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+    graph.resize(900, 500)
+    graph.show()
+
+    trace = MetricTrace(
+        t_ms=np.linspace(0.0, 210.0, 2100),
+        values=np.linspace(100.0, 150.0, 2100),
+        y_label="SPL (dB)",
+        title="Peak dB",
+        window_start_index=100,
+        window_end_index=1100,
+    )
+    graph.show_trace(trace)
+    graph.grab()  # force a paint pass so pyqtgraph applies the label transform
+
+    view_rect = graph._plot.getPlotItem().vb.sceneBoundingRect()
+    labels = [
+        child
+        for item in graph._plot.getPlotItem().items
+        if isinstance(item, pg.InfiniteLine)
+        for child in item.childItems()
+        if isinstance(child, pg.InfLineLabel)
+    ]
+    assert len(labels) == 2
+
+    for label in labels:
+        rect = label.mapRectToScene(label.boundingRect())
+        assert rect.height() > rect.width(), f"{label.format} is not rotated"
+        assert rect.top() >= view_rect.top(), f"{label.format} clipped above the view"
+        # Top-aligned: snug under the top edge, not floating mid-plot.
+        assert rect.top() - view_rect.top() < view_rect.height() * 0.1
 
 
 def test_graph_point_readout_shows_value_and_clears(qtbot):

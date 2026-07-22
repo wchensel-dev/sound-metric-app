@@ -21,7 +21,10 @@ ONSET_THRESHOLD_PA: float = 1.0
 
 # Peak/impulse search window after onset (ms): the signed peak and the
 # positive-phase impulse are found within [onset, onset + PEAK_WINDOW_MS].
-PEAK_WINDOW_MS: float = 75.0
+# Deliberately equal to LIAEQ_WINDOW_MS below: one 100 ms free-field decay
+# window for every onset-anchored metric, so peak/impulse and LIAeq can never
+# disagree about which events are in scope for a frame (MATH.md §3).
+PEAK_WINDOW_MS: float = 100.0
 
 # Peak 10 ms-Leq: rectangular running-Leq integration time (s), and the
 # post-onset span its running maximum is searched over (ms).
