@@ -151,6 +151,23 @@ def test_window_markers_bracket_each_metrics_own_window(metric_key, window_ms):
     assert trace.window_end_index == onset + window_samples(FS, window_ms) - 1
 
 
+@pytest.mark.parametrize(
+    "metric_key",
+    ["peak_pa", "peak_db", "peak_dba", "peak_impulse_db", "leq10ms_db", "liaeq_100ms_db"],
+)
+def test_undetected_onset_is_flagged_on_the_trace(metric_key):
+    # A frame with nothing above the 1 Pa threshold still gets a window (from the
+    # frame start), but the trace must say the start was a fallback — otherwise
+    # the graph labels 0 ms as a detected onset on a silent or mis-triggered
+    # capture, which is exactly the case the processor warns about.
+    quiet = Frame(
+        samples=np.full(N, 0.01), sample_rate=FS, channel="AI 1", source_file="x.dxd"
+    )
+    assert find_onset(quiet.samples) is None
+    assert build_metric_trace(quiet, metric_key).onset_detected is False
+    assert build_metric_trace(_shot_frame(), metric_key).onset_detected is True
+
+
 def test_window_end_marker_survives_a_window_closing_at_the_capture_end():
     # Regression: the end marker used to be the *exclusive* slice bound, so a
     # capture trimmed to exactly the window's end indexed one past the last

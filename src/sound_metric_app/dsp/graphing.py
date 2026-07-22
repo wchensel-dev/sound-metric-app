@@ -93,6 +93,12 @@ class MetricTrace:
     25 ms, the rest at 100 ms). Both are therefore stored per trace rather than
     read from a single constant.
 
+    ``onset_detected`` is ``False`` when no sample crossed the onset threshold and
+    the window fell back to the frame start (mirroring the processor, which warns
+    in the same case). The bounds are still the ones the reported number came
+    from, but they are anchored to nothing acoustic, so a caller drawing them
+    should say so rather than present ``window_start_index`` as a detected onset.
+
     The A-weighted traces carry a residual caveat the brackets cannot express:
     :func:`~sound_metric_app.dsp.weighting.apply_a_weighting` is an IIR filter
     run over the whole capture, so pre-window pressure influences the weighted
@@ -109,6 +115,7 @@ class MetricTrace:
     connected: bool = False  # draw as a joined line (envelope) vs a point cloud
     window_start_index: int | None = None  # sample index where the window opens
     window_end_index: int | None = None  # last sample index inside this metric's window
+    onset_detected: bool = True  # False when the window fell back to the frame start
 
 
 def _spl_db(pressure: np.ndarray) -> np.ndarray:
@@ -238,6 +245,7 @@ def build_metric_trace(
             t_ms, values, "Pressure (Pa)", "Peak Pa",
             peak_index=_signed_peak_index(p, start, stop), connected=connected,
             window_start_index=w_start, window_end_index=w_end,
+            onset_detected=onset is not None,
         )
 
     if metric_key == "peak_db":
@@ -248,6 +256,7 @@ def build_metric_trace(
             t_ms, values, "SPL (dB)", "Peak dB",
             peak_index=_signed_peak_index(p, start, stop), connected=connected,
             window_start_index=w_start, window_end_index=w_end,
+            onset_detected=onset is not None,
         )
 
     if metric_key == "peak_dba":
@@ -259,6 +268,7 @@ def build_metric_trace(
             t_ms, values, "SPL (dBA)", "Peak dBA",
             peak_index=_signed_peak_index(p_a, start, stop), connected=connected,
             window_start_index=w_start, window_end_index=w_end,
+            onset_detected=onset is not None,
         )
 
     if metric_key in ("peak_impulse_db", "impulse_pa_ms"):
@@ -286,6 +296,7 @@ def build_metric_trace(
             t_ms, values, "Impulse ∫p·dt (Pa·ms)", "Peak Impulse",
             peak_index=peak_index, connected=True,
             window_start_index=w_start, window_end_index=w_end,
+            onset_detected=onset is not None,
         )
 
     if metric_key == "leq10ms_db":
@@ -309,6 +320,7 @@ def build_metric_trace(
             t_ms, values, "Leq 10 ms (dBA)", "Peak Leq 10 ms",
             peak_index=peak_index, connected=True,
             window_start_index=w_start, window_end_index=w_end,
+            onset_detected=onset is not None,
         )
 
     if metric_key == "liaeq_100ms_db":
@@ -320,6 +332,7 @@ def build_metric_trace(
             t_ms, values, "SPL (dBA)", "LIAeq,100ms",
             level=pa_to_db(rms_pa(p_a[start:stop])), connected=connected,
             window_start_index=w_start, window_end_index=w_end,
+            onset_detected=onset is not None,
         )
 
     raise ValueError(f"Unknown metric key: {metric_key!r}")

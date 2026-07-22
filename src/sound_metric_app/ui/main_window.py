@@ -1068,9 +1068,17 @@ class MetricGraph(QtWidgets.QWidget):
         # shows where onset detection fired — the same time for every metric bar
         # Peak-10 ms-Leq, which opens its window a trailing-RMS length earlier so
         # the bracket still contains every sample that fed the reported number.
+        # When nothing crossed the onset threshold the window falls back to the
+        # frame start, so the start label says that outright — otherwise a
+        # mis-triggered or silent capture reads as a confident onset at 0 ms.
+        start_text = (
+            "calc window starts"
+            if trace.onset_detected
+            else "calc window starts (no onset detected)"
+        )
         window_xs: list[float] = []
         for index, text in (
-            (trace.window_start_index, "calc window starts"),
+            (trace.window_start_index, start_text),
             (trace.window_end_index, "calc window ends"),
         ):
             if index is None:

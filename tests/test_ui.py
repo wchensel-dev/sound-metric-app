@@ -260,6 +260,43 @@ def test_graph_draws_calculation_window_markers(qtbot):
     assert 3.0 not in drawn
 
 
+def test_window_start_label_says_when_no_onset_was_detected(qtbot):
+    # A frame with no sample above the onset threshold falls back to the frame
+    # start. The line still gets drawn (it is where the metric was computed from),
+    # but labelling it plain "calc window starts" would read as a detected onset
+    # at 0 ms on a silent or mis-triggered capture.
+    import pyqtgraph as pg
+
+    from sound_metric_app.dsp.graphing import MetricTrace
+    from sound_metric_app.ui.main_window import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+
+    def start_label():
+        for item in graph._plot.getPlotItem().items:
+            if isinstance(item, pg.InfiniteLine) and item.label is not None:
+                if "starts" in item.label.format:
+                    return item.label.format
+        return None
+
+    trace = MetricTrace(
+        t_ms=np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+        values=np.array([1.0, 2.0, 3.0, 2.0, 1.0]),
+        y_label="SPL (dB)",
+        title="Peak dB",
+        window_start_index=0,
+        window_end_index=3,
+        onset_detected=False,
+    )
+    graph.show_trace(trace)
+    assert start_label() == "calc window starts (no onset detected)"
+
+    trace.onset_detected = True
+    graph.show_trace(trace)
+    assert start_label() == "calc window starts"
+
+
 def test_frame_calc_window_zooms_to_the_window_edges(qtbot):
     # Frame Calc Window is Auto Frame's zoomed-in counterpart: it snaps X to the
     # two dashed window lines rather than the curve's full extent, and needs both
