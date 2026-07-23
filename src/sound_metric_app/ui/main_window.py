@@ -855,8 +855,12 @@ class DataBankView(_View):
         self.tree = QtWidgets.QTreeWidget()
         self.tree.setHeaderLabels(self._COLUMNS)
         self.tree.itemSelectionChanged.connect(self._update_actions_enabled)
-        # Only leaf shot rows edit on double-click; on a container row that
-        # gesture is Qt's expand/collapse and must not also pop an edit modal.
+        # Double-click means "edit" here, so Qt's default expand/collapse on the
+        # same gesture is off: a batch row is editable *and* has children, and
+        # one double-click must not both toggle the branch and pop a modal
+        # (cancelling the modal would leave the branch toggled anyway). Expanding
+        # stays on the branch arrow, the keyboard, and expandAll() in refresh().
+        self.tree.setExpandsOnDoubleClick(False)
         self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.tree.itemChanged.connect(self._on_item_changed)
         _style_grid_tree(self.tree)

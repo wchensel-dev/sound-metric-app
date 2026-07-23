@@ -716,14 +716,18 @@ def test_batch_edit_dialog_rejects_a_malformed_date(window, monkeypatch):
 
 
 def test_double_click_edits_leaf_and_batch_rows_only(window, qtbot, monkeypatch):
-    # Double-click is Qt's expand/collapse gesture on container rows; it must not
-    # also route through _edit_selected on a combination or cluster.
+    # Only editable rows (batch, shot) route through _edit_selected; a pure
+    # container never pops the modal.
     _mark_all_shots(window, qtbot)
 
     bv = window.bank_view
     bv.refresh()
     edited: list = []
     monkeypatch.setattr(bv, "_edit_selected", lambda: edited.append(True))
+
+    # A batch row is editable *and* has children, so Qt's expand/collapse must
+    # not ride along on the same double-click that opens the edit modal.
+    assert not bv.tree.expandsOnDoubleClick()
 
     combination_item, batch_item, cluster_item, shot_item = _tree_nodes(bv)
 
