@@ -2,9 +2,14 @@
 
 This is the first headless workflow service (BUILD_PLAN Task 4). It scans a
 configured input folder, parses each capture filename into its provisional
-batch/group keys (:func:`~sound_metric_app.models.parse_capture_filename`), and
-records each file as an *Unmarked Data Set* — a shot with ``marked = False`` and
-no test context yet.
+placement keys — SKU, platform, cluster index, and shot order
+(:func:`~sound_metric_app.models.parse_capture_filename`) — and records each file
+as an *Unmarked Data Set*: a shot with ``marked = False`` and no test context
+beyond what its name carried.
+
+Because the cluster is encoded in the filename, a shot arrives already knowing
+which string of fire it belongs to and its position within it, so its FRP /
+regular role is determined from the moment it lands.
 
 Design notes:
 
@@ -115,6 +120,7 @@ class IngestionService:
                 source_file,
                 suppressor_sku=parsed.suppressor_sku,
                 test_platform=parsed.test_platform,
+                cluster_index=parsed.cluster_index,
                 shot_order=parsed.shot_order,
             )
             report.ingested.append(self._repo.get_shot(shot_id))

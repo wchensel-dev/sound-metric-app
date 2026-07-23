@@ -9,11 +9,14 @@ Two entry points:
 * :func:`read_frame` — one auto-detected channel into a :class:`Frame`
   (CLI / back-compat).
 * :func:`read_capture` — *every* synchronous Pa channel into a list of
-  :class:`Frame`, so a two-mic (SE + MR) capture yields both streams. A single-mic
+  :class:`Frame`, so a two-mic (SE + ML) capture yields both streams. A single-mic
   capture simply yields one frame.
 
-Mapping raw channels to mic positions is user-defined for now (README): use
-:func:`tag_channels` to attach SE/MR labels once the user has chosen.
+Raw channels map to mic positions by the DAQ input convention — AI 1 is the
+muzzle-left transducer, AI 2 the shooter's-ear one — which :func:`autotag_map`
+applies. The mapping stays overridable so a capture that breaks the convention
+can still be tagged by hand; :func:`tag_channels` attaches the final ML/SE
+labels either way.
 """
 
 from __future__ import annotations
@@ -122,7 +125,7 @@ def read_capture(path: str) -> list[Frame]:
 
     Returns one :class:`Frame` per mic channel, in file order, each with a
     distinct :attr:`Frame.channel` name. A two-mic file yields two frames; a
-    single-mic test file yields one. The channel->SE/MR mapping is applied
+    single-mic test file yields one. The channel->SE/ML mapping is applied
     separately via :func:`tag_channels`.
     """
     with dw.DWFile(path) as f:
@@ -131,8 +134,58 @@ def read_capture(path: str) -> list[Frame]:
         return [_frame_from_channel(f, c.name, path, start) for c in selected]
 
 
+#: DAQ input -> mic position, the standing rig convention. AI 1 carries the
+#: muzzle-left transducer and AI 2 the shooter's-ear one, so a conforming capture
+#: needs no manual tagging. Names are matched case-insensitively with internal
+#: whitespace collapsed (see :func:`_normalize_channel`), because Dewesoft
+#: renders the same input as "AI 1", "ai1", or "AI  1" depending on setup.
+DAQ_CHANNEL_POSITIONS: dict[str, MicPosition] = {
+    "ai1": MicPosition.ML,  # muzzle left
+    "ai2": MicPosition.SE,  # shooter's ear
+}
+
+
+def _normalize_channel(name: str) -> str:
+    """Channel name reduced to its comparison key: lowercase, no whitespace."""
+    return "".join(name.split()).lower()
+
+
+def _channel_name(item: ChannelInfo | Frame) -> str:
+    """The raw channel name of either a :class:`ChannelInfo` or a :class:`Frame`.
+
+    The two carry it under different attributes (``name`` vs ``channel``), so
+    :func:`autotag_map` can accept whichever list its caller already has.
+    """
+    return item.name if isinstance(item, ChannelInfo) else item.channel
+
+
+def autotag_map(channels: list[ChannelInfo] | list[Frame]) -> dict[str, MicPosition]:
+    """Best-guess channel -> position mapping from the AI 1 / AI 2 convention.
+
+    Accepts either the :class:`ChannelInfo` list from :func:`list_channels` or
+    the :class:`Frame` list from :func:`read_capture`, and returns the mapping
+    :func:`tag_channels` consumes. Channels that do not match a known DAQ input
+    are simply left out, so a non-conforming capture yields a partial (or empty)
+    map rather than a wrong one — the caller then falls back to asking the user.
+
+    A position is only ever claimed once: if two channels normalize to the same
+    input, the first in file order wins and the duplicate is dropped, so the
+    result is always safe to hand to :func:`tag_channels`.
+    """
+    mapping: dict[str, MicPosition] = {}
+    claimed: set[MicPosition] = set()
+    for channel in channels:
+        name = _channel_name(channel)
+        position = DAQ_CHANNEL_POSITIONS.get(_normalize_channel(name))
+        if position is None or position in claimed:
+            continue
+        claimed.add(position)
+        mapping[name] = position
+    return mapping
+
+
 def tag_channels(frames: list[Frame], mapping: dict[str, MicPosition]) -> list[MicChannel]:
-    """Attach user-chosen SE/MR labels to captured frames.
+    """Attach SE/ML labels to captured frames.
 
     ``mapping`` maps a raw channel name (as it appears in :attr:`Frame.channel`)
     to a :class:`MicPosition`. Tag one channel (single-mic shot) or two. Each mic
@@ -145,7 +198,7 @@ def tag_channels(frames: list[Frame], mapping: dict[str, MicPosition]) -> list[M
         position is reused.
     """
     if not mapping:
-        raise ValueError("Tag at least one channel (SE and/or MR); the channel map is empty.")
+        raise ValueError("Tag at least one channel (SE and/or ML); the channel map is empty.")
     by_name = {fr.channel: fr for fr in frames}
     tagged: list[MicChannel] = []
     used: set[MicPosition] = set()

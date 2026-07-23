@@ -58,6 +58,21 @@ DEFAULT_DB_PATH: str = "sound_metrics.db"
 
 
 # --------------------------------------------------------------------------- #
+# Batch-average targets
+# --------------------------------------------------------------------------- #
+# How many included shots of each role a batch aims to average, per mic
+# position. These are **soft targets**, not hard caps: the store never refuses an
+# inclusion that overshoots them, and reports show progress against them so the
+# user can see when a batch is short or over. Regulars come from several
+# clusters (a 3-shot cluster contributes two, a 4-shot cluster three), which is
+# why inclusion is tracked per shot rather than per cluster — whole clusters
+# cannot cleanly land on exactly 5.
+
+TARGET_FRP_SHOTS: int = 3
+TARGET_REGULAR_SHOTS: int = 5
+
+
+# --------------------------------------------------------------------------- #
 # Persisted app settings
 # --------------------------------------------------------------------------- #
 #

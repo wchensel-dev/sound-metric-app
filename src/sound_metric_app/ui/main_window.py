@@ -1,16 +1,26 @@
-"""PySide6 desktop app for the ingest -> mark -> close -> report workflow.
+"""PySide6 desktop app for the ingest -> mark -> bring-forward -> report workflow.
 
 Four views over the same Phase B services the ``sma`` CLI drives, wired through
 :class:`~sound_metric_app.ui.controller.WorkflowController`:
 
 1. **Ingest / Unmarked** — scan the input folder, list Unmarked Data Sets.
-2. **Mark** — annotate a shot, tag SE/MR channels, compute + store metrics.
-3. **Batches** — Batch -> Group -> Shot tree with a Close-batch action.
-4. **Report** — per-group SE vs MR averages, positions never mixed.
+2. **Mark** — annotate a shot, confirm its ML/SE channel tags, compute + store
+   metrics. The shot lands in the data bank idle.
+3. **Data bank** — the Combination -> Batch -> Cluster -> Shot tree: every shot
+   the app has seen, included or idle, with the bring-forward actions that decide
+   which ones feed an average, plus session editing and Close batch.
+4. **Batch average** — the four position x role output slots per batch
+   (muzzle-left / shooter's-ear crossed with FRP / regular), positions and roles
+   never mixed.
 
-Ingest, mark, and close are explicit buttons (README user-actuated principle).
-The two file-reading operations (ingest, mark) run on a worker thread so a large
-capture never freezes the window; every service error surfaces as a dialog.
+The split between tabs 3 and 4 is the directive's two views: the data bank is the
+complete archive where nothing is deleted for being left out, and the batch
+average is the filter over ``included``.
+
+Ingest, mark, include, and close are explicit buttons (README user-actuated
+principle). The two file-reading operations (ingest, mark) run on a worker thread
+so a large capture never freezes the window; every service error surfaces as a
+dialog.
 
 Run with:  python -m sound_metric_app.ui.main_window   (needs the 'gui' extra)
 """
@@ -26,10 +36,13 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..dsp import SMOOTHING_FAST, SMOOTHING_INSTANT, SMOOTHING_SLOW
-from ..models import MicPosition, Shot
+from ..models import MicPosition, Shot, role_for_order
+from ..services import AVERAGE_SLOTS
 from .controller import WorkflowController
 
 _NONE_LABEL = "(none)"
+#: Shown where a mic position has no channel tagged / a value is missing.
+_EMPTY = "—"
 
 
 def _style_grid_tree(tree: QtWidgets.QTreeWidget) -> None:
@@ -99,6 +112,17 @@ class _View(QtWidgets.QWidget):
     def refresh(self) -> None:  # overridden by views that show live data
         """Reload this view's data from the controller."""
 
+    def _defer(self, fn) -> None:
+        """Run ``fn`` from the event loop once the current signal has unwound.
+
+        The escape hatch for a handler that rebuilds the very widget whose
+        signal invoked it: a refresh clears its tree, and freeing the row Qt is
+        still emitting for is a use-after-free that takes the app down. Passing
+        ``self`` as the context object drops the call if this view is destroyed
+        before it fires.
+        """
+        QtCore.QTimer.singleShot(0, self, fn)
+
     def _run_async(self, fn, on_success, *, busy=()) -> None:
         """Run ``fn`` off the UI thread; call ``on_success(result)`` when done.
 
@@ -138,7 +162,7 @@ class _View(QtWidgets.QWidget):
 
 
 class IngestView(_View):
-    _COLUMNS = ["ID", "File", "SKU", "Platform", "Shot #"]
+    _COLUMNS = ["ID", "File", "SKU", "Platform", "Cluster", "Shot #", "Role"]
 
     def __init__(self, controller: WorkflowController, main: "MainWindow"):
         super().__init__(controller, main)
@@ -185,12 +209,17 @@ class IngestView(_View):
         shots = self.controller.unmarked_shots()
         self.table.setRowCount(len(shots))
         for row, s in enumerate(shots):
+            # Role reads straight off the filename's shot order — a shot knows
+            # whether it is its cluster's FRP before anyone marks it.
+            role = s.role
             values = [
                 str(s.id),
                 Path(s.source_file).name,
-                s.suppressor_sku or "—",
-                s.test_platform or "—",
-                "—" if s.shot_order is None else str(s.shot_order),
+                s.suppressor_sku or _EMPTY,
+                s.test_platform or _EMPTY,
+                _EMPTY if s.cluster_index is None else str(s.cluster_index),
+                _EMPTY if s.shot_order is None else str(s.shot_order),
+                role.label if role else _EMPTY,
             ]
             for col, text in enumerate(values):
                 self.table.setItem(row, col, QtWidgets.QTableWidgetItem(text))
@@ -265,10 +294,12 @@ class MarkingView(_View):
         self.shot_combo.currentIndexChanged.connect(self._on_shot_changed)
         form.addRow("Unmarked shot:", self.shot_combo)
 
+        # Pre-filled from the AI 1 / AI 2 DAQ convention; still editable so a
+        # capture that breaks the convention can be tagged by hand.
+        self.ml_combo = QtWidgets.QComboBox()
         self.se_combo = QtWidgets.QComboBox()
-        self.mr_combo = QtWidgets.QComboBox()
-        form.addRow("SE channel:", self.se_combo)
-        form.addRow("MR channel:", self.mr_combo)
+        form.addRow("Muzzle Left channel:", self.ml_combo)
+        form.addRow("Shooter's Ear channel:", self.se_combo)
 
         self.ammo_combo = QtWidgets.QComboBox()
         # Editable so a one-off ammo can still be typed, but the configured
@@ -280,8 +311,15 @@ class MarkingView(_View):
         form.addRow("SKU override:", self.sku_edit)
         self.platform_edit = QtWidgets.QLineEdit()
         form.addRow("Platform override:", self.platform_edit)
+        self.cluster_edit = QtWidgets.QLineEdit()
+        form.addRow("Cluster override:", self.cluster_edit)
         self.shot_order_edit = QtWidgets.QLineEdit()
+        # Role is derived, never entered: echo it live so the user can see which
+        # shot of the string this is about to become.
+        self.shot_order_edit.textChanged.connect(self._update_role_preview)
         form.addRow("Shot order:", self.shot_order_edit)
+        self.role_label = QtWidgets.QLabel(_EMPTY)
+        form.addRow("Role (derived):", self.role_label)
         self.wind_edit = QtWidgets.QLineEdit()
         form.addRow("Wind speed (mph):", self.wind_edit)
         self.temp_edit = QtWidgets.QLineEdit()
@@ -366,6 +404,25 @@ class MarkingView(_View):
                 return i
         return None
 
+    def _update_role_preview(self, *_args) -> None:
+        """Echo the FRP / Regular role implied by the entered shot order.
+
+        Falls back to the shot's own order when the box is blank, since an empty
+        field means "keep what the filename gave it", not "no order".
+        """
+        text = self.shot_order_edit.text().strip()
+        if text:
+            try:
+                order = int(text)
+            except ValueError:
+                self.role_label.setText(_EMPTY)
+                return
+        else:
+            shot = self._current_shot()
+            order = shot.shot_order if shot else None
+        role = role_for_order(order)
+        self.role_label.setText(role.label if role else _EMPTY)
+
     def _on_shot_changed(self, *_args) -> None:
         self._channel_token += 1
         token = self._channel_token
@@ -374,6 +431,11 @@ class MarkingView(_View):
         # Prefill override placeholders from the shot's provisional filename keys.
         self.sku_edit.setPlaceholderText(shot.suppressor_sku or "" if shot else "")
         self.platform_edit.setPlaceholderText(shot.test_platform or "" if shot else "")
+        self.cluster_edit.setPlaceholderText(
+            _str_or_empty(shot.cluster_index) if shot else ""
+        )
+        self.shot_order_edit.setPlaceholderText(_str_or_empty(shot.shot_order) if shot else "")
+        self._update_role_preview()
 
         self._set_channel_choices([], loading=True)
         if shot is None:
@@ -381,17 +443,35 @@ class MarkingView(_View):
             return
 
         def load():
-            return self.controller.channels_for(shot.source_file)
+            # Fetch the names and the DAQ-convention tagging in one worker hop,
+            # so the form opens already tagged for a conforming capture.
+            channels = self.controller.channels_for(shot.source_file)
+            return [c.name for c in channels], self.controller.suggested_channel_map(
+                shot.source_file
+            )
 
-        def done(channels):
+        def done(result):
             if token != self._channel_token:
                 return  # a newer shot was selected; ignore this stale result
-            self._set_channel_choices([c.name for c in channels])
+            names, suggested = result
+            self._set_channel_choices(names, suggested=suggested)
 
         self._run_async(load, done)
 
-    def _set_channel_choices(self, names: list[str], *, loading: bool = False) -> None:
-        for combo in (self.se_combo, self.mr_combo):
+    def _set_channel_choices(
+        self,
+        names: list[str],
+        *,
+        loading: bool = False,
+        suggested: dict[str, MicPosition] | None = None,
+    ) -> None:
+        """Repopulate both channel combos, preselecting the auto-tagged mapping.
+
+        ``suggested`` comes from the AI 1 / AI 2 convention. A channel it does not
+        cover is left at ``(none)`` for the user to set, so a non-conforming
+        capture degrades to manual tagging instead of being tagged wrongly.
+        """
+        for combo in (self.ml_combo, self.se_combo):
             combo.blockSignals(True)
             combo.clear()
             if loading:
@@ -402,17 +482,48 @@ class MarkingView(_View):
                 combo.addItems(names)
                 combo.setEnabled(True)
             combo.blockSignals(False)
-        if not loading and names:
-            # Default guess: first channel -> SE, second (if any) -> MR.
-            self.se_combo.setCurrentIndex(1)
-            if len(names) >= 2:
-                self.mr_combo.setCurrentIndex(2)
+        if loading:
+            return
+        suggested = suggested or {}
+        for position, combo in ((MicPosition.ML, self.ml_combo), (MicPosition.SE, self.se_combo)):
+            name = next((n for n, p in suggested.items() if p is position), None)
+            _select_channel(combo, name)
 
     # ---- mark ----------------------------------------------------------- #
 
     def _selected_channel(self, combo: QtWidgets.QComboBox) -> str | None:
         text = combo.currentText()
         return None if text in (_NONE_LABEL, "loading…", "") else text
+
+    def _channel_map(self) -> dict[str, MicPosition] | None:
+        """The tagged channel map, or ``None`` after warning about a bad tagging.
+
+        Returning ``None`` (rather than an empty map) keeps "the user needs to fix
+        something" distinct from "nothing tagged" — the caller aborts either way,
+        but the warning has already been shown here.
+        """
+        ml = self._selected_channel(self.ml_combo)
+        se = self._selected_channel(self.se_combo)
+        if not ml and not se:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "No mic tagged",
+                "Tag at least one channel as Muzzle Left or Shooter's Ear.",
+            )
+            return None
+        if ml and se and ml == se:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Same channel",
+                "Muzzle Left and Shooter's Ear cannot be the same channel.",
+            )
+            return None
+        channel_map: dict[str, MicPosition] = {}
+        if ml:
+            channel_map[ml] = MicPosition.ML
+        if se:
+            channel_map[se] = MicPosition.SE
+        return channel_map
 
     def _mark(self) -> None:
         shot = self._current_shot()
@@ -425,28 +536,15 @@ class MarkingView(_View):
             QtWidgets.QMessageBox.warning(self, "Missing ammo", "Ammo is required to mark a shot.")
             return
 
-        channel_map: dict[str, MicPosition] = {}
-        se = self._selected_channel(self.se_combo)
-        mr = self._selected_channel(self.mr_combo)
-        if se:
-            channel_map[se] = MicPosition.SE
-        if mr:
-            channel_map[mr] = MicPosition.MR
-        if not channel_map:
-            QtWidgets.QMessageBox.warning(
-                self, "No mic tagged", "Tag at least one channel as SE or MR."
-            )
-            return
-        if se and mr and se == mr:
-            QtWidgets.QMessageBox.warning(
-                self, "Same channel", "SE and MR cannot be the same channel."
-            )
+        channel_map = self._channel_map()
+        if channel_map is None:
             return
 
         try:
             kwargs = dict(
                 suppressor_sku=self.sku_edit.text().strip() or None,
                 test_platform=self.platform_edit.text().strip() or None,
+                cluster_index=_opt_int(self.cluster_edit.text()),
                 shot_order=_opt_int(self.shot_order_edit.text()),
                 wind_speed=_opt_float(self.wind_edit.text()),
                 temp=_opt_float(self.temp_edit.text()),
@@ -466,12 +564,18 @@ class MarkingView(_View):
 
     def _on_marked(self, marked) -> None:
         shot = marked.shot
-        parts = [f"Marked shot #{shot.id} — batch #{marked.batch.id} (SKU {marked.batch.sku})."]
-        for position in (MicPosition.SE, MicPosition.MR):
+        role = shot.role.label if shot.role else _EMPTY
+        parts = [
+            f"Marked shot #{shot.id} — {marked.combination.label}, "
+            f"batch #{marked.batch.id}, {marked.cluster.label}, "
+            f"shot {shot.shot_order} ({role}).",
+            "It is idle in the data bank; bring it forward there to feed the average.",
+        ]
+        for position in (MicPosition.ML, MicPosition.SE):
             result = marked.metrics.get(position)
             if result is not None:
                 parts.append(
-                    f"{position.value}: peak {result.peak_db:.2f} dB, "
+                    f"{position.label}: peak {result.peak_db:.2f} dB, "
                     f"LIAeq {result.liaeq_100ms_db:.2f} dBA"
                 )
         self.status_label.setText("\n".join(parts))
@@ -479,6 +583,7 @@ class MarkingView(_View):
         self.ammo_combo.clearEditText()
         self.sku_edit.clear()
         self.platform_edit.clear()
+        self.cluster_edit.clear()
         self.shot_order_edit.clear()
         self.wind_edit.clear()
         self.temp_edit.clear()
@@ -487,7 +592,7 @@ class MarkingView(_View):
 
 
 # --------------------------------------------------------------------------- #
-# 3. Batch -> Group -> Shot tree view
+# 3. Data bank: Combination -> Batch -> Cluster -> Shot tree
 # --------------------------------------------------------------------------- #
 
 
@@ -495,10 +600,13 @@ class ShotEditDialog(QtWidgets.QDialog):
     """Correct a marked shot's fields, pre-filled from its current state.
 
     Purely a form: it validates and exposes the collected values via
-    :meth:`values`; the caller re-marks the shot (which re-clusters it into the
-    right batch/group and recomputes metrics). SKU/platform/ammo default to what
-    the shot was actually clustered into — its batch and group — not the
-    provisional filename keys, so an unchanged save is a true no-op.
+    :meth:`values`; the caller re-marks the shot (which re-places it in the right
+    combination/batch/cluster and recomputes metrics). SKU/platform/ammo default
+    to the combination the shot was actually placed in — not the provisional
+    filename keys — so an unchanged save is a true no-op.
+
+    Inclusion is deliberately absent: bringing a shot forward is its own action
+    in the tree, not something an edit can change by accident.
     """
 
     def __init__(
@@ -508,6 +616,7 @@ class ShotEditDialog(QtWidgets.QDialog):
         sku: str,
         platform: str,
         ammo: str,
+        cluster_index: int | None,
         channel_names: list[str],
         ammo_definitions: list[str] | None = None,
         parent=None,
@@ -521,15 +630,15 @@ class ShotEditDialog(QtWidgets.QDialog):
         layout.addWidget(QtWidgets.QLabel(Path(shot.source_file).name))
         form = QtWidgets.QFormLayout()
 
+        self.ml_combo = QtWidgets.QComboBox()
         self.se_combo = QtWidgets.QComboBox()
-        self.mr_combo = QtWidgets.QComboBox()
-        for combo in (self.se_combo, self.mr_combo):
+        for combo in (self.ml_combo, self.se_combo):
             combo.addItem(_NONE_LABEL)
             combo.addItems(channel_names)
+        _select_channel(self.ml_combo, shot.ml_channel)
         _select_channel(self.se_combo, shot.se_channel)
-        _select_channel(self.mr_combo, shot.mr_channel)
-        form.addRow("SE channel:", self.se_combo)
-        form.addRow("MR channel:", self.mr_combo)
+        form.addRow("Muzzle Left channel:", self.ml_combo)
+        form.addRow("Shooter's Ear channel:", self.se_combo)
 
         self.ammo_combo = QtWidgets.QComboBox()
         self.ammo_combo.setEditable(True)
@@ -541,8 +650,13 @@ class ShotEditDialog(QtWidgets.QDialog):
         form.addRow("SKU *:", self.sku_edit)
         self.platform_edit = QtWidgets.QLineEdit(platform or "")
         form.addRow("Platform *:", self.platform_edit)
+        self.cluster_edit = QtWidgets.QLineEdit(_str_or_empty(cluster_index))
+        form.addRow("Cluster *:", self.cluster_edit)
         self.shot_order_edit = QtWidgets.QLineEdit(_str_or_empty(shot.shot_order))
+        self.shot_order_edit.textChanged.connect(self._update_role_preview)
         form.addRow("Shot order:", self.shot_order_edit)
+        self.role_label = QtWidgets.QLabel(_EMPTY)
+        form.addRow("Role (derived):", self.role_label)
         self.wind_edit = QtWidgets.QLineEdit(_str_or_empty(shot.wind_speed))
         form.addRow("Wind speed (mph):", self.wind_edit)
         self.temp_edit = QtWidgets.QLineEdit(_str_or_empty(shot.temp))
@@ -553,6 +667,7 @@ class ShotEditDialog(QtWidgets.QDialog):
         # marking. Shown for reference; not user-editable.
         form.addRow("Captured:", QtWidgets.QLabel(_format_captured_at(shot.captured_at)))
         layout.addLayout(form)
+        self._update_role_preview()
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel
@@ -560,6 +675,11 @@ class ShotEditDialog(QtWidgets.QDialog):
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _update_role_preview(self, *_args) -> None:
+        """Echo the FRP / Regular role the entered order implies."""
+        role = role_for_order(_safe_int(self.shot_order_edit.text()))
+        self.role_label.setText(role.label if role else _EMPTY)
 
     def _selected_channel(self, combo: QtWidgets.QComboBox) -> str | None:
         text = combo.currentText()
@@ -577,24 +697,38 @@ class ShotEditDialog(QtWidgets.QDialog):
                 self, "Missing key", "SKU and Platform are required to re-mark a shot."
             )
             return
+        try:
+            cluster_index = _opt_int(self.cluster_edit.text())
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Invalid value", str(exc))
+            return
+        if cluster_index is None or cluster_index < 1:
+            QtWidgets.QMessageBox.warning(
+                self, "Missing cluster", "A cluster of 1 or greater is required."
+            )
+            return
 
-        channel_map: dict[str, MicPosition] = {}
+        ml = self._selected_channel(self.ml_combo)
         se = self._selected_channel(self.se_combo)
-        mr = self._selected_channel(self.mr_combo)
+        if not ml and not se:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "No mic tagged",
+                "Tag at least one channel as Muzzle Left or Shooter's Ear.",
+            )
+            return
+        if ml and se and ml == se:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Same channel",
+                "Muzzle Left and Shooter's Ear cannot be the same channel.",
+            )
+            return
+        channel_map: dict[str, MicPosition] = {}
+        if ml:
+            channel_map[ml] = MicPosition.ML
         if se:
             channel_map[se] = MicPosition.SE
-        if mr:
-            channel_map[mr] = MicPosition.MR
-        if not channel_map:
-            QtWidgets.QMessageBox.warning(
-                self, "No mic tagged", "Tag at least one channel as SE or MR."
-            )
-            return
-        if se and mr and se == mr:
-            QtWidgets.QMessageBox.warning(
-                self, "Same channel", "SE and MR cannot be the same channel."
-            )
-            return
 
         try:
             self._values = dict(
@@ -602,6 +736,7 @@ class ShotEditDialog(QtWidgets.QDialog):
                 channel_map=channel_map,
                 suppressor_sku=sku,
                 test_platform=platform,
+                cluster_index=cluster_index,
                 shot_order=_opt_int(self.shot_order_edit.text()),
                 wind_speed=_opt_float(self.wind_edit.text()),
                 temp=_opt_float(self.temp_edit.text()),
@@ -621,23 +756,121 @@ class ShotEditDialog(QtWidgets.QDialog):
         return self._values
 
 
-class BatchTreeView(_View):
+class BatchEditDialog(QtWidgets.QDialog):
+    """Edit a batch's session context: label, date, typical weather, notes.
+
+    These are the *session*-level values. Each shot keeps its own specific
+    weather, because conditions drift within a session; what is recorded here is
+    what was typical for the day.
+
+    A full-form write — a cleared box blanks the stored field.
+    """
+
+    def __init__(self, batch, *, combination_label: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Edit batch #{batch.id}")
+        self._values: dict | None = None
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(QtWidgets.QLabel(combination_label))
+        form = QtWidgets.QFormLayout()
+
+        self.label_edit = QtWidgets.QLineEdit(batch.label or "")
+        self.label_edit.setPlaceholderText("e.g. Morning string")
+        form.addRow("Session label:", self.label_edit)
+        self.date_edit = QtWidgets.QLineEdit(batch.session_date or "")
+        self.date_edit.setPlaceholderText("YYYY-MM-DD")
+        form.addRow("Session date:", self.date_edit)
+        self.wind_edit = QtWidgets.QLineEdit(_str_or_empty(batch.wind_speed))
+        form.addRow("Typical wind (mph):", self.wind_edit)
+        self.temp_edit = QtWidgets.QLineEdit(_str_or_empty(batch.temp))
+        form.addRow("Typical temp (°F):", self.temp_edit)
+        self.rh_edit = QtWidgets.QLineEdit(_str_or_empty(batch.relative_humidity))
+        form.addRow("Typical RH (%):", self.rh_edit)
+        self.notes_edit = QtWidgets.QPlainTextEdit(batch.notes or "")
+        self.notes_edit.setFixedHeight(80)
+        form.addRow("Notes:", self.notes_edit)
+        layout.addLayout(form)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self) -> None:
+        date = self.date_edit.text().strip()
+        if date:
+            try:
+                datetime.strptime(date, "%Y-%m-%d")
+            except ValueError:
+                QtWidgets.QMessageBox.warning(
+                    self, "Invalid date", f"{date!r} is not a YYYY-MM-DD date."
+                )
+                return
+        try:
+            self._values = dict(
+                label=self.label_edit.text().strip() or None,
+                session_date=date or None,
+                wind_speed=_opt_float(self.wind_edit.text()),
+                temp=_opt_float(self.temp_edit.text()),
+                relative_humidity=_opt_float(self.rh_edit.text()),
+                notes=self.notes_edit.toPlainText().strip() or None,
+            )
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Invalid value", str(exc))
+            return
+        self.accept()
+
+    def values(self) -> dict:
+        """The validated ``controller.update_batch`` kwargs. Valid only after Save."""
+        assert self._values is not None, "values() called before an accepted Save"
+        return self._values
+
+
+class DataBankView(_View):
+    """The data bank: every combination, batch, cluster, and shot the app holds.
+
+    Nothing is filtered here — a shot left out of an average is still part of the
+    archive, shown idle. The bring-forward actions on this tree are what move a
+    shot into its batch's average; the Batch average tab then shows the result.
+
+    Inclusion is rendered as a checkbox on each shot row so the state is visible
+    at a glance across a 50-cluster batch, and a cluster row offers the
+    bring-whole-cluster-forward shortcut. Because the flag lives on the shot,
+    tickng a cluster and then un-ticking two of its shots is exactly how a batch
+    lands on 3 FRPs and 5 regulars.
+    """
+
+    _COLUMNS = ["Combination / Batch / Cluster / Shot", "Detail", "Role", "Timestamp"]
+
     def __init__(self, controller: WorkflowController, main: "MainWindow"):
         super().__init__(controller, main)
+        #: Set while refresh() repopulates the tree, so the itemChanged handler
+        #: does not treat programmatic check-state writes as user clicks.
+        self._loading = False
         layout = QtWidgets.QVBoxLayout(self)
 
         self.tree = QtWidgets.QTreeWidget()
-        self.tree.setHeaderLabels(["Batch / Group / Shot", "Detail", "Timestamp"])
+        self.tree.setHeaderLabels(self._COLUMNS)
         self.tree.itemSelectionChanged.connect(self._update_actions_enabled)
-        # Only leaf shot rows edit on double-click; on a batch/group row that
+        # Only leaf shot rows edit on double-click; on a container row that
         # gesture is Qt's expand/collapse and must not also pop an edit modal.
         self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self.tree.itemChanged.connect(self._on_item_changed)
         _style_grid_tree(self.tree)
         layout.addWidget(self.tree)
 
         button_row = QtWidgets.QHBoxLayout()
         refresh_btn = QtWidgets.QPushButton("Refresh")
         refresh_btn.clicked.connect(self.refresh)
+        self.include_btn = QtWidgets.QPushButton("Bring forward")
+        self.include_btn.setEnabled(False)
+        self.include_btn.clicked.connect(lambda: self._set_inclusion(True))
+        self.exclude_btn = QtWidgets.QPushButton("Set idle…")
+        self.exclude_btn.setEnabled(False)
+        self.exclude_btn.clicked.connect(lambda: self._set_inclusion(False))
         self.edit_btn = QtWidgets.QPushButton("Edit…")
         self.edit_btn.setEnabled(False)
         self.edit_btn.clicked.connect(self._edit_selected)
@@ -646,50 +879,94 @@ class BatchTreeView(_View):
         self.close_btn.clicked.connect(self._close_batch)
         button_row.addWidget(refresh_btn)
         button_row.addStretch(1)
+        button_row.addWidget(self.include_btn)
+        button_row.addWidget(self.exclude_btn)
         button_row.addWidget(self.edit_btn)
         button_row.addWidget(self.close_btn)
         layout.addLayout(button_row)
 
+    # ---- render ---------------------------------------------------------- #
+
     def refresh(self) -> None:
-        # Prune empty groups/batches before rendering; batch_tree() itself is a
-        # pure read, so the sweep is an explicit step on the refresh path.
+        # Prune empty clusters/batches/combinations before rendering; data_bank()
+        # itself is a pure read, so the sweep is an explicit step on this path.
         self.controller.sweep_empty()
-        self.tree.clear()
-        for node in self.controller.batch_tree():
-            batch = node.batch
-            state = "closed" if batch.closed else "open"
-            b_item = QtWidgets.QTreeWidgetItem(
-                [f"Batch #{batch.id}  SKU {batch.sku}", f"[{state}]", ""]
-            )
-            b_item.setData(0, QtCore.Qt.UserRole, ("batch", batch))
-            self.tree.addTopLevelItem(b_item)
-            for g_node in node.groups:
-                group = g_node.group
-                n = len(g_node.shots)
-                g_item = QtWidgets.QTreeWidgetItem(
-                    [f"Group #{group.id}  {group.test_platform} / {group.ammo}", f"{n} shot(s)", ""]
-                )
-                g_item.setData(0, QtCore.Qt.UserRole, ("group", group))
-                b_item.addChild(g_item)
-                for shot in g_node.shots:
-                    tags = f"SE:{shot.se_channel or '—'}  MR:{shot.mr_channel or '—'}"
-                    s_item = QtWidgets.QTreeWidgetItem(
-                        [
-                            f"Shot #{shot.id}  {Path(shot.source_file).name}",
-                            tags,
-                            _format_captured_at(shot.captured_at),
-                        ]
-                    )
-                    # Carry the shot's group and batch so an edit can pre-fill the
-                    # SKU/platform/ammo it was actually clustered into (which may
-                    # differ from its provisional filename keys after an override).
-                    s_item.setData(0, QtCore.Qt.UserRole, ("shot", shot, group, batch))
-                    g_item.addChild(s_item)
+        self._loading = True
+        try:
+            self.tree.clear()
+            for node in self.controller.data_bank():
+                self.tree.addTopLevelItem(self._combination_item(node))
+        finally:
+            self._loading = False
         self.tree.expandAll()
-        self.tree.resizeColumnToContents(0)
-        self.tree.resizeColumnToContents(1)
-        self.tree.resizeColumnToContents(2)
+        for col in range(len(self._COLUMNS)):
+            self.tree.resizeColumnToContents(col)
         self._update_actions_enabled()
+
+    def _combination_item(self, node) -> QtWidgets.QTreeWidgetItem:
+        combo = node.combination
+        item = QtWidgets.QTreeWidgetItem(
+            [combo.label, f"{len(node.batches)} batch(es)", "", ""]
+        )
+        item.setData(0, QtCore.Qt.UserRole, ("combination", combo))
+        for b_node in node.batches:
+            item.addChild(self._batch_item(b_node, combo))
+        return item
+
+    def _batch_item(self, node, combo) -> QtWidgets.QTreeWidgetItem:
+        batch = node.batch
+        state = "closed" if batch.closed else "open"
+        detail = f"[{state}]  {node.n_shots} shot(s)  {node.status.summary()}"
+        item = QtWidgets.QTreeWidgetItem(
+            [f"Batch #{batch.id}  {_batch_title(batch)}", detail, "", _weather_summary(batch)]
+        )
+        item.setData(0, QtCore.Qt.UserRole, ("batch", batch, combo))
+        for c_node in node.clusters:
+            item.addChild(self._cluster_item(c_node, batch, combo))
+        return item
+
+    def _cluster_item(self, node, batch, combo) -> QtWidgets.QTreeWidgetItem:
+        cluster = node.cluster
+        item = QtWidgets.QTreeWidgetItem(
+            [
+                f"{cluster.label}  (#{cluster.id})",
+                f"{len(node.shots)} shot(s), {node.n_included} included",
+                "",
+                "",
+            ]
+        )
+        item.setData(0, QtCore.Qt.UserRole, ("cluster", cluster, batch, combo))
+        for shot in node.shots:
+            item.addChild(self._shot_item(shot, cluster, batch, combo))
+        return item
+
+    def _shot_item(self, shot, cluster, batch, combo) -> QtWidgets.QTreeWidgetItem:
+        tags = f"ML:{shot.ml_channel or _EMPTY}  SE:{shot.se_channel or _EMPTY}"
+        if shot.exclusion_reason:
+            tags = f"{tags}  — {shot.exclusion_reason}"
+        role = shot.role
+        item = QtWidgets.QTreeWidgetItem(
+            [
+                f"Shot #{shot.id}  order {_str_or_empty(shot.shot_order) or _EMPTY}"
+                f"  {Path(shot.source_file).name}",
+                tags,
+                role.label if role else _EMPTY,
+                _format_captured_at(shot.captured_at),
+            ]
+        )
+        # The checkbox *is* the inclusion flag: the data bank's whole job is
+        # showing which shots are carried forward and letting that be toggled.
+        item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+        item.setCheckState(
+            0, QtCore.Qt.Checked if shot.included else QtCore.Qt.Unchecked
+        )
+        # Carry the shot's cluster/batch/combination so an edit can pre-fill the
+        # context it was actually placed in (which may differ from its
+        # provisional filename keys after an override).
+        item.setData(0, QtCore.Qt.UserRole, ("shot", shot, cluster, batch, combo))
+        return item
+
+    # ---- selection ------------------------------------------------------- #
 
     def _selected_entry(self) -> tuple | None:
         items = self.tree.selectedItems()
@@ -697,67 +974,133 @@ class BatchTreeView(_View):
             return None
         return items[0].data(0, QtCore.Qt.UserRole)
 
-    def _selected_batch(self) -> tuple[int, bool] | None:
+    def _selected_batch(self) -> tuple | None:
+        """The selected row's batch, whatever level it sits at (``None`` above batch)."""
         entry = self._selected_entry()
-        if entry and entry[0] == "batch":
-            batch = entry[1]
-            return batch.id, batch.closed
+        if not entry:
+            return None
+        kind = entry[0]
+        if kind == "batch":
+            return entry[1]
+        if kind in ("cluster", "shot"):
+            return entry[-2]
         return None
 
     def _update_actions_enabled(self) -> None:
         entry = self._selected_entry()
         kind = entry[0] if entry else None
-        # A batch (rename its SKU) or a shot (re-mark it) can be edited; a group
-        # is renamed by editing its shots, so it has no direct edit action.
+        # Inclusion applies to a shot or a whole cluster; combinations and
+        # batches are containers, not roll-up units.
+        self.include_btn.setEnabled(kind in ("shot", "cluster"))
+        self.exclude_btn.setEnabled(kind in ("shot", "cluster"))
+        # A batch (session metadata) or a shot (re-mark) can be edited.
         self.edit_btn.setEnabled(kind in ("batch", "shot"))
-        selected = self._selected_batch()
-        self.close_btn.setEnabled(selected is not None and not selected[1])
+        batch = self._selected_batch() if kind == "batch" else None
+        self.close_btn.setEnabled(batch is not None and not batch.closed)
 
-    # ---- edit ----------------------------------------------------------- #
+    # ---- inclusion ------------------------------------------------------- #
+
+    def _on_item_changed(self, item: QtWidgets.QTreeWidgetItem, column: int) -> None:
+        """Persist a shot checkbox the user just toggled.
+
+        Guarded by ``_loading`` so the check states written during a refresh do
+        not each fire a write back to the database.
+        """
+        if self._loading or column != 0:
+            return
+        entry = item.data(0, QtCore.Qt.UserRole)
+        if not entry or entry[0] != "shot":
+            return
+        shot = entry[1]
+        included = item.checkState(0) == QtCore.Qt.Checked
+        if included == shot.included:
+            return
+        # Qt is still mid-emission on `item` here, and the write ends in a
+        # refresh that clears the tree `item` lives in — freeing it under the
+        # emission still on the stack crashes Qt. So hand the work to the event
+        # loop, carrying the shot id and state by value rather than the row,
+        # and let the emission unwind before anything is rebuilt.
+        self._defer(lambda: self._apply_checkbox(shot.id, included))
+
+    def _apply_checkbox(self, shot_id: int, included: bool) -> None:
+        """Write back a toggled checkbox, once the tree is safe to rebuild."""
+        try:
+            self.controller.include_shot(shot_id, included)
+        except Exception as exc:  # noqa: BLE001 — surface to the user as a dialog
+            QtWidgets.QMessageBox.critical(self, "Error", str(exc))
+        # Refresh either way: on failure it snaps the checkbox back to the
+        # stored flag rather than leaving the row lying about what was saved.
+        self.main.notify_changed()
+
+    def _set_inclusion(self, included: bool) -> None:
+        """Bring the selected shot or cluster forward, or set it idle with a reason."""
+        entry = self._selected_entry()
+        if not entry or entry[0] not in ("shot", "cluster"):
+            return
+        kind, target = entry[0], entry[1]
+
+        reason = None
+        if not included:
+            # Only an exclusion carries a reason; inclusion clears it.
+            text, ok = QtWidgets.QInputDialog.getText(
+                self,
+                "Set idle",
+                "Reason (optional, e.g. high winds):",
+                QtWidgets.QLineEdit.Normal,
+                getattr(target, "exclusion_reason", "") or "",
+            )
+            if not ok:
+                return
+            reason = text.strip() or None
+
+        try:
+            if kind == "shot":
+                self.controller.include_shot(target.id, included, reason=reason)
+            else:
+                self.controller.include_cluster(target.id, included, reason=reason)
+        except Exception as exc:  # noqa: BLE001 — surface to the user as a dialog
+            QtWidgets.QMessageBox.critical(self, "Error", str(exc))
+            return
+        self.main.notify_changed()
+
+    # ---- edit ------------------------------------------------------------ #
 
     def _on_item_double_clicked(self, item: QtWidgets.QTreeWidgetItem, _column: int) -> None:
         entry = item.data(0, QtCore.Qt.UserRole)
-        if entry and entry[0] == "shot":
-            self._edit_selected()
+        if entry and entry[0] in ("shot", "batch"):
+            # Deferred for the same reason as the checkbox: saving the edit
+            # refreshes the tree, which would free this row mid-emission.
+            self._defer(self._edit_selected)
 
     def _edit_selected(self) -> None:
         entry = self._selected_entry()
         if not entry:
             return
         if entry[0] == "batch":
-            self._edit_batch(entry[1])
+            self._edit_batch(entry[1], entry[2])
         elif entry[0] == "shot":
-            self._edit_shot(entry[1], entry[2], entry[3])
+            self._edit_shot(entry[1], entry[2], entry[3], entry[4])
 
-    def _edit_batch(self, batch) -> None:
-        new_sku, ok = QtWidgets.QInputDialog.getText(
-            self,
-            f"Edit batch #{batch.id}",
-            "SKU:",
-            QtWidgets.QLineEdit.Normal,
-            batch.sku,
-        )
-        if not ok:
-            return
-        new_sku = new_sku.strip()
-        if not new_sku or new_sku == batch.sku:
+    def _edit_batch(self, batch, combo) -> None:
+        dialog = BatchEditDialog(batch, combination_label=combo.label, parent=self)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
             return
         try:
-            self.controller.rename_batch(batch.id, new_sku)
+            self.controller.update_batch(batch.id, **dialog.values())
         except Exception as exc:  # noqa: BLE001 — surface to the user as a dialog
             QtWidgets.QMessageBox.critical(self, "Error", str(exc))
             return
         self.main.notify_changed()
 
-    def _edit_shot(self, shot, group, batch) -> None:
-        # Re-marking a shot whose batch is closed re-clusters it into a *new* open
-        # batch (a closed batch is never the SKU's open batch), so warn first.
+    def _edit_shot(self, shot, cluster, batch, combo) -> None:
+        # Re-marking a shot whose batch is closed re-places it in a *new* open
+        # batch (a closed batch is never the combination's open batch), so warn.
         if batch.closed:
             confirm = QtWidgets.QMessageBox.question(
                 self,
                 "Batch closed",
-                f"Batch #{batch.id} (SKU {batch.sku}) is closed. Saving changes will "
-                f"move shot #{shot.id} into a new open batch. Continue?",
+                f"Batch #{batch.id} is closed. Saving changes will move shot "
+                f"#{shot.id} into a new open session. Continue?",
             )
             if confirm != QtWidgets.QMessageBox.Yes:
                 return
@@ -765,16 +1108,17 @@ class BatchTreeView(_View):
         # Load the raw channels off the UI thread, then open the pre-filled dialog.
         self._run_async(
             lambda: self.controller.channels_for(shot.source_file),
-            lambda channels: self._open_shot_dialog(shot, group, batch, channels),
+            lambda channels: self._open_shot_dialog(shot, cluster, combo, channels),
             busy=(self.edit_btn,),
         )
 
-    def _open_shot_dialog(self, shot, group, batch, channels) -> None:
+    def _open_shot_dialog(self, shot, cluster, combo, channels) -> None:
         dialog = ShotEditDialog(
             shot,
-            sku=batch.sku,
-            platform=group.test_platform,
-            ammo=group.ammo,
+            sku=combo.sku,
+            platform=combo.platform,
+            ammo=combo.ammo,
+            cluster_index=cluster.cluster_index,
             channel_names=[c.name for c in channels],
             ammo_definitions=self.controller.ammo_definitions(),
             parent=self,
@@ -790,19 +1134,19 @@ class BatchTreeView(_View):
         )
 
     def _close_batch(self) -> None:
-        selected = self._selected_batch()
-        if selected is None:
+        batch = self._selected_batch()
+        if batch is None:
             return
-        batch_id = selected[0]
         confirm = QtWidgets.QMessageBox.question(
             self,
             "Close batch",
-            f"Close batch #{batch_id}? Further testing for this SKU starts a new batch.",
+            f"Close batch #{batch.id}? Further testing for this combination "
+            "starts a new session.",
         )
         if confirm != QtWidgets.QMessageBox.Yes:
             return
         try:
-            self.controller.close_batch(batch_id)
+            self.controller.close_batch(batch.id)
         except Exception as exc:  # noqa: BLE001 — surface to the user as a dialog
             QtWidgets.QMessageBox.critical(self, "Error", str(exc))
             return
@@ -1184,9 +1528,21 @@ class MetricGraph(QtWidgets.QWidget):
         self._readout_clear_btn.setVisible(False)
 
 
-class ReportView(_View):
+class BatchAverageView(_View):
+    """The batch-average view: a batch's four position x role output slots.
+
+    Only shots whose ``included`` flag is set feed these numbers — this is the
+    filtered counterpart to the Data bank tab. Every slot is listed even when
+    empty, so a batch missing its shooter's-ear regulars reads as a gap rather
+    than silently absent, and each populated slot expands into the individual
+    shots averaged behind it.
+
+    Positions and roles are never mixed: the 3-FRP / 5-regular target applies per
+    position, so each channel averages the same selected shots on its own axis.
+    """
+
     _COLUMNS = [
-        "Group / Shot", "Mic", "n",
+        "Slot / Shot", "n",
         "Peak Pa", "Peak dB", "Peak dBA",
         "Impulse Pa·ms", "Impulse dB·ms",
         "Peak Leq10ms dBA", "LIAeq,100ms dBA",
@@ -1196,8 +1552,8 @@ class ReportView(_View):
         "impulse_pa_ms", "peak_impulse_db",
         "leq10ms_db", "liaeq_100ms_db",
     )
-    #: Metric columns begin here; columns 0-2 are label / mic / n.
-    _FIRST_METRIC_COL = 3
+    #: Metric columns begin here; columns 0-1 are label / n.
+    _FIRST_METRIC_COL = 2
 
     def __init__(self, controller: WorkflowController, main: "MainWindow"):
         super().__init__(controller, main)
@@ -1216,12 +1572,17 @@ class ReportView(_View):
         picker_row.addWidget(self.batch_combo, 1)
         layout.addLayout(picker_row)
 
-        # Left half: the report tree. Right half: the single-metric graph. A
+        # Progress against the soft 3-FRP / 5-regular targets, so a short or
+        # over-filled batch is visible without reading the per-slot counts.
+        self.status_label = QtWidgets.QLabel("")
+        layout.addWidget(self.status_label)
+
+        # Left half: the slot tree. Right half: the single-metric graph. A
         # splitter lets the user trade width between the two.
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
 
-        # A tree, not a flat table: each group's SE/MR average is a top-level
-        # row that expands to reveal the individual shots it averages over.
+        # A tree, not a flat table: each slot's average is a top-level row that
+        # expands to reveal the individual included shots it averages over.
         self.tree = QtWidgets.QTreeWidget()
         self.tree.setColumnCount(len(self._COLUMNS))
         self.tree.setHeaderLabels(self._COLUMNS)
@@ -1244,11 +1605,16 @@ class ReportView(_View):
         # doesn't fire _load_report; we call it once, explicitly, below.
         self.batch_combo.blockSignals(True)
         self.batch_combo.clear()
+        combinations = {c.id: c for c in self.controller.combinations()}
         for batch in self.controller.batches():
+            combo = combinations.get(batch.combination_id)
             state = "closed" if batch.closed else "open"
-            self.batch_combo.addItem(f"#{batch.id}  SKU {batch.sku}  [{state}]", batch.id)
+            label = f"#{batch.id}  {combo.label if combo else '?'}  {_batch_title(batch)}  [{state}]"
+            self.batch_combo.addItem(label, batch.id)
         index = self.batch_combo.findData(current)
-        self.batch_combo.setCurrentIndex(index if index >= 0 else (0 if self.batch_combo.count() else -1))
+        self.batch_combo.setCurrentIndex(
+            index if index >= 0 else (0 if self.batch_combo.count() else -1)
+        )
         self.batch_combo.blockSignals(False)
 
         self._load_report()
@@ -1260,44 +1626,45 @@ class ReportView(_View):
         self.graph.show_message("Click a metric cell on a shot row to graph it.")
         batch_id = self.batch_combo.currentData()
         if batch_id is None:
+            self.status_label.setText("")
             return
-        report = self.controller.batch_report(batch_id)
-        for group_avg in report.groups:
-            g = group_avg.group
-            group_label = f"{g.test_platform} / {g.ammo}"
-            if not group_avg.averages:
-                # "no metrics" occupies the first metric column; pad the rest so
-                # the row spans all of _COLUMNS and nothing shifts left.
+
+        report = self.controller.batch_averages(batch_id)
+        self.status_label.setText(
+            f"{report.n_included} of {report.n_shots} shot(s) brought forward   —   "
+            f"{report.status.summary()}"
+        )
+        for position, role in AVERAGE_SLOTS:
+            slot_label = f"{position.label} · {role.label}"
+            avg = report.averages.get((position, role))
+            if avg is None:
+                # Keep the empty slot visible: a missing quadrant is information,
+                # not something to hide. Pad so the row spans all _COLUMNS.
                 self._add_top(
-                    [group_label, "—", "0", "no metrics", *[""] * (len(self._METRIC_KEYS) - 1)]
+                    [slot_label, "0", "none included", *[""] * (len(self._METRIC_KEYS) - 1)]
                 )
                 continue
-            # One top-level row per mic (SE, MR kept separate), labelled with the
-            # group only on the first so the pair reads as a unit; each carries
-            # its shots as expandable children.
-            for position in (MicPosition.SE, MicPosition.MR):
-                avg = group_avg.averages.get(position)
-                if avg is None:
-                    continue
-                avg_item = self._add_top(
-                    [
-                        group_label,
-                        position.value,
-                        str(avg["n"]),
-                        *(_format_metric(avg[k]) for k in self._METRIC_KEYS),
-                    ]
-                )
-                for shot in group_avg.shots.get(position, ()):
-                    avg_item.addChild(self._shot_item(shot, position))
-                group_label = ""  # only label the first mic row of each group
+            avg_item = self._add_top(
+                [
+                    slot_label,
+                    str(avg["n"]),
+                    *(_format_metric(avg[k]) for k in self._METRIC_KEYS),
+                ]
+            )
+            for shot in report.shots.get((position, role), ()):
+                avg_item.addChild(self._shot_item(shot, position))
+        self.tree.expandAll()
         for col in range(len(self._COLUMNS)):
             self.tree.resizeColumnToContents(col)
 
     def _shot_item(self, shot: dict, position: MicPosition) -> QtWidgets.QTreeWidgetItem:
+        cluster = shot.get("cluster_index")
         order = shot.get("shot_order")
-        label = f"Shot {order}" if order is not None else Path(shot["source_file"]).name
+        label = f"Cluster {cluster} · shot {order}" if cluster else f"Shot {order}"
+        if order is None:
+            label = Path(shot["source_file"]).name
         item = QtWidgets.QTreeWidgetItem(
-            [label, "", "", *(_format_metric(shot[k]) for k in self._METRIC_KEYS)]
+            [label, "", *(_format_metric(shot[k]) for k in self._METRIC_KEYS)]
         )
         # Carry the identity a graph request needs: the shot to re-read and which
         # mic's channel to pull. Only shot rows get this tag, so a click on an
@@ -1327,7 +1694,7 @@ class ReportView(_View):
         _kind, shot_id, position = entry
         metric_key = self._METRIC_KEYS[column - self._FIRST_METRIC_COL]
         metric_label = self._COLUMNS[column]
-        subtitle = f"Shot #{shot_id} · {position.value} · {metric_label}"
+        subtitle = f"Shot #{shot_id} · {position.label} · {metric_label}"
         self._current_request = (shot_id, position, metric_key, subtitle)
         self._render_current()
 
@@ -1436,18 +1803,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.ingest_view = IngestView(self.controller, self)
         self.marking_view = MarkingView(self.controller, self)
-        self.batch_view = BatchTreeView(self.controller, self)
-        self.report_view = ReportView(self.controller, self)
+        self.bank_view = DataBankView(self.controller, self)
+        self.report_view = BatchAverageView(self.controller, self)
 
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self.ingest_view, "Ingest")
         self.tabs.addTab(self.marking_view, "Mark")
-        self.tabs.addTab(self.batch_view, "Batches")
-        self.tabs.addTab(self.report_view, "Report")
+        self.tabs.addTab(self.bank_view, "Data bank")
+        self.tabs.addTab(self.report_view, "Batch average")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.setCentralWidget(self.tabs)
 
-        self._views = [self.ingest_view, self.marking_view, self.batch_view, self.report_view]
+        self._views = [self.ingest_view, self.marking_view, self.bank_view, self.report_view]
         self._build_menus()
         self.notify_changed()
 
@@ -1468,7 +1835,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.widget(index).refresh()
 
     def notify_changed(self) -> None:
-        """Reload every view after a mutating action (ingest / mark / close)."""
+        """Reload every view after a mutating action (ingest / mark / include / close)."""
         for view in self._views:
             view.refresh()
 
@@ -1486,6 +1853,36 @@ class MainWindow(QtWidgets.QMainWindow):
 def _str_or_empty(value) -> str:
     """Render an optional field for a pre-filled edit box (``None`` -> "")."""
     return "" if value is None else str(value)
+
+
+def _safe_int(text: str) -> int | None:
+    """Parse an int from a live-edited box, treating anything unparseable as ``None``.
+
+    Unlike :func:`_opt_int` this never raises: it backs the as-you-type role
+    preview, where a half-typed value is normal and must not pop a dialog.
+    """
+    try:
+        return int(text.strip())
+    except ValueError:
+        return None
+
+
+def _batch_title(batch) -> str:
+    """A batch's session label + date, or a placeholder when neither is set yet."""
+    parts = [p for p in (batch.label, batch.session_date) if p]
+    return " ".join(parts) if parts else "(unnamed session)"
+
+
+def _weather_summary(batch) -> str:
+    """A batch's typical session weather as one line (``""`` when none is recorded)."""
+    bits = []
+    if batch.wind_speed is not None:
+        bits.append(f"wind {batch.wind_speed:g} mph")
+    if batch.temp is not None:
+        bits.append(f"{batch.temp:g} °F")
+    if batch.relative_humidity is not None:
+        bits.append(f"RH {batch.relative_humidity:g}%")
+    return ", ".join(bits)
 
 
 def _unit_of(y_label: str) -> str:

@@ -44,7 +44,7 @@ All decibel values are sound pressure levels (SPL) referenced to `p_ref`.
    relative to `θ = 1 Pa` (≈ 94 dB) so the first threshold crossing is the shot,
    not noise — the 10 ms quiet lead guarantees this. A frame with no sample above
    `θ` is flagged and analysed from its start (the numbers are then suspect).
-6. Metrics are computed independently per mic channel (SE, MR); channels are
+6. Metrics are computed independently per mic channel (SE, ML); channels are
    never combined at the DSP layer.
 7. A-weighting follows IEC 61672 / ANSI S1.4, normalized to 0 dB at 1 kHz, and
    matches TBAC's `adsgn.m` (§8).
@@ -212,22 +212,36 @@ at these sample rates. (TBAC's `bilinear(..., 1/Fs)` passes the sampling period
 | 1 kHz | 0.0 dB | ±0.1 dB |
 | 10 kHz | −2.5 dB | ±0.7 dB |
 
-## 10. Group aggregation — `repository.group_averages`
+## 10. Batch aggregation — `repository.batch_averages`
 
-Per group (fixed Suppressor SKU + Test Platform + Ammo) and per mic position
-(SE, MR kept separate), each metric is averaged in the **linear domain** — the
-per-shot linear magnitudes (Pa, or Pa·ms for the impulse) are meaned, then the
-mean is converted once to its dB level:
+Per batch (one test session under a fixed Suppressor SKU + Test Platform + Ammo
+combination), the **included** shots are partitioned by mic position crossed with
+derived role, giving four output slots:
+
 ```
-metric_avg_linear = (1/n) · Σ_{shots in group, matching position} metric_shot_linear
+muzzle_left  (ML) · FRP        muzzle_left  (ML) · regular
+shooters_ear (SE) · FRP        shooters_ear (SE) · regular
+```
+
+A shot's role is derived from its order within its cluster — order 0 is the FRP
+(first round pop), everything after is regular — so a cluster has exactly one FRP
+by construction. Only shots whose `included` flag is set contribute; the rest stay
+in the data bank untouched.
+
+Within each slot, each metric is averaged in the **linear domain** — the per-shot
+linear magnitudes (Pa, or Pa·ms for the impulse) are meaned, then the mean is
+converted once to its dB level:
+```
+metric_avg_linear = (1/n) · Σ_{included shots in slot} metric_shot_linear
 metric_avg_db     = L( metric_avg_linear )
 ```
 where the linear magnitude is one of `{peak_pa, peak_a_pa, impulse_pa_ms,
-leq10ms_pa, liaeq_pa}` and `n` is the shot count for that position. SE and MR are
-aggregated in separate `GROUP BY mic_position` partitions and never combined. Each
-metric's average skips shots whose value is missing (an unpopulated row after the
-v2 migration, or a NaN metric stored as NULL); in normal fully-populated operation
-that count equals `n`, so the two coincide.
+leq10ms_pa, liaeq_pa}` and `n` is the included-shot count for that slot. The four
+slots are computed as separate `GROUP BY mic_position, role` partitions and never
+combined: positions are not mixed, and neither are roles. Each metric's average
+skips shots whose value is missing (an unpopulated row after a migration, or a NaN
+metric stored as NULL); in normal fully-populated operation that count equals `n`,
+so the two coincide.
 
 This matches TBAC, which accumulates linear Pa (and Pa·ms) across shots, divides
 by the shot count, and converts to dB at the end. It is **not** a mean of the dB

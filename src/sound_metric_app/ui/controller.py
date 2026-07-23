@@ -3,7 +3,8 @@
 The GUI (``main_window``) is a thin front-end over these methods, exactly as the
 ``sma`` CLI is a thin front-end over the same Phase B services. Keeping the logic
 here — free of any ``QWidget``/``QApplication`` — means the whole ingest -> mark
--> close -> report flow is testable without a live GUI (see ``tests/test_controller``).
+-> include -> report flow is testable without a live GUI (see
+``tests/test_controller``).
 
 Connection model
 ----------------
@@ -27,14 +28,16 @@ from typing import Iterator
 
 from .. import config
 from ..dsp import SMOOTHING_INSTANT, MetricTrace, build_metric_trace
-from ..ingestion import ChannelInfo, list_channels, read_capture
-from ..models import Batch, Group, MicPosition, Shot
+from ..ingestion import ChannelInfo, autotag_map, list_channels, read_capture
+from ..models import Batch, Cluster, Combination, MicPosition, Shot
 from ..services import (
     AggregationService,
-    BatchReport,
+    BatchAverages,
     ClosedBatchError,
     ClusteringService,
-    GroupAverages,
+    CombinationReport,
+    InclusionService,
+    InclusionStatus,
     IngestionService,
     IngestReport,
     MarkedShot,
@@ -55,23 +58,40 @@ USER_ERRORS = (
 
 
 @dataclass
-class GroupNode:
-    """A group with its shots already materialized."""
+class ClusterNode:
+    """A cluster with its shots already materialized, in firing order."""
 
-    group: Group
+    cluster: Cluster
     shots: list[Shot]
+
+    @property
+    def n_included(self) -> int:
+        return sum(1 for s in self.shots if s.included)
 
 
 @dataclass
 class BatchNode:
-    """A batch with its groups (each carrying its shots)."""
+    """A batch (test session) with its clusters and its inclusion progress."""
 
     batch: Batch
-    groups: list[GroupNode]
+    clusters: list[ClusterNode]
+    status: InclusionStatus
+
+    @property
+    def n_shots(self) -> int:
+        return sum(len(c.shots) for c in self.clusters)
+
+
+@dataclass
+class CombinationNode:
+    """A SKU / Platform / Ammo combination with the batches fired under it."""
+
+    combination: Combination
+    batches: list[BatchNode]
 
 
 class WorkflowController:
-    """Headless driver for the GUI: ingest, mark, close, and report."""
+    """Headless driver for the GUI: ingest, mark, include, close, and report."""
 
     def __init__(
         self,
@@ -132,9 +152,7 @@ class WorkflowController:
         """
         folder = folder or config.get_input_folder()
         if not folder:
-            raise ValueError(
-                "No input folder configured. Choose one before ingesting."
-            )
+            raise ValueError("No input folder configured. Choose one before ingesting.")
         with self._repo() as repo:
             return IngestionService(repo, reader=self._channel_reader).scan(
                 folder, validate=validate
@@ -151,24 +169,37 @@ class WorkflowController:
     # ---- mark ----------------------------------------------------------- #
 
     def channels_for(self, source_file: str) -> list[ChannelInfo]:
-        """Raw channels in a capture, to offer as SE/MR choices in the mark form."""
+        """Raw channels in a capture, to offer as ML/SE choices in the mark form."""
         return self._channel_reader(source_file)
+
+    def suggested_channel_map(self, source_file: str) -> dict[str, MicPosition]:
+        """The DAQ-convention channel tagging to pre-fill the mark form with.
+
+        Applies the AI 1 = muzzle left / AI 2 = shooter's ear mapping. A capture
+        that does not follow the convention yields a partial or empty map, which
+        the form shows as un-tagged dropdowns for the user to set by hand.
+        """
+        return autotag_map(self._channel_reader(source_file))
 
     def mark(
         self,
         shot_id: int,
         *,
         ammo: str,
-        channel_map: dict[str, MicPosition],
+        channel_map: dict[str, MicPosition] | None = None,
         suppressor_sku: str | None = None,
         test_platform: str | None = None,
+        cluster_index: int | None = None,
         shot_order: int | None = None,
         wind_speed: float | None = None,
         temp: float | None = None,
         relative_humidity: float | None = None,
         replace_optional: bool = False,
     ) -> MarkedShot:
-        """Annotate a shot, tag SE/MR, and compute + store its metrics.
+        """Annotate a shot, tag ML/SE, and compute + store its metrics.
+
+        ``channel_map=None`` auto-tags from the DAQ convention. The shot lands in
+        the data bank idle — marking never sets ``included``.
 
         ``replace_optional=True`` writes the optional per-shot fields (shot order
         and environment) exactly, so a cleared field blanks the stored value —
@@ -182,6 +213,7 @@ class WorkflowController:
                 channel_map=channel_map,
                 suppressor_sku=suppressor_sku,
                 test_platform=test_platform,
+                cluster_index=cluster_index,
                 shot_order=shot_order,
                 wind_speed=wind_speed,
                 temp=temp,
@@ -189,7 +221,11 @@ class WorkflowController:
                 replace_optional=replace_optional,
             )
 
-    # ---- batches / groups / shots (read) -------------------------------- #
+    # ---- tree reads ----------------------------------------------------- #
+
+    def combinations(self) -> list[Combination]:
+        with self._repo() as repo:
+            return repo.all_combinations()
 
     def batches(self) -> list[Batch]:
         with self._repo() as repo:
@@ -199,74 +235,113 @@ class WorkflowController:
         with self._repo() as repo:
             return repo.get_batch(batch_id)
 
-    def rename_batch(self, batch_id: int, sku: str) -> None:
-        """Correct a batch's SKU in place, keeping all its groups and shots.
+    def get_cluster(self, cluster_id: int) -> Cluster | None:
+        with self._repo() as repo:
+            return repo.get_cluster(cluster_id)
 
-        Guards the "at most one open batch per SKU" invariant: renaming an *open*
-        batch onto a SKU that already has a different open batch is rejected, so
-        future marking never has two open batches to choose between. Renaming a
-        closed batch, or renaming to its own current SKU, is always allowed.
+    def get_combination(self, combination_id: int) -> Combination | None:
+        with self._repo() as repo:
+            return repo.get_combination(combination_id)
 
-        Raises ``ValueError`` on an empty SKU or such a collision, ``LookupError``
-        if the batch id is unknown.
+    def update_batch(
+        self,
+        batch_id: int,
+        *,
+        label: str | None = None,
+        session_date: str | None = None,
+        wind_speed: float | None = None,
+        temp: float | None = None,
+        relative_humidity: float | None = None,
+        notes: str | None = None,
+    ) -> None:
+        """Write a batch's session metadata. Always a full-form write: unset fields clear.
+
+        Raises ``LookupError`` if the batch id is unknown.
         """
-        sku = sku.strip()
-        if not sku:
-            raise ValueError("SKU cannot be empty.")
         with self._repo() as repo:
-            batch = repo.get_batch(batch_id)
-            if batch is None:
-                raise LookupError(f"No batch with id {batch_id}")
-            if not batch.closed:
-                other = repo.open_batch_for_sku(sku)
-                if other is not None and other.id != batch_id:
-                    raise ValueError(
-                        f"SKU {sku!r} already has an open batch (#{other.id}). "
-                        "Close it first, or pick a different SKU."
-                    )
-            repo.rename_batch_sku(batch_id, sku)
+            repo.update_batch(
+                batch_id,
+                label=(label.strip() or None) if label else None,
+                session_date=(session_date.strip() or None) if session_date else None,
+                wind_speed=wind_speed,
+                temp=temp,
+                relative_humidity=relative_humidity,
+                notes=(notes.strip() or None) if notes else None,
+            )
 
-    def groups_for_batch(self, batch_id: int) -> list[Group]:
+    def shots_by_cluster(self, cluster_id: int) -> list[Shot]:
         with self._repo() as repo:
-            return repo.groups_for_batch(batch_id)
+            return repo.shots_by_cluster(cluster_id)
 
-    def shots_by_group(self, group_id: int) -> list[Shot]:
+    def shots_for_batch(self, batch_id: int, *, included_only: bool = False) -> list[Shot]:
+        """Every shot in a batch, in firing order — the flat data-bank read."""
         with self._repo() as repo:
-            return repo.shots_by_group(group_id)
+            return repo.shots_for_batch(batch_id, included_only=included_only)
 
     def sweep_empty(self) -> None:
-        """Drop any shot-less groups and the batches their removal leaves empty.
+        """Drop shot-less clusters, then the batches and combinations that leaves empty.
 
         An explicit maintenance pass the GUI runs on refresh, kept out of the
-        read accessors so loading the tree never mutates the DB. Empty groups are
-        swept first, then any batch left group-less by that sweep — cleaning up
-        containers left behind by an edit or by data predating per-re-mark
-        cleanup (see :meth:`WorkflowRepository.delete_empty_groups` and
-        :meth:`WorkflowRepository.delete_empty_batches`).
+        read accessors so loading the tree never mutates the DB. The sweep walks
+        the tree bottom-up — clusters, then batches, then combinations — so a
+        container emptied by the previous step is caught in the same pass.
         """
         with self._repo() as repo:
-            repo.delete_empty_groups()
+            repo.delete_empty_clusters()
             repo.delete_empty_batches()
+            repo.delete_empty_combinations()
 
-    def batch_tree(self) -> list[BatchNode]:
-        """The whole batch -> group -> shot tree, over a single connection.
+    def data_bank(self) -> list[CombinationNode]:
+        """The whole Combination -> Batch -> Cluster -> Shot tree, over one connection.
 
-        The GUI's batch tree renders all three levels at once; loading them here
-        opens one repo instead of a connection per batch/group, and shot counts
-        come from ``len(node.shots)`` rather than a separate COUNT query. This is
-        a pure read; call :meth:`sweep_empty` first to prune empty containers.
+        This is the **data bank view**: every cluster and every shot, included or
+        idle. Nothing is filtered out — a shot left out of an average is still
+        part of the complete archive. Loading all four levels here opens one repo
+        instead of a connection per node. This is a pure read; call
+        :meth:`sweep_empty` first to prune empty containers.
         """
         with self._repo() as repo:
+            inclusion = InclusionService(repo)
             return [
-                BatchNode(
-                    batch=batch,
-                    groups=[
-                        GroupNode(group=group, shots=repo.shots_by_group(group.id))
-                        for group in repo.groups_for_batch(batch.id)
+                CombinationNode(
+                    combination=combination,
+                    batches=[
+                        BatchNode(
+                            batch=batch,
+                            clusters=[
+                                ClusterNode(
+                                    cluster=cluster, shots=repo.shots_by_cluster(cluster.id)
+                                )
+                                for cluster in repo.clusters_for_batch(batch.id)
+                            ],
+                            status=inclusion.status(batch.id),
+                        )
+                        for batch in repo.batches_for_combination(combination.id)
                     ],
                 )
-                for batch in repo.all_batches()
+                for combination in repo.all_combinations()
             ]
+
+    # ---- inclusion ------------------------------------------------------ #
+
+    def include_shot(
+        self, shot_id: int, included: bool = True, *, reason: str | None = None
+    ) -> None:
+        """Bring one shot forward into its batch average, or return it to idle."""
+        with self._repo() as repo:
+            InclusionService(repo).include_shot(shot_id, included, reason=reason)
+
+    def include_cluster(
+        self, cluster_id: int, included: bool = True, *, reason: str | None = None
+    ) -> int:
+        """Bring a whole cluster forward, or idle it. Returns how many shots changed."""
+        with self._repo() as repo:
+            return InclusionService(repo).include_cluster(cluster_id, included, reason=reason)
+
+    def inclusion_status(self, batch_id: int) -> InclusionStatus:
+        """A batch's included counts against the soft 3-FRP / 5-regular targets."""
+        with self._repo() as repo:
+            return InclusionService(repo).status(batch_id)
 
     # ---- close ---------------------------------------------------------- #
 
@@ -276,13 +351,14 @@ class WorkflowController:
 
     # ---- report --------------------------------------------------------- #
 
-    def batch_report(self, batch_id: int) -> BatchReport:
+    def batch_averages(self, batch_id: int) -> BatchAverages:
+        """The four position x role output slots for one batch."""
         with self._repo() as repo:
-            return AggregationService(repo).batch_report(batch_id)
+            return AggregationService(repo).batch_averages(batch_id)
 
-    def group_averages(self, group_id: int) -> GroupAverages:
+    def combination_report(self, combination_id: int) -> CombinationReport:
         with self._repo() as repo:
-            return AggregationService(repo).group_averages(group_id)
+            return AggregationService(repo).combination_report(combination_id)
 
     # ---- report graph --------------------------------------------------- #
 
@@ -309,14 +385,12 @@ class WorkflowController:
         if shot is None:
             raise LookupError(f"No shot with id {shot_id}")
 
-        channel = shot.se_channel if position is MicPosition.SE else shot.mr_channel
+        channel = shot.se_channel if position is MicPosition.SE else shot.ml_channel
         if not channel:
-            raise ValueError(f"Shot #{shot_id} has no {position.value} channel to graph.")
+            raise ValueError(f"Shot #{shot_id} has no {position.label} channel to graph.")
 
         frames = self._capture_reader(shot.source_file)
         frame = next((f for f in frames if f.channel == channel), None)
         if frame is None:
-            raise ValueError(
-                f"Channel {channel!r} not found in {Path(shot.source_file).name}."
-            )
+            raise ValueError(f"Channel {channel!r} not found in {Path(shot.source_file).name}.")
         return build_metric_trace(frame, metric_key, smoothing)

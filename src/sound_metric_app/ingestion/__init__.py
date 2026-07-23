@@ -1,7 +1,9 @@
 """Ingestion layer: read DewesoftX files into normalized Frame objects."""
 
 from .dewesoft_reader import (
+    DAQ_CHANNEL_POSITIONS,
     ChannelInfo,
+    autotag_map,
     list_channels,
     read_capture,
     read_frame,
@@ -10,6 +12,8 @@ from .dewesoft_reader import (
 
 __all__ = [
     "ChannelInfo",
+    "DAQ_CHANNEL_POSITIONS",
+    "autotag_map",
     "list_channels",
     "read_capture",
     "read_frame",
