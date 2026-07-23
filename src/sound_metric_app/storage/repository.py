@@ -603,6 +603,23 @@ class WorkflowRepository(_SqliteStore):
         )
         return [_row_to_shot(r) for r in cur.fetchall()]
 
+    def count_shots_in_batch(self, batch_id: int) -> int:
+        """Number of shots in a batch across all its clusters, without materializing them.
+
+        The data-bank total behind "5 of 27 brought forward" — the same population
+        ``shots_for_batch`` returns, counted in SQL for callers that only need the
+        size.
+        """
+        cur = self._conn.execute(
+            """
+            SELECT COUNT(*) FROM shots s
+            JOIN clusters c ON c.id = s.cluster_id
+            WHERE c.batch_id = ?
+            """,
+            (batch_id,),
+        )
+        return int(cur.fetchone()[0])
+
     # ---- inclusion ------------------------------------------------------ #
 
     def set_shot_included(

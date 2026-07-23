@@ -189,7 +189,7 @@ def _cmd_list(args: argparse.Namespace, repo: WorkflowRepository) -> int:
         for b in batches:
             combo = repo.get_combination(b.combination_id)
             state = "closed" if b.closed else "open"
-            n = len(repo.shots_for_batch(b.id))
+            n = repo.count_shots_in_batch(b.id)
             print(
                 f"  #{b.id}  {combo.label if combo else '?'}  {b.title}  "
                 f"[{state}]  {n} shot(s)  {inclusion.status(b.id).summary()}"

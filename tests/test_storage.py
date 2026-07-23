@@ -579,6 +579,23 @@ def test_shots_for_batch_included_only_filters_the_data_bank(repo, batch):
     assert [s.id for s in repo.shots_for_batch(batch_id, included_only=True)] == [ids[0]]
 
 
+def test_count_shots_in_batch_spans_clusters(repo, batch):
+    _combination_id, batch_id, cluster_id = batch
+    second_cluster = repo.upsert_cluster(batch_id, 2)
+    for order in (1, 2, 3):
+        _placed_shot(repo, cluster_id, order=order)
+    excluded = _placed_shot(repo, second_cluster, order=1, name="SUP-1_AR15_02_0001.dxd")
+    repo.set_shot_included(excluded, False)
+
+    # The count is the data-bank total, matching shots_for_batch's population:
+    # every cluster, inclusion flag irrelevant.
+    assert repo.count_shots_in_batch(batch_id) == len(repo.shots_for_batch(batch_id)) == 4
+
+
+def test_count_shots_in_batch_unknown_id_is_zero(repo):
+    assert repo.count_shots_in_batch(9999) == 0
+
+
 def test_inclusion_counts_by_role(repo, batch):
     _combination_id, batch_id, cluster_id = batch
     ids = [_placed_shot(repo, cluster_id, order=o) for o in (0, 1, 2)]

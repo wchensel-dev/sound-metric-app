@@ -96,7 +96,7 @@ class AggregationService:
         return BatchAverages(
             batch=batch,
             combination=self._repo.get_combination(batch.combination_id),
-            n_shots=len(self._repo.shots_for_batch(batch.id)),
+            n_shots=self._repo.count_shots_in_batch(batch.id),
             averages=self._repo.batch_averages(batch.id),
             shots=self._repo.shot_metrics_for_batch(batch.id),
             status=self._inclusion.status(batch.id),
