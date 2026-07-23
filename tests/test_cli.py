@@ -310,6 +310,58 @@ def test_batch_sets_session_metadata(marked_batch, capsys):
     assert "clear, light crosswind" in out
 
 
+def test_batch_edits_one_field_and_keeps_the_rest(marked_batch, capsys):
+    """An absent flag means "unchanged" on the CLI, unlike the full-form GUI write."""
+    db = marked_batch
+    assert workflow_cli.main(
+        [
+            "batch", "1", "--label", "Morning string", "--date", "2026-07-20",
+            "--wind-speed", "5", "--temp", "88", "--rh", "35",
+            "--notes", "calm", "--db", db,
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    assert workflow_cli.main(["batch", "1", "--notes", "gusty by noon", "--db", db]) == 0
+    out = capsys.readouterr().out
+    assert "gusty by noon" in out
+    assert "Morning string 2026-07-20" in out
+    assert "wind 5 mph" in out and "88 °F" in out and "RH 35%" in out
+
+    with WorkflowRepository(db) as repo:
+        batch = repo.get_batch(1)
+    assert batch.label == "Morning string"
+    assert batch.session_date == "2026-07-20"
+    assert (batch.wind_speed, batch.temp, batch.relative_humidity) == (5.0, 88.0, 35.0)
+    assert batch.notes == "gusty by noon"
+
+
+def test_batch_clear_blanks_named_fields_only(marked_batch, capsys):
+    db = marked_batch
+    assert workflow_cli.main(
+        ["batch", "1", "--label", "Morning string", "--wind-speed", "5", "--db", db]
+    ) == 0
+    capsys.readouterr()
+
+    assert workflow_cli.main(
+        ["batch", "1", "--clear", "wind-speed", "--notes", "windy", "--db", db]
+    ) == 0
+    assert "(none)" in capsys.readouterr().out
+
+    with WorkflowRepository(db) as repo:
+        batch = repo.get_batch(1)
+    assert batch.wind_speed is None
+    assert batch.label == "Morning string"
+    assert batch.notes == "windy"
+
+
+def test_batch_clear_conflicting_with_a_value_errors(marked_batch, capsys):
+    db = marked_batch
+    rc = workflow_cli.main(["batch", "1", "--clear", "notes", "--notes", "x", "--db", db])
+    assert rc == 2
+    assert "contradict" in capsys.readouterr().err
+
+
 def test_batch_unknown_id_errors(env, capsys):
     db, _ = env
     rc = workflow_cli.main(["batch", "42", "--label", "nope", "--db", db])

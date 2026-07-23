@@ -13,7 +13,7 @@ Subcommands
 ``bank``         Data-bank view: every cluster and shot in a batch, idle or not.
 ``include``      Bring a shot or cluster forward into the batch average.
 ``exclude``      Return a shot or cluster to idle, with an optional reason.
-``batch``        Set a batch's session metadata (date, typical weather, notes).
+``batch``        Update a batch's session metadata (date, typical weather, notes).
 ``close-batch``  Close a batch so further testing starts a new session.
 ``report``       Batch-average view: the four position x role output slots.
 ``config``       Show or set persisted settings (e.g. the input folder).
@@ -276,19 +276,44 @@ def _set_inclusion(
     return 0
 
 
+#: ``sma batch`` field name -> (argparse dest, :class:`~.models.Batch` attribute).
+#: Drives both the read-modify-write merge and ``--clear``.
+_BATCH_FIELDS = {
+    "label": ("label", "label"),
+    "date": ("date", "session_date"),
+    "wind-speed": ("wind_speed", "wind_speed"),
+    "temp": ("temp", "temp"),
+    "rh": ("rh", "relative_humidity"),
+    "notes": ("notes", "notes"),
+}
+
+
 def _cmd_batch(args: argparse.Namespace, repo: WorkflowRepository) -> int:
-    """Set a batch's session metadata. Unset fields are cleared (full-form write)."""
-    if repo.get_batch(args.batch_id) is None:
+    """Update a batch's session metadata; a flag left off keeps its stored value."""
+    batch = repo.get_batch(args.batch_id)
+    if batch is None:
         raise LookupError(f"No batch with id {args.batch_id}")
-    repo.update_batch(
-        args.batch_id,
-        label=args.label,
-        session_date=args.date,
-        wind_speed=args.wind_speed,
-        temp=args.temp,
-        relative_humidity=args.rh,
-        notes=args.notes,
-    )
+
+    # `repo.update_batch` is a full-form write — an unset field is blanked —
+    # because the GUI dialog always supplies the complete intended state. Here an
+    # absent flag means "leave it alone", so fill the gaps from the stored row and
+    # blank only what `--clear` names.
+    cleared = set(args.clear or ())
+    values: dict[str, object] = {}
+    for field, (dest, attr) in _BATCH_FIELDS.items():
+        given = getattr(args, dest)
+        if field in cleared:
+            if given is not None:
+                print(
+                    f"--{field} and --clear {field} contradict each other.",
+                    file=sys.stderr,
+                )
+                return 2
+            values[attr] = None
+        else:
+            values[attr] = given if given is not None else getattr(batch, attr)
+
+    repo.update_batch(args.batch_id, **values)
     batch = repo.get_batch(args.batch_id)
     print(f"Updated batch #{batch.id}  {_batch_title(batch)}")
     print(f"  typical weather : {_weather(batch)}")
@@ -500,7 +525,14 @@ def build_parser() -> argparse.ArgumentParser:
         p.set_defaults(func=handler)
 
     # batch
-    p_batch = sub.add_parser("batch", help="set a batch's session metadata")
+    p_batch = sub.add_parser(
+        "batch",
+        help="update a batch's session metadata",
+        description=(
+            "Update a batch's session metadata. Only the fields you pass change; "
+            "everything else keeps its stored value. Use --clear to blank a field."
+        ),
+    )
     p_batch.add_argument("batch_id", type=int)
     p_batch.add_argument("--label", help="name for the session")
     p_batch.add_argument("--date", help="session date (ISO-8601, e.g. 2026-07-22)")
@@ -510,6 +542,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_batch.add_argument("--temp", type=float, help="typical temperature (deg F)")
     p_batch.add_argument("--rh", type=float, help="typical relative humidity (percent)")
     p_batch.add_argument("--notes", help="free-form session notes")
+    p_batch.add_argument(
+        "--clear",
+        action="append",
+        choices=sorted(_BATCH_FIELDS),
+        metavar="FIELD",
+        help=(
+            "blank a stored field; repeatable. One of: "
+            + ", ".join(sorted(_BATCH_FIELDS))
+        ),
+    )
     add_db(p_batch)
     p_batch.set_defaults(func=_cmd_batch)
 
