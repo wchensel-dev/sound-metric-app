@@ -123,6 +123,24 @@ def test_combination_label_is_the_three_test_conditions():
     assert combo.label == "SUP-1234 / AR15 / 5.56 M855"
 
 
+def test_batch_title_falls_back_to_a_placeholder():
+    # `title`, not `label`: a batch's `label` is the user's name for the session.
+    assert Batch(combination_id=1, label="Morning", session_date="2026-07-22").title == (
+        "Morning 2026-07-22"
+    )
+    assert Batch(combination_id=1, label="Morning").title == "Morning"
+    assert Batch(combination_id=1, session_date="2026-07-22").title == "2026-07-22"
+    assert Batch(combination_id=1).title == "(unnamed session)"
+
+
+def test_batch_weather_summary_omits_unrecorded_fields():
+    batch = Batch(combination_id=1, wind_speed=3.5, temp=71, relative_humidity=40)
+    assert batch.weather_summary == "wind 3.5 mph, 71 °F, RH 40%"
+    assert Batch(combination_id=1, temp=71).weather_summary == "71 °F"
+    # Empty, not a placeholder — each surface supplies its own.
+    assert Batch(combination_id=1).weather_summary == ""
+
+
 def test_hierarchy_defaults():
     # A batch is a session under a combination; every session field is optional
     # because the batch is created the moment its first shot is marked.

@@ -338,6 +338,32 @@ class Batch:
     created_at: str | None = None
     closed_at: str | None = None
 
+    @property
+    def title(self) -> str:
+        """The session's name + date, or a placeholder when neither is set yet.
+
+        Named ``title`` rather than ``label`` — unlike the other hierarchy types,
+        a batch already carries a user-supplied ``label`` field.
+        """
+        parts = [p for p in (self.label, self.session_date) if p]
+        return " ".join(parts) if parts else "(unnamed session)"
+
+    @property
+    def weather_summary(self) -> str:
+        """The typical session weather as one line, ``""`` when none is recorded.
+
+        Callers that need a placeholder for "nothing recorded" supply their own;
+        it differs by surface (a tree column wants blank, a printed field does not).
+        """
+        bits = []
+        if self.wind_speed is not None:
+            bits.append(f"wind {self.wind_speed:g} mph")
+        if self.temp is not None:
+            bits.append(f"{self.temp:g} °F")
+        if self.relative_humidity is not None:
+            bits.append(f"RH {self.relative_humidity:g}%")
+        return ", ".join(bits)
+
 
 @dataclass
 class Cluster:

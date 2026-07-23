@@ -128,7 +128,7 @@ def _cmd_mark(args: argparse.Namespace, repo: WorkflowRepository) -> int:
     role = shot.role.label if shot.role else "—"
     print(f"Marked shot #{shot.id}  ({Path(shot.source_file).name})")
     print(f"  combination : #{marked.combination.id}  {marked.combination.label}")
-    print(f"  batch       : #{marked.batch.id}  {_batch_title(marked.batch)}")
+    print(f"  batch       : #{marked.batch.id}  {marked.batch.title}")
     print(f"  cluster     : #{marked.cluster.id}  {marked.cluster.label}")
     print(f"  shot        : order {shot.shot_order}  ({role})")
     if shot.captured_at:
@@ -191,7 +191,7 @@ def _cmd_list(args: argparse.Namespace, repo: WorkflowRepository) -> int:
             state = "closed" if b.closed else "open"
             n = len(repo.shots_for_batch(b.id))
             print(
-                f"  #{b.id}  {combo.label if combo else '?'}  {_batch_title(b)}  "
+                f"  #{b.id}  {combo.label if combo else '?'}  {b.title}  "
                 f"[{state}]  {n} shot(s)  {inclusion.status(b.id).summary()}"
             )
         return 0
@@ -223,7 +223,7 @@ def _cmd_bank(args: argparse.Namespace, repo: WorkflowRepository) -> int:
     state = "closed" if batch.closed else "open"
     print(
         f"Data bank — batch #{batch.id}  {combo.label if combo else '?'}  "
-        f"{_batch_title(batch)}  [{state}]"
+        f"{batch.title}  [{state}]"
     )
     clusters = repo.clusters_for_batch(batch.id)
     if not clusters:
@@ -315,8 +315,8 @@ def _cmd_batch(args: argparse.Namespace, repo: WorkflowRepository) -> int:
 
     repo.update_batch(args.batch_id, **values)
     batch = repo.get_batch(args.batch_id)
-    print(f"Updated batch #{batch.id}  {_batch_title(batch)}")
-    print(f"  typical weather : {_weather(batch)}")
+    print(f"Updated batch #{batch.id}  {batch.title}")
+    print(f"  typical weather : {batch.weather_summary or '(none)'}")
     print(f"  notes           : {batch.notes or '(none)'}")
     return 0
 
@@ -360,7 +360,7 @@ def _print_batch_averages(batch_avg, *, indent: str = "") -> None:
     combo = batch_avg.combination
     state = "closed" if b.closed else "open"
     print(
-        f"{indent}Batch #{b.id}  {combo.label if combo else '?'}  {_batch_title(b)}  [{state}]"
+        f"{indent}Batch #{b.id}  {combo.label if combo else '?'}  {b.title}  [{state}]"
     )
     print(
         f"{indent}  {batch_avg.n_included} of {batch_avg.n_shots} shot(s) included   "
@@ -403,24 +403,6 @@ def _cmd_config(args: argparse.Namespace, repo: WorkflowRepository) -> int:
 # --------------------------------------------------------------------------- #
 # Formatting helpers
 # --------------------------------------------------------------------------- #
-
-
-def _batch_title(batch) -> str:
-    """A batch's session label + date, or a placeholder when neither is set yet."""
-    parts = [p for p in (batch.label, batch.session_date) if p]
-    return " ".join(parts) if parts else "(unnamed session)"
-
-
-def _weather(batch) -> str:
-    """The batch's typical weather as a one-liner, or ``(none)``."""
-    bits = []
-    if batch.wind_speed is not None:
-        bits.append(f"wind {batch.wind_speed:g} mph")
-    if batch.temp is not None:
-        bits.append(f"{batch.temp:g} °F")
-    if batch.relative_humidity is not None:
-        bits.append(f"RH {batch.relative_humidity:g}%")
-    return ", ".join(bits) if bits else "(none)"
 
 
 def _batch_of_shot(repo: WorkflowRepository, shot) -> int | None:

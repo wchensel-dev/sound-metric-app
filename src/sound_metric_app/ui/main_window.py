@@ -922,7 +922,7 @@ class DataBankView(_View):
         state = "closed" if batch.closed else "open"
         detail = f"[{state}]  {node.n_shots} shot(s)  {node.status.summary()}"
         item = QtWidgets.QTreeWidgetItem(
-            [f"Batch #{batch.id}  {_batch_title(batch)}", detail, "", _weather_summary(batch)]
+            [f"Batch #{batch.id}  {batch.title}", detail, "", batch.weather_summary]
         )
         item.setData(0, QtCore.Qt.UserRole, ("batch", batch, combo))
         for c_node in node.clusters:
@@ -1613,7 +1613,7 @@ class BatchAverageView(_View):
         for batch in self.controller.batches():
             combo = combinations.get(batch.combination_id)
             state = "closed" if batch.closed else "open"
-            label = f"#{batch.id}  {combo.label if combo else '?'}  {_batch_title(batch)}  [{state}]"
+            label = f"#{batch.id}  {combo.label if combo else '?'}  {batch.title}  [{state}]"
             self.batch_combo.addItem(label, batch.id)
         index = self.batch_combo.findData(current)
         self.batch_combo.setCurrentIndex(
@@ -1869,24 +1869,6 @@ def _safe_int(text: str) -> int | None:
         return int(text.strip())
     except ValueError:
         return None
-
-
-def _batch_title(batch) -> str:
-    """A batch's session label + date, or a placeholder when neither is set yet."""
-    parts = [p for p in (batch.label, batch.session_date) if p]
-    return " ".join(parts) if parts else "(unnamed session)"
-
-
-def _weather_summary(batch) -> str:
-    """A batch's typical session weather as one line (``""`` when none is recorded)."""
-    bits = []
-    if batch.wind_speed is not None:
-        bits.append(f"wind {batch.wind_speed:g} mph")
-    if batch.temp is not None:
-        bits.append(f"{batch.temp:g} °F")
-    if batch.relative_humidity is not None:
-        bits.append(f"RH {batch.relative_humidity:g}%")
-    return ", ".join(bits)
 
 
 def _unit_of(y_label: str) -> str:
