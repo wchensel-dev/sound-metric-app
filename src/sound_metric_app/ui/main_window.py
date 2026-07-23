@@ -509,10 +509,11 @@ class MarkingView(_View):
             return
 
         try:
+            cluster_index = _opt_int(self.cluster_edit.text())
             kwargs = dict(
                 suppressor_sku=self.sku_edit.text().strip() or None,
                 test_platform=self.platform_edit.text().strip() or None,
-                cluster_index=_opt_int(self.cluster_edit.text()),
+                cluster_index=cluster_index,
                 shot_order=_opt_int(self.shot_order_edit.text()),
                 wind_speed=_opt_float(self.wind_edit.text()),
                 temp=_opt_float(self.temp_edit.text()),
@@ -520,6 +521,14 @@ class MarkingView(_View):
             )
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, "Invalid value", str(exc))
+            return
+        # Blank is allowed here — it falls back to the shot's filename cluster —
+        # but an explicit override must be a real 1-based index. Catch it now,
+        # not after the capture is read and the DSP has run on the worker thread.
+        if cluster_index is not None and cluster_index < 1:
+            QtWidgets.QMessageBox.warning(
+                self, "Invalid cluster", "A cluster of 1 or greater is required."
+            )
             return
 
         shot_id = shot.id

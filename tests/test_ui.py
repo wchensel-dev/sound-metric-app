@@ -822,6 +822,42 @@ def test_shot_edit_dialog_requires_a_cluster(window, monkeypatch):
     assert dialog.result() != QtWidgets.QDialog.Accepted
 
 
+def test_mark_form_rejects_a_below_one_cluster_before_dsp(window, qtbot, monkeypatch):
+    # The Mark tab's Cluster override shares the edit dialog's 1-based
+    # constraint, so an explicit 0 must be caught up front — not deferred to the
+    # service on the worker thread after the capture is read and the DSP has run.
+    from PySide6 import QtWidgets
+
+    window.ingest_view._ingest()
+    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)
+    first_id = int(window.ingest_view.table.item(0, 0).text())
+    window.open_marking_for(first_id)
+    mv = window.marking_view
+    qtbot.waitUntil(lambda: mv.ml_combo.isEnabled() and mv.ml_combo.count() >= 3, timeout=5000)
+
+    warned: list = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    dispatched: list = []
+    monkeypatch.setattr(mv, "_run_async", lambda *a, **k: dispatched.append(a))
+
+    mv.ammo_combo.setCurrentText("M855")
+    mv.cluster_edit.setText("0")
+    mv._mark()
+
+    # Immediate front-end rejection with the same message the edit dialog gives,
+    # and no marking work dispatched.
+    assert warned == ["A cluster of 1 or greater is required."]
+    assert dispatched == []
+
+    # A blank cluster stays valid — it falls back to the filename cluster — so
+    # marking proceeds to the async worker.
+    warned.clear()
+    mv.cluster_edit.clear()
+    mv._mark()
+    assert warned == []
+    assert dispatched
+
+
 def test_shot_edit_dialog_rejects_a_bad_mic_tagging(window, monkeypatch):
     # The mark form and the edit dialog share one tagging check, so the two
     # warnings are asserted here rather than duplicated per caller.
