@@ -11,10 +11,11 @@ Two grains, one source of truth:
   is the source of truth, which is what lets a batch land on exactly 3 FRPs and
   5 regulars — two independent counts drawn from however many clusters it takes.
 * :meth:`InclusionService.include_cluster` is the "bring cluster forward"
-  convenience: it fans the same flag out over a cluster's shots. It cannot
-  replace shot-level control, because regulars arrive in uneven cluster sizes (a
-  3-shot cluster contributes two, a 4-shot cluster three), so whole clusters
-  never sum cleanly to 5.
+  convenience: it fans the same flag out over a cluster's shots, under the same
+  rules — a shot with no ``shot_order`` is skipped rather than flagged into an
+  average it could never reach. It cannot replace shot-level control, because
+  regulars arrive in uneven cluster sizes (a 3-shot cluster contributes two, a
+  4-shot cluster three), so whole clusters never sum cleanly to 5.
 
 Exclusion reasons (high winds, ambient noise, ...) ride along with an exclusion
 and are cleared on inclusion — a reason for leaving a shot out is meaningless
@@ -114,9 +115,24 @@ class InclusionService:
     ) -> int:
         """Include or idle every shot in a cluster; return how many rows changed.
 
+        Fan-out over :meth:`include_shot`, and it carries that method's guard with
+        it: shots without a ``shot_order`` are **skipped** on inclusion, not
+        brought forward, since they have no derivable role and the roll-ups would
+        drop them anyway. The return count reports the shots actually included, so
+        a 3-shot cluster holding one unordered shot returns 2. Idling still covers
+        the whole cluster — returning a shot to idle is safe whatever its order.
+
         Raises ``LookupError`` if the cluster is unknown.
         """
-        return self._repo.set_cluster_included(cluster_id, included, exclusion_reason=reason)
+        if not included:
+            return self._repo.set_cluster_included(cluster_id, included, exclusion_reason=reason)
+        if self._repo.get_cluster(cluster_id) is None:
+            raise LookupError(f"No cluster with id {cluster_id}")
+        orderable = [s for s in self._repo.shots_by_cluster(cluster_id) if s.shot_order is not None]
+        with self._repo.transaction():
+            for shot in orderable:
+                self.include_shot(shot.id, True)
+        return len(orderable)
 
     def status(self, batch_id: int) -> InclusionStatus:
         """A batch's included-shot counts against the soft targets.

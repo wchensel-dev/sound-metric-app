@@ -653,6 +653,28 @@ def test_include_cluster_brings_the_whole_string_forward(repo):
     assert all(repo.get_shot(m.shot.id).included for m in marked)
 
 
+def test_include_cluster_skips_an_unordered_shot(repo):
+    # The bring-forward shortcut must not do what per-shot inclusion refuses:
+    # an unordered shot has no role, so every roll-up filters it out. Flagging
+    # it included would show it feeding an average it never reaches.
+    svc = _marking_service(repo)
+    marked = _mark_cluster(repo, svc, 1, 3)
+    stray = marked[-1]
+    repo.mark_shot(stray.shot.id, cluster_id=stray.cluster.id, ammo="M855", replace_optional=True)
+    inclusion = InclusionService(repo)
+
+    assert inclusion.include_cluster(stray.cluster.id) == 2
+    assert repo.get_shot(stray.shot.id).included is False
+    assert all(repo.get_shot(m.shot.id).included for m in marked[:-1])
+    # What the tree shows now matches what the average actually counts.
+    counts = repo.inclusion_counts(stray.batch.id)
+    assert counts[ShotRole.FRP] + counts[ShotRole.REGULAR] == 2
+
+    # Idling still covers the whole cluster, unordered shots and all.
+    assert inclusion.include_cluster(stray.cluster.id, False, reason="high winds") == 3
+    assert not any(repo.get_shot(m.shot.id).included for m in marked)
+
+
 def test_include_cluster_unknown_id_raises(repo):
     with pytest.raises(LookupError):
         InclusionService(repo).include_cluster(9999)
