@@ -1619,9 +1619,9 @@ class BatchAverageView(_View):
     def _shot_item(self, shot: dict, position: MicPosition) -> QtWidgets.QTreeWidgetItem:
         cluster = shot.get("cluster_index")
         order = shot.get("shot_order")
+        # Every shot here comes from shot_metrics_for_batch, which filters out
+        # null shot_order, so order is always present.
         label = f"Cluster {cluster} · shot {order}" if cluster else f"Shot {order}"
-        if order is None:
-            label = Path(shot["source_file"]).name
         item = QtWidgets.QTreeWidgetItem(
             [label, "", *(_format_metric(shot[k]) for k in self._METRIC_KEYS)]
         )
