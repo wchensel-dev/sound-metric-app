@@ -261,12 +261,12 @@ class WorkflowController:
         with self._repo() as repo:
             repo.update_batch(
                 batch_id,
-                label=(label.strip() or None) if label else None,
-                session_date=(session_date.strip() or None) if session_date else None,
+                label=(label or "").strip() or None,
+                session_date=(session_date or "").strip() or None,
                 wind_speed=wind_speed,
                 temp=temp,
                 relative_humidity=relative_humidity,
-                notes=(notes.strip() or None) if notes else None,
+                notes=(notes or "").strip() or None,
             )
 
     def shots_by_cluster(self, cluster_id: int) -> list[Shot]:
