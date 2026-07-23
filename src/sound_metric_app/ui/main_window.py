@@ -41,6 +41,8 @@ from ..services import AVERAGE_SLOTS
 from .controller import WorkflowController
 
 _NONE_LABEL = "(none)"
+
+_LOADING_LABEL = "loading…"
 #: Shown where a mic position has no channel tagged / a value is missing.
 _EMPTY = "—"
 
@@ -475,7 +477,7 @@ class MarkingView(_View):
             combo.blockSignals(True)
             combo.clear()
             if loading:
-                combo.addItem("loading…")
+                combo.addItem(_LOADING_LABEL)
                 combo.setEnabled(False)
             else:
                 combo.addItem(_NONE_LABEL)
@@ -491,40 +493,6 @@ class MarkingView(_View):
 
     # ---- mark ----------------------------------------------------------- #
 
-    def _selected_channel(self, combo: QtWidgets.QComboBox) -> str | None:
-        text = combo.currentText()
-        return None if text in (_NONE_LABEL, "loading…", "") else text
-
-    def _channel_map(self) -> dict[str, MicPosition] | None:
-        """The tagged channel map, or ``None`` after warning about a bad tagging.
-
-        Returning ``None`` (rather than an empty map) keeps "the user needs to fix
-        something" distinct from "nothing tagged" — the caller aborts either way,
-        but the warning has already been shown here.
-        """
-        ml = self._selected_channel(self.ml_combo)
-        se = self._selected_channel(self.se_combo)
-        if not ml and not se:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "No mic tagged",
-                "Tag at least one channel as Muzzle Left or Shooter's Ear.",
-            )
-            return None
-        if ml and se and ml == se:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Same channel",
-                "Muzzle Left and Shooter's Ear cannot be the same channel.",
-            )
-            return None
-        channel_map: dict[str, MicPosition] = {}
-        if ml:
-            channel_map[ml] = MicPosition.ML
-        if se:
-            channel_map[se] = MicPosition.SE
-        return channel_map
-
     def _mark(self) -> None:
         shot = self._current_shot()
         if shot is None:
@@ -536,7 +504,7 @@ class MarkingView(_View):
             QtWidgets.QMessageBox.warning(self, "Missing ammo", "Ammo is required to mark a shot.")
             return
 
-        channel_map = self._channel_map()
+        channel_map = _tagged_channel_map(self, self.ml_combo, self.se_combo)
         if channel_map is None:
             return
 
@@ -681,10 +649,6 @@ class ShotEditDialog(QtWidgets.QDialog):
         role = role_for_order(_safe_int(self.shot_order_edit.text()))
         self.role_label.setText(role.label if role else _EMPTY)
 
-    def _selected_channel(self, combo: QtWidgets.QComboBox) -> str | None:
-        text = combo.currentText()
-        return None if text in (_NONE_LABEL, "") else text
-
     def _on_accept(self) -> None:
         ammo = self.ammo_combo.currentText().strip()
         if not ammo:
@@ -708,27 +672,9 @@ class ShotEditDialog(QtWidgets.QDialog):
             )
             return
 
-        ml = self._selected_channel(self.ml_combo)
-        se = self._selected_channel(self.se_combo)
-        if not ml and not se:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "No mic tagged",
-                "Tag at least one channel as Muzzle Left or Shooter's Ear.",
-            )
+        channel_map = _tagged_channel_map(self, self.ml_combo, self.se_combo)
+        if channel_map is None:
             return
-        if ml and se and ml == se:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Same channel",
-                "Muzzle Left and Shooter's Ear cannot be the same channel.",
-            )
-            return
-        channel_map: dict[str, MicPosition] = {}
-        if ml:
-            channel_map[ml] = MicPosition.ML
-        if se:
-            channel_map[se] = MicPosition.SE
 
         try:
             self._values = dict(
@@ -1918,6 +1864,47 @@ def _select_channel(combo: QtWidgets.QComboBox, name: str | None) -> None:
             combo.setCurrentIndex(index)
             return
     combo.setCurrentIndex(0)
+
+
+def _selected_channel(combo: QtWidgets.QComboBox) -> str | None:
+    """The channel a combo names, or ``None`` for the placeholder entries."""
+    text = combo.currentText()
+    return None if text in (_NONE_LABEL, _LOADING_LABEL, "") else text
+
+
+def _tagged_channel_map(
+    parent: QtWidgets.QWidget,
+    ml_combo: QtWidgets.QComboBox,
+    se_combo: QtWidgets.QComboBox,
+) -> dict[str, MicPosition] | None:
+    """The tagged channel map, or ``None`` after warning about a bad tagging.
+
+    Returning ``None`` (rather than an empty map) keeps "the user needs to fix
+    something" distinct from "nothing tagged" — the caller aborts either way,
+    but the warning has already been shown here.
+    """
+    ml = _selected_channel(ml_combo)
+    se = _selected_channel(se_combo)
+    if not ml and not se:
+        QtWidgets.QMessageBox.warning(
+            parent,
+            "No mic tagged",
+            "Tag at least one channel as Muzzle Left or Shooter's Ear.",
+        )
+        return None
+    if ml and se and ml == se:
+        QtWidgets.QMessageBox.warning(
+            parent,
+            "Same channel",
+            "Muzzle Left and Shooter's Ear cannot be the same channel.",
+        )
+        return None
+    channel_map: dict[str, MicPosition] = {}
+    if ml:
+        channel_map[ml] = MicPosition.ML
+    if se:
+        channel_map[se] = MicPosition.SE
+    return channel_map
 
 
 def _opt_int(text: str) -> int | None:

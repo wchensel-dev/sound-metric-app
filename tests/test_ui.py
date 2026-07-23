@@ -822,6 +822,40 @@ def test_shot_edit_dialog_requires_a_cluster(window, monkeypatch):
     assert dialog.result() != QtWidgets.QDialog.Accepted
 
 
+def test_shot_edit_dialog_rejects_a_bad_mic_tagging(window, monkeypatch):
+    # The mark form and the edit dialog share one tagging check, so the two
+    # warnings are asserted here rather than duplicated per caller.
+    from PySide6 import QtWidgets
+
+    from sound_metric_app.models import Shot
+    from sound_metric_app.ui.main_window import ShotEditDialog
+
+    warned: list = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: warned.append(a[1]))
+
+    dialog = ShotEditDialog(
+        Shot(source_file="f.dxd", shot_order=1, ml_channel="AI 1"),
+        sku="SUP-1",
+        platform="AR15",
+        ammo="M855",
+        cluster_index=1,
+        channel_names=["AI 1", "AI 2"],
+        parent=window,
+    )
+
+    # Both mics on one channel would attribute one waveform to two positions.
+    dialog.se_combo.setCurrentText("AI 1")
+    dialog._on_accept()
+    assert warned == ["Same channel"]
+
+    # Nothing tagged leaves no channel to compute metrics from.
+    dialog.ml_combo.setCurrentIndex(0)
+    dialog.se_combo.setCurrentIndex(0)
+    dialog._on_accept()
+    assert warned == ["Same channel", "No mic tagged"]
+    assert dialog.result() != QtWidgets.QDialog.Accepted
+
+
 def test_mark_tab_offers_configured_ammo_presets(window):
     # The mark form's ammo combo is seeded with the default presets and reflects
     # a saved custom list after Settings ▸ Ammo definitions.
