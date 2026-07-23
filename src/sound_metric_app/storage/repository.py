@@ -628,11 +628,15 @@ class WorkflowRepository(_SqliteStore):
     def set_cluster_included(
         self, cluster_id: int, included: bool, *, exclusion_reason: str | None = None
     ) -> int:
-        """Set the inclusion flag on every shot in a cluster; return how many changed.
+        """Set the inclusion flag on every shot in a cluster; return how many it covered.
 
         The "bring cluster forward" convenience action. It is pure fan-out over
         :meth:`set_shot_included` — the flag still lives on each shot, so the
         user can afterwards drop individual shots to land on an exact count.
+
+        The count is how many shots the cluster holds, not a delta: shots already
+        carrying the flag are counted too, so calling this twice returns the same
+        number both times.
 
         Raises ``LookupError`` if ``cluster_id`` matches no cluster.
         """

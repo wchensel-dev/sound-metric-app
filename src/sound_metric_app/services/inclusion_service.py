@@ -113,14 +113,19 @@ class InclusionService:
     def include_cluster(
         self, cluster_id: int, included: bool = True, *, reason: str | None = None
     ) -> int:
-        """Include or idle every shot in a cluster; return how many rows changed.
+        """Include or idle every shot in a cluster; return how many it covered.
 
         Fan-out over :meth:`include_shot`, and it carries that method's guard with
         it: shots without a ``shot_order`` are **skipped** on inclusion, not
         brought forward, since they have no derivable role and the roll-ups would
-        drop them anyway. The return count reports the shots actually included, so
+        drop them anyway. The return count reports the shots the call covered, so
         a 3-shot cluster holding one unordered shot returns 2. Idling still covers
         the whole cluster — returning a shot to idle is safe whatever its order.
+
+        The count is coverage, not a delta — shots already in the requested state
+        are counted, so a repeat call returns the same number rather than 0. It
+        answers "how many shots does this cluster now contribute", which is what
+        the CLI reports.
 
         Raises ``LookupError`` if the cluster is unknown.
         """

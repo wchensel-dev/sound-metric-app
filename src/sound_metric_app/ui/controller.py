@@ -334,7 +334,7 @@ class WorkflowController:
     def include_cluster(
         self, cluster_id: int, included: bool = True, *, reason: str | None = None
     ) -> int:
-        """Bring a whole cluster forward, or idle it. Returns how many shots changed."""
+        """Bring a whole cluster forward, or idle it. Returns how many shots it covered."""
         with self._repo() as repo:
             return InclusionService(repo).include_cluster(cluster_id, included, reason=reason)
 

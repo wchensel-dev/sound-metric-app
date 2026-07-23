@@ -552,6 +552,18 @@ def test_set_cluster_included_fans_out_over_its_shots(repo, batch):
     assert [s.included for s in repo.shots_by_cluster(cluster_id)] == [True, True, False]
 
 
+def test_set_cluster_included_counts_coverage_not_a_delta(repo, batch):
+    _combination_id, batch_id, cluster_id = batch
+    for order in (1, 2, 3):
+        _placed_shot(repo, cluster_id, order=order)
+
+    # The count answers "how many shots does this cluster contribute", so a
+    # repeat call reports the same number rather than 0 — the CLI prints it as
+    # the cluster's standing contribution, not as work done.
+    assert repo.set_cluster_included(cluster_id, True) == 3
+    assert repo.set_cluster_included(cluster_id, True) == 3
+
+
 def test_set_cluster_included_unknown_id_raises(repo):
     with pytest.raises(LookupError):
         repo.set_cluster_included(9999, True)
