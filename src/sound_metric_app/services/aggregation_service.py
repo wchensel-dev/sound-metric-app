@@ -1,88 +1,119 @@
 """Aggregation service (BUILD_PLAN Task 7).
 
-Computes per-group averages of the metrics, **separately for SE and MR**
-(README §4: positions are never mixed), and rolls the groups of a batch up into
-one report ready for the CLI/GUI report views.
+Computes the **batch average view**: the filter where a shot's ``included`` flag
+is true, grouped by mic position crossed with derived role, producing four output
+slots per batch —
+
+.. code-block:: text
+
+   muzzle_left  (ML) . FRP        muzzle_left  (ML) . regular
+   shooters_ear (SE) . FRP        shooters_ear (SE) . regular
+
+Positions are never mixed and roles are never mixed. The 3-FRP / 5-regular
+target applies per position, so each channel averages the same underlying
+selected shots on its own axis.
 
 Averaging is done in the **linear domain** (MATH.md §9), matching TBAC: each
 metric's per-shot linear magnitude (Pa, or Pa·ms for the impulse) is meaned and
 the mean converted once to its dB level — not a mean of the dB values. The
-underlying store does this; the service just wraps it per group and per batch.
+underlying store does this; the service wraps it per batch and rolls a
+combination's batches up for the report views.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..models import Batch, Group, MicPosition
+from ..models import Batch, Combination, MicPosition, ShotRole
 from ..storage import WorkflowRepository
+from .inclusion_service import InclusionService, InclusionStatus
+
+#: The four output slots, in report order: position major, role minor.
+AVERAGE_SLOTS: tuple[tuple[MicPosition, ShotRole], ...] = tuple(
+    (position, role) for position in (MicPosition.ML, MicPosition.SE) for role in ShotRole
+)
 
 
 @dataclass
-class GroupAverages:
-    """Per-mic averages for one group, plus how many shots fed them.
+class BatchAverages:
+    """One batch's four output slots, plus the shots behind them.
 
-    ``averages`` maps each present :class:`~sound_metric_app.models.MicPosition`
-    to a dict carrying every metric's group-averaged linear magnitude and dB level
-    (``peak_pa``/``peak_db``, ``peak_a_pa``/``peak_dba``,
-    ``impulse_pa_ms``/``peak_impulse_db``, ``leq10ms_pa``/``leq10ms_db``,
-    ``liaeq_pa``/``liaeq_100ms_db``) plus ``n``, the number of shots contributing
-    that position. Positions absent from the group are omitted, so a single-mic
-    group yields a single entry.
+    ``averages`` maps each populated ``(position, role)`` slot to a dict carrying
+    every metric's averaged linear magnitude and dB level (``peak_pa``/``peak_db``,
+    ``peak_a_pa``/``peak_dba``, ``impulse_pa_ms``/``peak_impulse_db``,
+    ``leq10ms_pa``/``leq10ms_db``, ``liaeq_pa``/``liaeq_100ms_db``) plus ``n``,
+    the number of included shots feeding that slot. Slots with nothing included
+    are omitted, so a batch whose regulars have not been brought forward yet
+    yields two entries rather than four empty ones.
 
-    ``shots`` is the un-averaged drill-down behind those averages: each present
-    position maps to a list of the individual shot metric rows the average was
-    taken over (see
-    :meth:`~sound_metric_app.storage.WorkflowRepository.shot_metrics_for_group`).
-    Its keys always match ``averages``; it is a required field so this invariant
-    cannot be broken by omitting it at construction.
+    ``shots`` is the un-averaged drill-down behind those averages: each populated
+    slot maps to the list of individual shot metric rows the average was taken
+    over. Its keys always match ``averages``; it is a required field so this
+    invariant cannot be broken by omitting it at construction.
+
+    ``n_shots`` counts every shot in the batch — the data-bank total, not the
+    included subset — so a report can show "5 of 27 brought forward". ``status``
+    carries the per-role progress against the soft 3 / 5 targets.
     """
 
-    group: Group
+    batch: Batch
+    combination: Combination
     n_shots: int
-    averages: dict[MicPosition, dict]
-    shots: dict[MicPosition, list[dict]]
+    averages: dict[tuple[MicPosition, ShotRole], dict]
+    shots: dict[tuple[MicPosition, ShotRole], list[dict]]
+    status: InclusionStatus
+
+    @property
+    def n_included(self) -> int:
+        """Included shots across both roles (counted once, not per channel)."""
+        return sum(p.included for p in self.status.progress.values())
 
 
 @dataclass
-class BatchReport:
-    """A batch's groups, each with its SE/MR averages."""
+class CombinationReport:
+    """A test combination's batches, each with its four output slots."""
 
-    batch: Batch
-    groups: list[GroupAverages]
+    combination: Combination
+    batches: list[BatchAverages]
 
 
 class AggregationService:
-    """Per-group and per-batch metric averaging, SE and MR kept separate."""
+    """Per-batch roll-up into the four position x role output slots."""
 
     def __init__(self, repo: WorkflowRepository):
         self._repo = repo
+        self._inclusion = InclusionService(repo)
 
-    def group_averages(self, group_id: int) -> GroupAverages:
-        """Averages for one group. Raises ``LookupError`` for an unknown group."""
-        group = self._repo.get_group(group_id)
-        if group is None:
-            raise LookupError(f"No group with id {group_id}")
-        return self._averages_for(group)
-
-    def _averages_for(self, group: Group) -> GroupAverages:
-        """Averages for an already-loaded group, skipping the ``get_group`` re-fetch."""
-        return GroupAverages(
-            group=group,
-            n_shots=self._repo.count_shots_in_group(group.id),
-            averages=self._repo.group_averages(group.id),
-            shots=self._repo.shot_metrics_for_group(group.id),
-        )
-
-    def batch_report(self, batch_id: int) -> BatchReport:
-        """Every group in a batch with its SE/MR averages.
-
-        Raises ``LookupError`` for an unknown batch.
-        """
+    def batch_averages(self, batch_id: int) -> BatchAverages:
+        """The four output slots for one batch. Raises ``LookupError`` if unknown."""
         batch = self._repo.get_batch(batch_id)
         if batch is None:
             raise LookupError(f"No batch with id {batch_id}")
-        groups = [
-            self._averages_for(group) for group in self._repo.groups_for_batch(batch_id)
-        ]
-        return BatchReport(batch=batch, groups=groups)
+        return self._averages_for(batch)
+
+    def _averages_for(self, batch: Batch) -> BatchAverages:
+        """Slots for an already-loaded batch, skipping the ``get_batch`` re-fetch."""
+        return BatchAverages(
+            batch=batch,
+            combination=self._repo.get_combination(batch.combination_id),
+            n_shots=self._repo.count_shots_in_batch(batch.id),
+            averages=self._repo.batch_averages(batch.id),
+            shots=self._repo.shot_metrics_for_batch(batch.id),
+            status=self._inclusion.status(batch.id),
+        )
+
+    def combination_report(self, combination_id: int) -> CombinationReport:
+        """Every batch under a combination with its four slots.
+
+        Raises ``LookupError`` for an unknown combination.
+        """
+        combination = self._repo.get_combination(combination_id)
+        if combination is None:
+            raise LookupError(f"No combination with id {combination_id}")
+        return CombinationReport(
+            combination=combination,
+            batches=[
+                self._averages_for(batch)
+                for batch in self._repo.batches_for_combination(combination_id)
+            ],
+        )

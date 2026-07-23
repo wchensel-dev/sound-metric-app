@@ -32,9 +32,9 @@ def _frame(name: str) -> Frame:
 
 def test_tag_two_channels():
     frames = [_frame("AI 1"), _frame("AI 2")]
-    tagged = tag_channels(frames, {"AI 1": MicPosition.SE, "AI 2": MicPosition.MR})
+    tagged = tag_channels(frames, {"AI 1": MicPosition.SE, "AI 2": MicPosition.ML})
     got = {t.position: t.frame.channel for t in tagged}
-    assert got == {MicPosition.SE: "AI 1", MicPosition.MR: "AI 2"}
+    assert got == {MicPosition.SE: "AI 1", MicPosition.ML: "AI 2"}
 
 
 def test_tag_single_channel_ok():

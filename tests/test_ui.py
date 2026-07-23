@@ -1,8 +1,8 @@
 """Qt smoke/acceptance test for the workflow window.
 
-Drives ingest -> mark -> close -> report through the real widgets (buttons,
-combos, tables), so the off-thread task wiring and cross-view refresh are
-exercised, not just the controller. Skipped when the ``gui`` extra is absent.
+Drives ingest -> mark -> bring-forward -> report through the real widgets
+(buttons, combos, trees), so the off-thread task wiring and cross-view refresh
+are exercised, not just the controller. Skipped when the ``gui`` extra is absent.
 
 Run headless:  QT_QPA_PLATFORM=offscreen pytest tests/test_ui.py
 """
@@ -52,7 +52,9 @@ def window(tmp_path, monkeypatch, qtbot):
     monkeypatch.setenv("SMA_CONFIG", str(tmp_path / "sma_config.json"))
     inbox = tmp_path / "inbox"
     inbox.mkdir()
-    for name in ("SUP-1_AR15_001.dxd", "SUP-1_AR15_002.dxd"):
+    # One string of fire: Dewesoft counts from zero, so 0000 is the FRP and
+    # 0001 a regular.
+    for name in ("SUP-1_AR15_01_0000.dxd", "SUP-1_AR15_01_0001.dxd"):
         (inbox / name).write_bytes(b"")
 
     controller = WorkflowController(
@@ -77,52 +79,62 @@ def test_format_metric_blanks_null_instead_of_raising():
     assert _format_metric(0) == "0.00"
 
 
-def test_report_no_metrics_row_spans_all_columns(window, monkeypatch):
-    # A group with no averages renders a "no metrics" placeholder row. It must
-    # carry a cell for every column so it stays aligned with the widened header
-    # (and keeps tracking _METRIC_KEYS if the metric set grows again), rather
-    # than under-filling and leaving trailing columns without a cell.
-    from sound_metric_app.models import Batch, Group
-    from sound_metric_app.services.aggregation_service import BatchReport, GroupAverages
+def test_report_empty_slot_row_spans_all_columns(window, monkeypatch):
+    # A slot with nothing included renders a "none included" placeholder row
+    # rather than being hidden — a missing quadrant is information. It must
+    # carry a cell for every column so it stays aligned with the header (and
+    # keeps tracking _METRIC_KEYS if the metric set grows again).
+    from sound_metric_app.models import Batch, Combination
+    from sound_metric_app.services.aggregation_service import BatchAverages
+    from sound_metric_app.services.inclusion_service import InclusionService
 
     rv = window.report_view
-    report = BatchReport(
-        batch=Batch(sku="SUP-1", id=1),
-        groups=[
-            GroupAverages(
-                group=Group(test_platform="AR15", ammo="M855", id=1),
-                n_shots=0,
-                averages={},
-                shots={},
-            )
-        ],
+    with window.controller._repo() as repo:
+        combination_id = repo.upsert_combination("SUP-1", "AR15", "M855")
+        batch_id = repo.create_batch(combination_id)
+        status = InclusionService(repo).status(batch_id)
+
+    report = BatchAverages(
+        batch=Batch(combination_id=combination_id, id=batch_id),
+        combination=Combination(sku="SUP-1", platform="AR15", ammo="M855", id=combination_id),
+        n_shots=0,
+        averages={},
+        shots={},
+        status=status,
     )
-    monkeypatch.setattr(rv.controller, "batch_report", lambda _batch_id: report)
+    monkeypatch.setattr(rv.controller, "batch_averages", lambda _batch_id: report)
     rv.batch_combo.blockSignals(True)
-    rv.batch_combo.addItem("#1", 1)  # give _load_report a non-None batch id
+    rv.batch_combo.addItem("#1", batch_id)  # give _load_report a non-None batch id
     rv.batch_combo.blockSignals(False)
 
     rv._load_report()
 
-    assert rv.tree.topLevelItemCount() == 1
+    # All four slots are listed, every one flagged as empty.
+    assert rv.tree.topLevelItemCount() == 4
     item = rv.tree.topLevelItem(0)
     # Every column has a cell -> nothing shifts left; the row matches the header.
     assert item.columnCount() == len(rv._COLUMNS)
-    assert item.text(0) == "AR15 / M855"
-    assert item.text(rv._FIRST_METRIC_COL) == "no metrics"
+    assert item.text(0) == "Muzzle Left · FRP"
+    assert item.text(rv._FIRST_METRIC_COL) == "none included"
+    assert "0 of 0 shot(s) brought forward" in rv.status_label.text()
 
 
 def test_window_builds_with_four_tabs(window):
     assert window.tabs.count() == 4
-    assert [window.tabs.tabText(i) for i in range(4)] == ["Ingest", "Mark", "Batches", "Report"]
+    assert [window.tabs.tabText(i) for i in range(4)] == [
+        "Ingest",
+        "Mark",
+        "Data bank",
+        "Batch average",
+    ]
 
 
 def test_selecting_shot_with_null_keys_does_not_crash_mark_tab(window):
-    # A shot whose filename yielded no batch/group keys is stored with
-    # suppressor_sku/test_platform = None. Selecting it must not pass None to
-    # QLineEdit.setPlaceholderText (which raises TypeError).
+    # A shot whose filename yielded no placement keys is stored with
+    # suppressor_sku/test_platform/cluster_index = None. Selecting it must not
+    # pass None to QLineEdit.setPlaceholderText (which raises TypeError).
     with window.controller._repo() as repo:
-        shot_id = repo.add_unmarked_shot("no-keys.dxd", None, None, 1)
+        shot_id = repo.add_unmarked_shot("no-keys.dxd", None, None, None, None)
 
     mv = window.marking_view
     mv.refresh()  # _on_shot_changed fires on selection; must not raise
@@ -131,10 +143,44 @@ def test_selecting_shot_with_null_keys_does_not_crash_mark_tab(window):
     assert mv._current_shot_id() == shot_id
     assert mv.sku_edit.placeholderText() == ""
     assert mv.platform_edit.placeholderText() == ""
+    assert mv.cluster_edit.placeholderText() == ""
+    # No order means no derivable role, shown as an em-dash rather than a guess.
+    assert mv.role_label.text() == "—"
+
+
+def test_mark_form_previews_the_derived_role(window, qtbot):
+    window.ingest_view._ingest()
+    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)
+    mv = window.marking_view
+    mv.refresh()
+
+    # Blank box: the role falls back to the order the filename supplied.
+    mv.shot_combo.setCurrentIndex(0)
+    assert mv.role_label.text() == "FRP"
+
+    # Typing an order re-derives it live; role is never entered by hand.
+    mv.shot_order_edit.setText("4")
+    assert mv.role_label.text() == "Regular"
+    mv.shot_order_edit.setText("0")
+    assert mv.role_label.text() == "FRP"
+    mv.shot_order_edit.setText("not a number")
+    assert mv.role_label.text() == "—"
+
+
+def test_ingest_table_shows_cluster_and_role(window, qtbot):
+    window.ingest_view._ingest()
+    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)
+    table = window.ingest_view.table
+    headers = [table.horizontalHeaderItem(c).text() for c in range(table.columnCount())]
+    assert "Cluster" in headers and "Role" in headers
+    cluster_col, role_col = headers.index("Cluster"), headers.index("Role")
+    assert table.item(0, cluster_col).text() == "1"
+    assert table.item(0, role_col).text() == "FRP"
+    assert table.item(1, role_col).text() == "Regular"
 
 
 def _mark_all_shots(window, qtbot):
-    """Ingest the fixture inbox and mark every shot (SE=AI 1, MR=AI 2)."""
+    """Ingest the fixture inbox and mark every shot (auto-tagged AI 1 / AI 2)."""
     window.ingest_view._ingest()
     qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)
     while window.ingest_view.table.rowCount() > 0:
@@ -142,7 +188,7 @@ def _mark_all_shots(window, qtbot):
         window.open_marking_for(first_id)
         mv = window.marking_view
         qtbot.waitUntil(
-            lambda: mv.se_combo.isEnabled() and mv.se_combo.count() >= 3, timeout=5000
+            lambda: mv.ml_combo.isEnabled() and mv.ml_combo.count() >= 3, timeout=5000
         )
         mv.ammo_combo.setCurrentText("M855")
         before = window.ingest_view.table.rowCount()
@@ -152,20 +198,28 @@ def _mark_all_shots(window, qtbot):
         )
 
 
+def _include_everything(window):
+    """Bring every marked shot forward so the batch-average view has data."""
+    for shot in window.controller.shots_for_batch(window.controller.batches()[0].id):
+        window.controller.include_shot(shot.id)
+
+
 def test_clicking_metric_cell_graphs_that_shot(window, qtbot):
     from sound_metric_app.models import MicPosition
 
     _mark_all_shots(window, qtbot)
+    _include_everything(window)
 
     rv = window.report_view
     rv.refresh()
-    qtbot.waitUntil(lambda: rv.tree.topLevelItemCount() >= 2, timeout=5000)
+    qtbot.waitUntil(lambda: rv.tree.topLevelItemCount() == 4, timeout=5000)
 
-    # Drill into an SE average row and grab one of its shot children.
+    # Drill into a populated Shooter's Ear slot and grab one of its shot children.
     se_top = next(
         rv.tree.topLevelItem(i)
         for i in range(rv.tree.topLevelItemCount())
-        if rv.tree.topLevelItem(i).text(1) == "SE"
+        if rv.tree.topLevelItem(i).text(0).startswith("Shooter's Ear")
+        and rv.tree.topLevelItem(i).childCount() > 0
     )
     shot_item = se_top.child(0)
     kind, _shot_id, position = shot_item.data(0, QtCore.Qt.UserRole)
@@ -422,127 +476,271 @@ def test_graph_point_readout_shows_value_and_clears(qtbot):
 
 
 def test_full_workflow_through_widgets(window, qtbot):
+    from sound_metric_app.models import MicPosition, ShotRole
+
     # --- Ingest (off-thread) -> two unmarked rows ---
     window.ingest_view._ingest()
     qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)
 
-    # --- Mark both shots via the marking form ---
-    for _ in range(2):
-        first_id = int(window.ingest_view.table.item(0, 0).text())
-        window.open_marking_for(first_id)
-        mv = window.marking_view
-        # Wait for the (fake) channel load to populate the SE picker.
-        qtbot.waitUntil(lambda: mv.se_combo.isEnabled() and mv.se_combo.count() >= 3, timeout=5000)
-        mv.ammo_combo.setCurrentText("M855")  # SE/MR default to AI 1 / AI 2
-        mv._mark()
-        qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() < 2, timeout=5000)
-        # loop condition re-reads the table; wait for the second mark to clear it
+    # --- Mark both shots via the marking form (channels auto-tag) ---
+    _mark_all_shots(window, qtbot)
     qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 0, timeout=5000)
 
-    # --- Report shows the group with SE and MR rows (never mixed) ---
+    # --- Data bank shows the whole tree, everything idle ---
+    bv = window.bank_view
+    bv.refresh()
+    combination_item = bv.tree.topLevelItem(0)
+    assert combination_item.text(0) == "SUP-1 / AR15 / M855"
+    batch_item = combination_item.child(0)
+    cluster_item = batch_item.child(0)
+    assert cluster_item.childCount() == 2
+    assert all(
+        cluster_item.child(i).checkState(0) == QtCore.Qt.Unchecked for i in range(2)
+    )
+    assert "FRP: 0/3" in batch_item.text(1)
+
+    # --- Nothing is averaged until brought forward ---
     rv = window.report_view
     rv.refresh()
-    qtbot.waitUntil(lambda: rv.tree.topLevelItemCount() >= 2, timeout=5000)
-    tops = [rv.tree.topLevelItem(i) for i in range(rv.tree.topLevelItemCount())]
-    mics = {item.text(1) for item in tops}
-    assert {"SE", "MR"} <= mics
-    # Each mic average expands to its individual shots.
-    se_item = next(item for item in tops if item.text(1) == "SE")
-    assert se_item.childCount() >= 1
+    assert "0 of 2 shot(s) brought forward" in rv.status_label.text()
+
+    # --- Bring the cluster forward from the tree ---
+    bv.tree.setCurrentItem(cluster_item)
+    assert bv.include_btn.isEnabled()
+    bv._set_inclusion(True)
+    qtbot.waitUntil(
+        lambda: window.controller.inclusion_status(
+            window.controller.batches()[0].id
+        ).progress[ShotRole.FRP].included == 1,
+        timeout=5000,
+    )
+
+    # --- The four slots now report, positions and roles never mixed ---
+    rv.refresh()
+    qtbot.waitUntil(lambda: rv.tree.topLevelItemCount() == 4, timeout=5000)
+    labels = [rv.tree.topLevelItem(i).text(0) for i in range(4)]
+    assert labels == [
+        "Muzzle Left · FRP",
+        "Muzzle Left · Regular",
+        "Shooter's Ear · FRP",
+        "Shooter's Ear · Regular",
+    ]
+    assert "2 of 2 shot(s) brought forward" in rv.status_label.text()
+    # Each populated slot expands to the individual shots behind it.
+    assert all(rv.tree.topLevelItem(i).childCount() == 1 for i in range(4))
+    report = window.controller.batch_averages(window.controller.batches()[0].id)
+    assert report.averages[(MicPosition.ML, ShotRole.FRP)]["n"] == 1
 
     # --- Close the batch from the tree ---
-    tree = window.batch_view.tree
-    tree.setCurrentItem(tree.topLevelItem(0))
-    assert window.batch_view.close_btn.isEnabled()
-
-
-def _first_batch_item(bv):
-    return bv.tree.topLevelItem(0)
-
-
-def test_edit_button_enabled_for_batch_and_shot_not_group(window, qtbot):
-    # Mark the two shots so the tree has a batch -> group -> shots to select in.
-    window.ingest_view._ingest()
-    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)
-    for _ in range(2):
-        first_id = int(window.ingest_view.table.item(0, 0).text())
-        window.open_marking_for(first_id)
-        mv = window.marking_view
-        qtbot.waitUntil(lambda: mv.se_combo.isEnabled() and mv.se_combo.count() >= 3, timeout=5000)
-        mv.ammo_combo.setCurrentText("M855")
-        mv._mark()
-        qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() < 2, timeout=5000)
-    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 0, timeout=5000)
-
-    bv = window.batch_view
     bv.refresh()
-    batch_item = _first_batch_item(bv)
-    group_item = batch_item.child(0)
-    shot_item = group_item.child(0)
+    bv.tree.setCurrentItem(bv.tree.topLevelItem(0).child(0))
+    assert bv.close_btn.isEnabled()
+
+
+def _tree_nodes(bv):
+    """The (combination, batch, cluster, shot) items of a single-branch tree."""
+    combination = bv.tree.topLevelItem(0)
+    batch = combination.child(0)
+    cluster = batch.child(0)
+    return combination, batch, cluster, cluster.child(0)
+
+
+def test_action_buttons_track_the_selected_level(window, qtbot):
+    _mark_all_shots(window, qtbot)
+
+    bv = window.bank_view
+    bv.refresh()
+    combination_item, batch_item, cluster_item, shot_item = _tree_nodes(bv)
+
+    bv.tree.setCurrentItem(combination_item)
+    # A combination is a container, not a roll-up unit or an editable session.
+    assert not bv.include_btn.isEnabled()
+    assert not bv.edit_btn.isEnabled()
 
     bv.tree.setCurrentItem(batch_item)
-    assert bv.edit_btn.isEnabled()  # batch: rename SKU
-    bv.tree.setCurrentItem(group_item)
-    assert not bv.edit_btn.isEnabled()  # group: no direct edit
+    assert bv.edit_btn.isEnabled()  # batch: session metadata
+    assert bv.close_btn.isEnabled()
+    assert not bv.include_btn.isEnabled()
+
+    bv.tree.setCurrentItem(cluster_item)
+    assert bv.include_btn.isEnabled()  # cluster: bring the whole string forward
+    assert not bv.edit_btn.isEnabled()
+
     bv.tree.setCurrentItem(shot_item)
+    assert bv.include_btn.isEnabled() and bv.exclude_btn.isEnabled()
     assert bv.edit_btn.isEnabled()  # shot: re-mark
 
 
-def test_rename_batch_via_tree(window, qtbot, monkeypatch):
-    window.ingest_view._ingest()
-    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)
-    first_id = int(window.ingest_view.table.item(0, 0).text())
-    window.open_marking_for(first_id)
-    mv = window.marking_view
-    qtbot.waitUntil(lambda: mv.se_combo.isEnabled() and mv.se_combo.count() >= 3, timeout=5000)
-    mv.ammo_combo.setCurrentText("M855")
-    mv._mark()
-    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 1, timeout=5000)
+def test_shot_checkbox_toggles_inclusion(window, qtbot):
+    _mark_all_shots(window, qtbot)
 
-    bv = window.batch_view
+    bv = window.bank_view
     bv.refresh()
-    bv.tree.setCurrentItem(_first_batch_item(bv))
+    _, _, _cluster_item, shot_item = _tree_nodes(bv)
+    _kind, shot, *_rest = shot_item.data(0, QtCore.Qt.UserRole)
+    assert shot.included is False
 
-    # Stand in for the modal SKU prompt with a fixed corrected value.
+    # Ticking the box is the bring-forward gesture; it must persist.
+    shot_item.setCheckState(0, QtCore.Qt.Checked)
+    qtbot.waitUntil(lambda: window.controller.get_shot(shot.id).included, timeout=5000)
+
+    # And a refresh must not fire the handler for the states it writes itself.
+    bv.refresh()
+    _, _, _cluster, refreshed = _tree_nodes(bv)
+    assert refreshed.checkState(0) == QtCore.Qt.Checked
+    assert window.controller.get_shot(shot.id).included is True
+
+
+def test_checkbox_write_runs_after_the_signal_unwinds(window, qtbot):
+    """The toggle must not rebuild the tree from inside itemChanged.
+
+    Writing inline refreshes the view, which clears the tree and frees the very
+    row Qt is still emitting itemChanged for — a use-after-free that crashes the
+    application. So the write is deferred: nothing may reach the database until
+    the event loop turns.
+    """
+    _mark_all_shots(window, qtbot)
+
+    bv = window.bank_view
+    bv.refresh()
+    _, _, _cluster_item, shot_item = _tree_nodes(bv)
+    _kind, shot, *_rest = shot_item.data(0, QtCore.Qt.UserRole)
+
+    shot_item.setCheckState(0, QtCore.Qt.Checked)
+    assert window.controller.get_shot(shot.id).included is False  # still deferred
+    qtbot.waitUntil(lambda: window.controller.get_shot(shot.id).included, timeout=5000)
+
+
+def test_a_rejected_toggle_snaps_the_checkbox_back(window, qtbot, monkeypatch):
+    """A shot with no order has no role, so ticking it fails — and must not lie.
+
+    The row is left showing the flag that was actually stored, not the tick the
+    user made, with the reason surfaced in a dialog.
+    """
     from PySide6 import QtWidgets
 
+    _mark_all_shots(window, qtbot)
+    bv = window.bank_view
+    bv.refresh()
+    _, _, _cluster_item, shot_item = _tree_nodes(bv)
+    _kind, shot, *_rest = shot_item.data(0, QtCore.Qt.UserRole)
+    with window.controller._repo() as repo:
+        repo._conn.execute("UPDATE shots SET shot_order = NULL WHERE id = ?", (shot.id,))
+        repo._conn.commit()
+    bv.refresh()
+    _, _, _cluster, shot_item = _tree_nodes(bv)
+
+    errors = []
     monkeypatch.setattr(
-        QtWidgets.QInputDialog, "getText", staticmethod(lambda *a, **k: ("SUP-FIXED", True))
+        QtWidgets.QMessageBox, "critical", staticmethod(lambda *a, **k: errors.append(a))
     )
+    shot_item.setCheckState(0, QtCore.Qt.Checked)
+    qtbot.waitUntil(lambda: bool(errors), timeout=5000)
+
+    assert window.controller.get_shot(shot.id).included is False
+    _, _, _cluster, refreshed = _tree_nodes(bv)
+    assert refreshed.checkState(0) == QtCore.Qt.Unchecked
+
+
+def test_exclude_prompts_for_a_reason_and_records_it(window, qtbot, monkeypatch):
+    from PySide6 import QtWidgets
+
+    _mark_all_shots(window, qtbot)
+    _include_everything(window)
+
+    bv = window.bank_view
+    bv.refresh()
+    _, _, _cluster_item, shot_item = _tree_nodes(bv)
+    _kind, shot, *_rest = shot_item.data(0, QtCore.Qt.UserRole)
+    bv.tree.setCurrentItem(shot_item)
+
+    monkeypatch.setattr(
+        QtWidgets.QInputDialog, "getText", staticmethod(lambda *a, **k: ("high winds", True))
+    )
+    bv._set_inclusion(False)
+
+    stored = window.controller.get_shot(shot.id)
+    assert stored.included is False and stored.exclusion_reason == "high winds"
+    # The reason surfaces in the tree so an excluded shot explains itself.
+    bv.refresh()
+    _, _, _cluster, refreshed = _tree_nodes(bv)
+    assert "high winds" in refreshed.text(1)
+
+
+def test_edit_batch_session_metadata_via_tree(window, qtbot, monkeypatch):
+    _mark_all_shots(window, qtbot)
+
+    bv = window.bank_view
+    bv.refresh()
+    _combination_item, batch_item, *_rest = _tree_nodes(bv)
+    bv.tree.setCurrentItem(batch_item)
+
+    from PySide6 import QtWidgets
+
+    from sound_metric_app.ui.main_window import BatchEditDialog
+
+    # Stand in for the modal: fill the session form and accept it.
+    def fake_exec(self):
+        self.label_edit.setText("Morning string")
+        self.date_edit.setText("2026-07-22")
+        self.wind_edit.setText("4")
+        self.notes_edit.setPlainText("clear, light crosswind")
+        self._on_accept()
+        return QtWidgets.QDialog.Accepted
+
+    monkeypatch.setattr(BatchEditDialog, "exec", fake_exec)
     bv._edit_selected()
 
-    assert window.controller.batches()[0].sku == "SUP-FIXED"
-    assert _first_batch_item(bv).text(0).endswith("SKU SUP-FIXED")
+    batch = window.controller.batches()[0]
+    assert batch.label == "Morning string" and batch.session_date == "2026-07-22"
+    assert batch.wind_speed == 4.0 and batch.notes == "clear, light crosswind"
+    _combination_item, batch_item, *_rest = _tree_nodes(bv)
+    assert "Morning string 2026-07-22" in batch_item.text(0)
 
 
-def test_double_click_edits_shots_not_parent_rows(window, qtbot, monkeypatch):
-    # Double-click is Qt's expand/collapse gesture on batch/group rows; it must
-    # not also route through _edit_selected there (only leaf shot rows edit).
-    window.ingest_view._ingest()
-    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)
-    first_id = int(window.ingest_view.table.item(0, 0).text())
-    window.open_marking_for(first_id)
-    mv = window.marking_view
-    qtbot.waitUntil(lambda: mv.se_combo.isEnabled() and mv.se_combo.count() >= 3, timeout=5000)
-    mv.ammo_combo.setCurrentText("M855")
-    mv._mark()
-    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 1, timeout=5000)
+def test_batch_edit_dialog_rejects_a_malformed_date(window, monkeypatch):
+    from PySide6 import QtWidgets
 
-    bv = window.batch_view
+    from sound_metric_app.models import Batch
+    from sound_metric_app.ui.main_window import BatchEditDialog
+
+    warned: list = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+
+    dialog = BatchEditDialog(Batch(id=1, combination_id=1), combination_label="X", parent=window)
+    dialog.date_edit.setText("22-07-2026")
+    dialog._on_accept()
+
+    assert warned and "YYYY-MM-DD" in warned[0]
+    assert dialog.result() != QtWidgets.QDialog.Accepted
+
+
+def test_double_click_edits_leaf_and_batch_rows_only(window, qtbot, monkeypatch):
+    # Only editable rows (batch, shot) route through _edit_selected; a pure
+    # container never pops the modal.
+    _mark_all_shots(window, qtbot)
+
+    bv = window.bank_view
     bv.refresh()
     edited: list = []
     monkeypatch.setattr(bv, "_edit_selected", lambda: edited.append(True))
 
-    batch_item = _first_batch_item(bv)
-    group_item = batch_item.child(0)
-    shot_item = group_item.child(0)
+    # A batch row is editable *and* has children, so Qt's expand/collapse must
+    # not ride along on the same double-click that opens the edit modal.
+    assert not bv.tree.expandsOnDoubleClick()
 
+    combination_item, batch_item, cluster_item, shot_item = _tree_nodes(bv)
+
+    bv._on_item_double_clicked(combination_item, 0)
+    bv._on_item_double_clicked(cluster_item, 0)
+    qtbot.wait(50)
+    assert edited == []  # pure containers: no edit modal
+
+    # Deferred out of the double-click emission (saving an edit refreshes the
+    # tree, which would free the row Qt is still emitting for), so wait for it.
     bv._on_item_double_clicked(batch_item, 0)
-    bv._on_item_double_clicked(group_item, 0)
-    assert edited == []  # parent rows: no edit modal
-
     bv._on_item_double_clicked(shot_item, 0)
-    assert edited == [True]  # leaf shot row: edits
+    qtbot.waitUntil(lambda: edited == [True, True], timeout=5000)
 
 
 def test_edit_shot_re_marks_with_corrected_ammo(window, qtbot):
@@ -551,17 +749,15 @@ def test_edit_shot_re_marks_with_corrected_ammo(window, qtbot):
     first_id = int(window.ingest_view.table.item(0, 0).text())
     window.open_marking_for(first_id)
     mv = window.marking_view
-    qtbot.waitUntil(lambda: mv.se_combo.isEnabled() and mv.se_combo.count() >= 3, timeout=5000)
+    qtbot.waitUntil(lambda: mv.ml_combo.isEnabled() and mv.ml_combo.count() >= 3, timeout=5000)
     mv.ammo_combo.setCurrentText("WRONG")
     mv._mark()
     qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 1, timeout=5000)
 
-    from PySide6 import QtCore
-
-    bv = window.batch_view
+    bv = window.bank_view
     bv.refresh()
-    shot_item = _first_batch_item(bv).child(0).child(0)
-    _, shot, group, batch = shot_item.data(0, QtCore.Qt.UserRole)
+    _combination_item, _batch_item, cluster_item, shot_item = _tree_nodes(bv)
+    _kind, shot, cluster, batch, combo = shot_item.data(0, QtCore.Qt.UserRole)
 
     # Open the pre-filled dialog directly (bypassing the async channel load),
     # correct the ammo, and accept it as the user would.
@@ -569,14 +765,19 @@ def test_edit_shot_re_marks_with_corrected_ammo(window, qtbot):
 
     dialog = ShotEditDialog(
         shot,
-        sku=batch.sku,
-        platform=group.test_platform,
-        ammo=group.ammo,
+        sku=combo.sku,
+        platform=combo.platform,
+        ammo=combo.ammo,
+        cluster_index=cluster.cluster_index,
         channel_names=["AI 1", "AI 2"],
         parent=bv,
     )
-    assert dialog.ammo_combo.currentText() == "WRONG"  # pre-filled from the group
-    assert dialog.se_combo.currentText() == "AI 1"  # pre-filled from the shot tags
+    # Pre-filled from where the shot actually landed, not its filename keys.
+    assert dialog.ammo_combo.currentText() == "WRONG"
+    assert dialog.ml_combo.currentText() == "AI 1"  # from the auto-tagged shot
+    assert dialog.se_combo.currentText() == "AI 2"
+    assert dialog.cluster_edit.text() == "1"
+    assert dialog.role_label.text() == "FRP"
     dialog.ammo_combo.setCurrentText("M855")
     dialog._on_accept()
 
@@ -584,18 +785,111 @@ def test_edit_shot_re_marks_with_corrected_ammo(window, qtbot):
         lambda: window.controller.mark(shot.id, **dialog.values()),
         lambda _r: window.notify_changed(),
     )
-    # The shot moves to the corrected "M855" group; the emptied "WRONG" group is
-    # dropped so the batch tree does not keep an empty group behind.
+    # The shot moves to the corrected combination; the emptied "WRONG" branch is
+    # swept so the tree does not keep an empty combination behind.
     qtbot.waitUntil(
-        lambda: {g.ammo for g in window.controller.groups_for_batch(batch.id)} == {"M855"},
+        lambda: {c.ammo for c in window.controller.combinations()} == {"M855"},
         timeout=5000,
     )
-    by_ammo = {
-        g.ammo: window.controller.shots_by_group(g.id)
-        for g in window.controller.groups_for_batch(batch.id)
-    }
-    assert "WRONG" not in by_ammo
-    assert [s.id for s in by_ammo["M855"]] == [shot.id]
+    combinations = window.controller.combinations()
+    assert len(combinations) == 1
+    tree = window.controller.data_bank()
+    assert tree[0].batches[0].clusters[0].shots[0].id == shot.id
+
+
+def test_shot_edit_dialog_requires_a_cluster(window, monkeypatch):
+    from PySide6 import QtWidgets
+
+    from sound_metric_app.models import Shot
+    from sound_metric_app.ui.main_window import ShotEditDialog
+
+    warned: list = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+
+    dialog = ShotEditDialog(
+        Shot(source_file="f.dxd", shot_order=1, ml_channel="AI 1"),
+        sku="SUP-1",
+        platform="AR15",
+        ammo="M855",
+        cluster_index=None,
+        channel_names=["AI 1", "AI 2"],
+        parent=window,
+    )
+    dialog._on_accept()
+
+    # Without a cluster there is no string of fire to place the shot in.
+    assert warned and "cluster" in warned[0].lower()
+    assert dialog.result() != QtWidgets.QDialog.Accepted
+
+
+def test_mark_form_rejects_a_below_one_cluster_before_dsp(window, qtbot, monkeypatch):
+    # The Mark tab's Cluster override shares the edit dialog's 1-based
+    # constraint, so an explicit 0 must be caught up front — not deferred to the
+    # service on the worker thread after the capture is read and the DSP has run.
+    from PySide6 import QtWidgets
+
+    window.ingest_view._ingest()
+    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)
+    first_id = int(window.ingest_view.table.item(0, 0).text())
+    window.open_marking_for(first_id)
+    mv = window.marking_view
+    qtbot.waitUntil(lambda: mv.ml_combo.isEnabled() and mv.ml_combo.count() >= 3, timeout=5000)
+
+    warned: list = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    dispatched: list = []
+    monkeypatch.setattr(mv, "_run_async", lambda *a, **k: dispatched.append(a))
+
+    mv.ammo_combo.setCurrentText("M855")
+    mv.cluster_edit.setText("0")
+    mv._mark()
+
+    # Immediate front-end rejection with the same message the edit dialog gives,
+    # and no marking work dispatched.
+    assert warned == ["A cluster of 1 or greater is required."]
+    assert dispatched == []
+
+    # A blank cluster stays valid — it falls back to the filename cluster — so
+    # marking proceeds to the async worker.
+    warned.clear()
+    mv.cluster_edit.clear()
+    mv._mark()
+    assert warned == []
+    assert dispatched
+
+
+def test_shot_edit_dialog_rejects_a_bad_mic_tagging(window, monkeypatch):
+    # The mark form and the edit dialog share one tagging check, so the two
+    # warnings are asserted here rather than duplicated per caller.
+    from PySide6 import QtWidgets
+
+    from sound_metric_app.models import Shot
+    from sound_metric_app.ui.main_window import ShotEditDialog
+
+    warned: list = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: warned.append(a[1]))
+
+    dialog = ShotEditDialog(
+        Shot(source_file="f.dxd", shot_order=1, ml_channel="AI 1"),
+        sku="SUP-1",
+        platform="AR15",
+        ammo="M855",
+        cluster_index=1,
+        channel_names=["AI 1", "AI 2"],
+        parent=window,
+    )
+
+    # Both mics on one channel would attribute one waveform to two positions.
+    dialog.se_combo.setCurrentText("AI 1")
+    dialog._on_accept()
+    assert warned == ["Same channel"]
+
+    # Nothing tagged leaves no channel to compute metrics from.
+    dialog.ml_combo.setCurrentIndex(0)
+    dialog.se_combo.setCurrentIndex(0)
+    dialog._on_accept()
+    assert warned == ["Same channel", "No mic tagged"]
+    assert dialog.result() != QtWidgets.QDialog.Accepted
 
 
 def test_mark_tab_offers_configured_ammo_presets(window):
