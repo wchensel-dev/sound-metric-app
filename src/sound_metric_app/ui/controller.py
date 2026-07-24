@@ -227,6 +227,17 @@ class WorkflowController:
         with self._repo() as repo:
             return repo.all_combinations()
 
+    def skus(self) -> list[str]:
+        """The distinct SKUs across all combinations, sorted — for the filter dropdowns.
+
+        A SKU spans many combinations (its platforms and ammo types), so the raw
+        combination list repeats each SKU; this dedupes to the values a
+        one-SKU-at-a-time filter offers. The combinations table is small, so
+        deriving this from :meth:`combinations` avoids a dedicated query.
+        """
+        with self._repo() as repo:
+            return sorted({c.sku for c in repo.all_combinations()})
+
     def batches(self) -> list[Batch]:
         with self._repo() as repo:
             return repo.all_batches()
@@ -291,36 +302,70 @@ class WorkflowController:
             repo.delete_empty_batches()
             repo.delete_empty_combinations()
 
-    def data_bank(self) -> list[CombinationNode]:
+    def data_bank(self, sku: str | None = None) -> list[CombinationNode]:
         """The whole Combination -> Batch -> Cluster -> Shot tree, over one connection.
 
         This is the **data bank view**: every cluster and every shot, included or
-        idle. Nothing is filtered out — a shot left out of an average is still
+        idle. No *shot* is filtered out — a shot left out of an average is still
         part of the complete archive. Loading all four levels here opens one repo
         instead of a connection per node. This is a pure read; call
         :meth:`sweep_empty` first to prune empty containers.
+
+        Passing ``sku`` narrows the tree to combinations under that one SKU,
+        skipping the others *before* their nodes are built so a large bank never
+        materializes rows the caller won't show. ``None`` returns everything.
         """
         with self._repo() as repo:
-            inclusion = InclusionService(repo)
-            return [
-                CombinationNode(
-                    combination=combination,
-                    batches=[
-                        BatchNode(
-                            batch=batch,
-                            clusters=[
-                                ClusterNode(
-                                    cluster=cluster, shots=repo.shots_by_cluster(cluster.id)
-                                )
-                                for cluster in repo.clusters_for_batch(batch.id)
-                            ],
-                            status=inclusion.status(batch.id),
-                        )
-                        for batch in repo.batches_for_combination(combination.id)
-                    ],
-                )
-                for combination in repo.all_combinations()
-            ]
+            return self._build_data_bank(repo, repo.all_combinations(), sku)
+
+    def data_bank_view(self, sku: str | None = None) -> tuple[list[str], list[CombinationNode]]:
+        """The SKU-filter options and the (filtered) data-bank tree from one read.
+
+        The Batches view needs both on every refresh: the full SKU list for the
+        dropdown and the node tree narrowed to the active SKU. Both derive from
+        ``all_combinations()``, so reading it once here feeds both over a single
+        connection instead of calling :meth:`skus` and :meth:`data_bank` back to
+        back (two scans, two connections). A ``sku`` that no longer exists — its
+        last combination was swept — coerces to the full tree, matching the
+        dropdown's own fallback to "All SKUs" so tree and filter stay in step.
+        """
+        with self._repo() as repo:
+            combinations = repo.all_combinations()
+            skus = sorted({c.sku for c in combinations})
+            effective = sku if sku in skus else None
+            return skus, self._build_data_bank(repo, combinations, effective)
+
+    def _build_data_bank(
+        self,
+        repo: WorkflowRepository,
+        combinations: list[Combination],
+        sku: str | None,
+    ) -> list[CombinationNode]:
+        """Build the four-level node tree from an already-fetched combination list.
+
+        Shared by :meth:`data_bank` and :meth:`data_bank_view` so the caller can
+        reuse a single ``all_combinations()`` read. ``sku`` narrows the tree,
+        skipping non-matching combinations *before* their nodes are built.
+        """
+        inclusion = InclusionService(repo)
+        return [
+            CombinationNode(
+                combination=combination,
+                batches=[
+                    BatchNode(
+                        batch=batch,
+                        clusters=[
+                            ClusterNode(cluster=cluster, shots=repo.shots_by_cluster(cluster.id))
+                            for cluster in repo.clusters_for_batch(batch.id)
+                        ],
+                        status=inclusion.status(batch.id),
+                    )
+                    for batch in repo.batches_for_combination(combination.id)
+                ],
+            )
+            for combination in combinations
+            if sku is None or combination.sku == sku
+        ]
 
     # ---- inclusion ------------------------------------------------------ #
 

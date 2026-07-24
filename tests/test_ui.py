@@ -129,6 +129,141 @@ def test_window_builds_with_four_tabs(window):
     ]
 
 
+def _seed_marked_shot(window, tmp_path, name):
+    """Ingest + mark one capture through the controller (real DSP over sine frames).
+
+    A fully marked shot gives the SKU-filter tests a real combination/batch/
+    cluster/shot path to filter on.
+    """
+    folder = tmp_path / "seed"
+    folder.mkdir(exist_ok=True)
+    (folder / name).write_bytes(b"")
+    window.controller.ingest(folder, validate=False)
+    shot = next(s for s in window.controller.unmarked_shots() if s.source_file.endswith(name))
+    window.controller.mark(shot.id, ammo="M855")
+
+
+def test_data_bank_sku_filter_narrows_the_tree(window, tmp_path):
+    _seed_marked_shot(window, tmp_path, "SUP-1_AR15_01_0000.dxd")
+    _seed_marked_shot(window, tmp_path, "SUP-2_AR15_01_0000.dxd")
+
+    bv = window.bank_view
+    bv.refresh()
+
+    # The dropdown is the "All SKUs" sentinel (data None) plus one row per SKU.
+    labels = [bv.sku_combo.itemText(i) for i in range(bv.sku_combo.count())]
+    assert labels == ["All SKUs", "SUP-1", "SUP-2"]
+    assert bv.sku_combo.itemData(0) is None
+
+    # All SKUs: the whole archive, both combinations at the top level.
+    assert bv.tree.topLevelItemCount() == 2
+
+    # Pick SUP-1: only its combination is built into the tree.
+    bv.sku_combo.setCurrentIndex(labels.index("SUP-1"))
+    assert bv.tree.topLevelItemCount() == 1
+    assert bv.tree.topLevelItem(0).text(0).startswith("SUP-1")
+
+
+def test_repopulate_sku_filter_preserves_selection_and_falls_back(qtbot):
+    # The two branches _repopulate_sku_filter turns on, tested on the bare combo:
+    # a still-present selection survives a rebuild; a swept-away one falls back to
+    # the "All SKUs" sentinel rather than silently landing on the wrong SKU.
+    from PySide6 import QtWidgets
+
+    from sound_metric_app.ui.main_window import _repopulate_sku_filter
+
+    combo = QtWidgets.QComboBox()
+    qtbot.addWidget(combo)
+
+    _repopulate_sku_filter(combo, ["SUP-1", "SUP-2"])
+    assert [combo.itemText(i) for i in range(combo.count())] == ["All SKUs", "SUP-1", "SUP-2"]
+    assert combo.currentData() is None  # defaults to the no-filter sentinel
+
+    # Select SUP-2, then rebuild with it still present: the selection is kept.
+    combo.setCurrentIndex(2)
+    assert combo.currentData() == "SUP-2"
+    _repopulate_sku_filter(combo, ["SUP-1", "SUP-2", "SUP-3"])
+    assert combo.currentData() == "SUP-2"
+
+    # Rebuild with SUP-2 gone (its last combination was swept): fall back to All SKUs.
+    _repopulate_sku_filter(combo, ["SUP-1", "SUP-3"])
+    assert combo.currentIndex() == 0
+    assert combo.currentData() is None
+
+
+def test_repopulate_sku_filter_blocks_signals_over_the_rebuild(qtbot):
+    # The rebuild must not fire currentIndexChanged — the caller re-reads the
+    # selection and refreshes explicitly, so a signal here would double-refresh
+    # (or refresh mid-rebuild against a half-filled combo).
+    from PySide6 import QtWidgets
+
+    from sound_metric_app.ui.main_window import _repopulate_sku_filter
+
+    combo = QtWidgets.QComboBox()
+    qtbot.addWidget(combo)
+    _repopulate_sku_filter(combo, ["SUP-1", "SUP-2"])
+    combo.setCurrentIndex(2)
+
+    fired: list = []
+    combo.currentIndexChanged.connect(lambda _i: fired.append(True))
+    # SUP-2 vanishes, so the current index genuinely changes (2 -> 0) during the
+    # rebuild; without the signal block that transition would emit.
+    _repopulate_sku_filter(combo, ["SUP-1"])
+    assert fired == []
+
+
+def test_data_bank_filter_change_does_not_prune_empty_containers(window, tmp_path):
+    # Changing the SKU filter is pure navigation: refresh() must not run the
+    # destructive sweep, so a transiently-empty cluster survives a filter change.
+    _seed_marked_shot(window, tmp_path, "SUP-1_AR15_01_0000.dxd")
+    bv = window.bank_view
+    with window.controller._repo() as repo:
+        batch = window.controller.batches()[0]
+        stray = repo.upsert_cluster(batch.id, 9)
+
+    bv.refresh()
+    labels = [bv.sku_combo.itemText(i) for i in range(bv.sku_combo.count())]
+    bv.sku_combo.setCurrentIndex(labels.index("SUP-1"))  # fires refresh via the combo
+
+    tree = window.controller.data_bank()
+    cluster_ids = {c.cluster.id for n in tree for b in n.batches for c in b.clusters}
+    assert stray in cluster_ids
+
+
+def test_notify_changed_prunes_empty_containers(window, tmp_path):
+    # A mutation is where orphans are created, so notify_changed() (the post-mutation
+    # funnel) is where the sweep runs and the stray empty cluster is dropped.
+    _seed_marked_shot(window, tmp_path, "SUP-1_AR15_01_0000.dxd")
+    with window.controller._repo() as repo:
+        batch = window.controller.batches()[0]
+        stray = repo.upsert_cluster(batch.id, 9)
+
+    window.notify_changed()
+
+    tree = window.controller.data_bank()
+    cluster_ids = {c.cluster.id for n in tree for b in n.batches for c in b.clusters}
+    assert stray not in cluster_ids
+
+
+def test_batch_average_sku_filter_narrows_the_batch_list(window, tmp_path):
+    _seed_marked_shot(window, tmp_path, "SUP-1_AR15_01_0000.dxd")
+    _seed_marked_shot(window, tmp_path, "SUP-2_AR15_01_0000.dxd")
+
+    rv = window.report_view
+    rv.refresh()
+
+    labels = [rv.sku_combo.itemText(i) for i in range(rv.sku_combo.count())]
+    assert labels == ["All SKUs", "SUP-1", "SUP-2"]
+
+    # All SKUs: both sessions listed in the batch picker.
+    assert rv.batch_combo.count() == 2
+
+    # Filter to SUP-2: only its session survives, and it is the one shown.
+    rv.sku_combo.setCurrentIndex(labels.index("SUP-2"))
+    assert rv.batch_combo.count() == 1
+    assert "SUP-2" in rv.batch_combo.itemText(0)
+
+
 def test_selecting_shot_with_null_keys_does_not_crash_mark_tab(window):
     # A shot whose filename yielded no placement keys is stored with
     # suppressor_sku/test_platform/cluster_index = None. Selecting it must not

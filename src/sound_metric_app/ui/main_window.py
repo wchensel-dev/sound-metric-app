@@ -46,6 +46,30 @@ _LOADING_LABEL = "loading…"
 #: Shown where a mic position has no channel tagged / a value is missing.
 _EMPTY = "—"
 
+#: Sentinel row in a SKU-filter dropdown that clears the filter (data ``None``).
+_ALL_SKUS_LABEL = "All SKUs"
+
+
+def _repopulate_sku_filter(combo: QtWidgets.QComboBox, skus: list[str]) -> None:
+    """Refill a SKU-filter dropdown, preserving the current selection.
+
+    Row 0 is the ``All SKUs`` sentinel (data ``None``, meaning "no filter"); each
+    remaining row carries a SKU string as both its label and data. Signals are
+    blocked over the rebuild so it does not fire the combo's
+    ``currentIndexChanged`` — the caller re-reads the selection and refreshes
+    explicitly. A previously selected SKU that no longer exists (its last
+    combination was swept) falls back to ``All SKUs``.
+    """
+    current = combo.currentData()
+    combo.blockSignals(True)
+    combo.clear()
+    combo.addItem(_ALL_SKUS_LABEL, None)
+    for sku in skus:
+        combo.addItem(sku, sku)
+    index = combo.findData(current)
+    combo.setCurrentIndex(index if index >= 0 else 0)
+    combo.blockSignals(False)
+
 
 def _style_grid_tree(tree: QtWidgets.QTreeWidget) -> None:
     """Give a ``QTreeWidget`` visible column/row grid lines.
@@ -113,6 +137,22 @@ class _View(QtWidgets.QWidget):
 
     def refresh(self) -> None:  # overridden by views that show live data
         """Reload this view's data from the controller."""
+
+    def _add_sku_filter(self, row: QtWidgets.QHBoxLayout) -> QtWidgets.QComboBox:
+        """Build the shared SKU-filter dropdown into ``row`` and return it.
+
+        Both archive views (data bank, batch average) front their tree with the
+        same filter: a ``SKU:`` label and a combo whose ``currentIndexChanged``
+        re-runs this view's ``refresh``. The rows are (re)filled at refresh time
+        by :func:`_repopulate_sku_filter`, and the caller reads the choice back
+        with ``currentData()``. Kept here so the wiring lives in one place and
+        the two views can't drift.
+        """
+        combo = QtWidgets.QComboBox()
+        combo.currentIndexChanged.connect(self.refresh)
+        row.addWidget(QtWidgets.QLabel("SKU:"))
+        row.addWidget(combo)
+        return combo
 
     def _defer(self, fn) -> None:
         """Run ``fn`` from the event loop once the current signal has unwound.
@@ -807,6 +847,14 @@ class DataBankView(_View):
         self._loading = False
         layout = QtWidgets.QVBoxLayout(self)
 
+        # SKU filter: work one SKU at a time so a large bank shows only the
+        # combinations under it. Changing it re-runs refresh(), which rebuilds
+        # both the dropdown and the filtered tree.
+        filter_row = QtWidgets.QHBoxLayout()
+        self.sku_combo = self._add_sku_filter(filter_row)
+        filter_row.addStretch(1)
+        layout.addLayout(filter_row)
+
         self.tree = QtWidgets.QTreeWidget()
         self.tree.setHeaderLabels(self._COLUMNS)
         self.tree.itemSelectionChanged.connect(self._update_actions_enabled)
@@ -847,13 +895,24 @@ class DataBankView(_View):
     # ---- render ---------------------------------------------------------- #
 
     def refresh(self) -> None:
-        # Prune empty clusters/batches/combinations before rendering; data_bank()
-        # itself is a pure read, so the sweep is an explicit step on this path.
-        self.controller.sweep_empty()
+        # A pure read/render: rebuild the filter and tree from data_bank() without
+        # touching the archive, so this stays safe on navigation (tab and SKU-filter
+        # changes both land here). Pruning empty clusters/batches/combinations is a
+        # destructive step, so it lives in notify_changed() — run after a mutation,
+        # not on every refresh.
         self._loading = True
         try:
+            # One read feeds both the filter and the tree: data_bank_view() returns
+            # the full SKU list plus the tree already narrowed to the active SKU,
+            # off a single all_combinations() scan. Read the current selection first,
+            # then repopulate — a swept SKU may have vanished, and the helper (which
+            # blocks the combo's own signal so the rebuild doesn't re-enter refresh)
+            # falls back to "All SKUs" for it, matching the view's full-tree fallback.
+            sku = self.sku_combo.currentData()
+            skus, nodes = self.controller.data_bank_view(sku=sku)
+            _repopulate_sku_filter(self.sku_combo, skus)
             self.tree.clear()
-            for node in self.controller.data_bank():
+            for node in nodes:
                 self.tree.addTopLevelItem(self._combination_item(node))
         finally:
             self._loading = False
@@ -1525,6 +1584,10 @@ class BatchAverageView(_View):
         layout = QtWidgets.QVBoxLayout(self)
 
         picker_row = QtWidgets.QHBoxLayout()
+        # SKU filter, left of the batch picker: narrows the batch list to one
+        # SKU's sessions. Changing it re-runs refresh(), which rebuilds the
+        # filtered batch list and reloads the report.
+        self.sku_combo = self._add_sku_filter(picker_row)
         picker_row.addWidget(QtWidgets.QLabel("Batch:"))
         self.batch_combo = QtWidgets.QComboBox()
         self.batch_combo.currentIndexChanged.connect(self._load_report)
@@ -1532,8 +1595,14 @@ class BatchAverageView(_View):
         layout.addLayout(picker_row)
 
         # Progress against the soft 3-FRP / 5-regular targets, so a short or
-        # over-filled batch is visible without reading the per-slot counts.
+        # over-filled batch is visible without reading the per-slot counts. Pin
+        # its vertical size to the text height: otherwise a maximised window
+        # hands the label a share of the extra vertical space, leaving a tall
+        # empty band above the tree instead of feeding that room to the graph.
         self.status_label = QtWidgets.QLabel("")
+        self.status_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed
+        )
         layout.addWidget(self.status_label)
 
         # Left half: the slot tree. Right half: the single-metric graph. A
@@ -1559,6 +1628,12 @@ class BatchAverageView(_View):
         layout.addWidget(split)
 
     def refresh(self) -> None:
+        # Rebuild the SKU filter first, then read its selection to narrow the
+        # batch list below. The helper blocks the combo's own signal, so this
+        # does not re-enter refresh().
+        _repopulate_sku_filter(self.sku_combo, self.controller.skus())
+        sku = self.sku_combo.currentData()
+
         current = self.batch_combo.currentData()
         # Keep signals blocked through setCurrentIndex so currentIndexChanged
         # doesn't fire _load_report; we call it once, explicitly, below.
@@ -1567,6 +1642,10 @@ class BatchAverageView(_View):
         combinations = {c.id: c for c in self.controller.combinations()}
         for batch in self.controller.batches():
             combo = combinations.get(batch.combination_id)
+            # Skip batches outside the selected SKU (None == no filter). A batch
+            # whose combination is missing is only shown when unfiltered.
+            if sku is not None and (combo is None or combo.sku != sku):
+                continue
             state = "closed" if batch.closed else "open"
             label = f"#{batch.id}  {combo.label if combo else '?'}  {batch.title}  [{state}]"
             self.batch_combo.addItem(label, batch.id)
@@ -1795,6 +1874,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def notify_changed(self) -> None:
         """Reload every view after a mutating action (ingest / mark / include / close)."""
+        # A mutation is the only thing that orphans a cluster/batch/combination (a
+        # re-mark or edit can empty the old container), so the destructive sweep is
+        # tied to the mutation here rather than to every refresh() — pure navigation
+        # must never delete rows.
+        self.controller.sweep_empty()
         for view in self._views:
             view.refresh()
 
