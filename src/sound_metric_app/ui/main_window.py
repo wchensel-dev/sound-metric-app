@@ -1579,8 +1579,14 @@ class BatchAverageView(_View):
         layout.addLayout(picker_row)
 
         # Progress against the soft 3-FRP / 5-regular targets, so a short or
-        # over-filled batch is visible without reading the per-slot counts.
+        # over-filled batch is visible without reading the per-slot counts. Pin
+        # its vertical size to the text height: otherwise a maximised window
+        # hands the label a share of the extra vertical space, leaving a tall
+        # empty band above the tree instead of feeding that room to the graph.
         self.status_label = QtWidgets.QLabel("")
+        self.status_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed
+        )
         layout.addWidget(self.status_label)
 
         # Left half: the slot tree. Right half: the single-metric graph. A
