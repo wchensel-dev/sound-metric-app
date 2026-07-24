@@ -159,6 +159,35 @@ def test_data_bank_shows_idle_shots_alongside_included_ones(controller, inbox):
     assert [s.included for s in cluster_node.shots] == [True, False, False]
 
 
+def test_skus_lists_distinct_sorted_values(controller, inbox):
+    # Two SKUs, and SUP-1 appears under two platforms — the list dedupes to the
+    # distinct SKU values, sorted, regardless of how many combinations each spans.
+    _ingest_and_mark_one(controller, inbox, name="SUP-2_AR15_01_001.dxd")
+    _ingest_and_mark_one(controller, inbox, name="SUP-1_AR15_01_001.dxd")
+    _ingest_and_mark_one(controller, inbox, name="SUP-1_MK18_01_001.dxd")
+
+    assert controller.skus() == ["SUP-1", "SUP-2"]
+
+
+def test_skus_is_empty_with_no_combinations(controller):
+    assert controller.skus() == []
+
+
+def test_data_bank_filters_to_one_sku(controller, inbox):
+    _ingest_and_mark_one(controller, inbox, name="SUP-1_AR15_01_001.dxd")
+    _ingest_and_mark_one(controller, inbox, name="SUP-2_AR15_01_001.dxd")
+
+    # Unfiltered: the whole archive, both SKUs.
+    assert {n.combination.sku for n in controller.data_bank()} == {"SUP-1", "SUP-2"}
+
+    # Filtered: only the requested SKU's combinations are built.
+    filtered = controller.data_bank(sku="SUP-1")
+    assert [n.combination.sku for n in filtered] == ["SUP-1"]
+
+    # A SKU with no combinations yields an empty tree, not an error.
+    assert controller.data_bank(sku="SUP-9") == []
+
+
 # --- ingest ----------------------------------------------------------------- #
 
 

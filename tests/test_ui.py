@@ -129,6 +129,60 @@ def test_window_builds_with_four_tabs(window):
     ]
 
 
+def _seed_marked_shot(window, tmp_path, name):
+    """Ingest + mark one capture through the controller (real DSP over sine frames).
+
+    A fully marked shot means its combination/batch/cluster survive the data
+    bank's ``sweep_empty()``, so the SKU-filter tests have real rows to filter.
+    """
+    folder = tmp_path / "seed"
+    folder.mkdir(exist_ok=True)
+    (folder / name).write_bytes(b"")
+    window.controller.ingest(folder, validate=False)
+    shot = next(s for s in window.controller.unmarked_shots() if s.source_file.endswith(name))
+    window.controller.mark(shot.id, ammo="M855")
+
+
+def test_data_bank_sku_filter_narrows_the_tree(window, tmp_path):
+    _seed_marked_shot(window, tmp_path, "SUP-1_AR15_01_0000.dxd")
+    _seed_marked_shot(window, tmp_path, "SUP-2_AR15_01_0000.dxd")
+
+    bv = window.bank_view
+    bv.refresh()
+
+    # The dropdown is the "All SKUs" sentinel (data None) plus one row per SKU.
+    labels = [bv.sku_combo.itemText(i) for i in range(bv.sku_combo.count())]
+    assert labels == ["All SKUs", "SUP-1", "SUP-2"]
+    assert bv.sku_combo.itemData(0) is None
+
+    # All SKUs: the whole archive, both combinations at the top level.
+    assert bv.tree.topLevelItemCount() == 2
+
+    # Pick SUP-1: only its combination is built into the tree.
+    bv.sku_combo.setCurrentIndex(labels.index("SUP-1"))
+    assert bv.tree.topLevelItemCount() == 1
+    assert bv.tree.topLevelItem(0).text(0).startswith("SUP-1")
+
+
+def test_batch_average_sku_filter_narrows_the_batch_list(window, tmp_path):
+    _seed_marked_shot(window, tmp_path, "SUP-1_AR15_01_0000.dxd")
+    _seed_marked_shot(window, tmp_path, "SUP-2_AR15_01_0000.dxd")
+
+    rv = window.report_view
+    rv.refresh()
+
+    labels = [rv.sku_combo.itemText(i) for i in range(rv.sku_combo.count())]
+    assert labels == ["All SKUs", "SUP-1", "SUP-2"]
+
+    # All SKUs: both sessions listed in the batch picker.
+    assert rv.batch_combo.count() == 2
+
+    # Filter to SUP-2: only its session survives, and it is the one shown.
+    rv.sku_combo.setCurrentIndex(labels.index("SUP-2"))
+    assert rv.batch_combo.count() == 1
+    assert "SUP-2" in rv.batch_combo.itemText(0)
+
+
 def test_selecting_shot_with_null_keys_does_not_crash_mark_tab(window):
     # A shot whose filename yielded no placement keys is stored with
     # suppressor_sku/test_platform/cluster_index = None. Selecting it must not

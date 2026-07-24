@@ -227,6 +227,17 @@ class WorkflowController:
         with self._repo() as repo:
             return repo.all_combinations()
 
+    def skus(self) -> list[str]:
+        """The distinct SKUs across all combinations, sorted — for the filter dropdowns.
+
+        A SKU spans many combinations (its platforms and ammo types), so the raw
+        combination list repeats each SKU; this dedupes to the values a
+        one-SKU-at-a-time filter offers. The combinations table is small, so
+        deriving this from :meth:`combinations` avoids a dedicated query.
+        """
+        with self._repo() as repo:
+            return sorted({c.sku for c in repo.all_combinations()})
+
     def batches(self) -> list[Batch]:
         with self._repo() as repo:
             return repo.all_batches()
@@ -291,14 +302,18 @@ class WorkflowController:
             repo.delete_empty_batches()
             repo.delete_empty_combinations()
 
-    def data_bank(self) -> list[CombinationNode]:
+    def data_bank(self, sku: str | None = None) -> list[CombinationNode]:
         """The whole Combination -> Batch -> Cluster -> Shot tree, over one connection.
 
         This is the **data bank view**: every cluster and every shot, included or
-        idle. Nothing is filtered out — a shot left out of an average is still
+        idle. No *shot* is filtered out — a shot left out of an average is still
         part of the complete archive. Loading all four levels here opens one repo
         instead of a connection per node. This is a pure read; call
         :meth:`sweep_empty` first to prune empty containers.
+
+        Passing ``sku`` narrows the tree to combinations under that one SKU,
+        skipping the others *before* their nodes are built so a large bank never
+        materializes rows the caller won't show. ``None`` returns everything.
         """
         with self._repo() as repo:
             inclusion = InclusionService(repo)
@@ -320,6 +335,7 @@ class WorkflowController:
                     ],
                 )
                 for combination in repo.all_combinations()
+                if sku is None or combination.sku == sku
             ]
 
     # ---- inclusion ------------------------------------------------------ #

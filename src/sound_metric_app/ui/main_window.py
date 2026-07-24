@@ -46,6 +46,30 @@ _LOADING_LABEL = "loading…"
 #: Shown where a mic position has no channel tagged / a value is missing.
 _EMPTY = "—"
 
+#: Sentinel row in a SKU-filter dropdown that clears the filter (data ``None``).
+_ALL_SKUS_LABEL = "All SKUs"
+
+
+def _repopulate_sku_filter(combo: QtWidgets.QComboBox, skus: list[str]) -> None:
+    """Refill a SKU-filter dropdown, preserving the current selection.
+
+    Row 0 is the ``All SKUs`` sentinel (data ``None``, meaning "no filter"); each
+    remaining row carries a SKU string as both its label and data. Signals are
+    blocked over the rebuild so it does not fire the combo's
+    ``currentIndexChanged`` — the caller re-reads the selection and refreshes
+    explicitly. A previously selected SKU that no longer exists (its last
+    combination was swept) falls back to ``All SKUs``.
+    """
+    current = combo.currentData()
+    combo.blockSignals(True)
+    combo.clear()
+    combo.addItem(_ALL_SKUS_LABEL, None)
+    for sku in skus:
+        combo.addItem(sku, sku)
+    index = combo.findData(current)
+    combo.setCurrentIndex(index if index >= 0 else 0)
+    combo.blockSignals(False)
+
 
 def _style_grid_tree(tree: QtWidgets.QTreeWidget) -> None:
     """Give a ``QTreeWidget`` visible column/row grid lines.
@@ -807,6 +831,17 @@ class DataBankView(_View):
         self._loading = False
         layout = QtWidgets.QVBoxLayout(self)
 
+        # SKU filter: work one SKU at a time so a large bank shows only the
+        # combinations under it. Changing it re-runs refresh(), which rebuilds
+        # both the dropdown and the filtered tree.
+        filter_row = QtWidgets.QHBoxLayout()
+        filter_row.addWidget(QtWidgets.QLabel("SKU:"))
+        self.sku_combo = QtWidgets.QComboBox()
+        self.sku_combo.currentIndexChanged.connect(self.refresh)
+        filter_row.addWidget(self.sku_combo)
+        filter_row.addStretch(1)
+        layout.addLayout(filter_row)
+
         self.tree = QtWidgets.QTreeWidget()
         self.tree.setHeaderLabels(self._COLUMNS)
         self.tree.itemSelectionChanged.connect(self._update_actions_enabled)
@@ -852,8 +887,13 @@ class DataBankView(_View):
         self.controller.sweep_empty()
         self._loading = True
         try:
+            # Repopulate the filter (a swept SKU may have vanished) before reading
+            # the selection back; the helper blocks the combo's own signal so the
+            # rebuild doesn't re-enter refresh().
+            _repopulate_sku_filter(self.sku_combo, self.controller.skus())
+            sku = self.sku_combo.currentData()
             self.tree.clear()
-            for node in self.controller.data_bank():
+            for node in self.controller.data_bank(sku=sku):
                 self.tree.addTopLevelItem(self._combination_item(node))
         finally:
             self._loading = False
@@ -1525,6 +1565,13 @@ class BatchAverageView(_View):
         layout = QtWidgets.QVBoxLayout(self)
 
         picker_row = QtWidgets.QHBoxLayout()
+        # SKU filter, left of the batch picker: narrows the batch list to one
+        # SKU's sessions. Changing it re-runs refresh(), which rebuilds the
+        # filtered batch list and reloads the report.
+        picker_row.addWidget(QtWidgets.QLabel("SKU:"))
+        self.sku_combo = QtWidgets.QComboBox()
+        self.sku_combo.currentIndexChanged.connect(self.refresh)
+        picker_row.addWidget(self.sku_combo)
         picker_row.addWidget(QtWidgets.QLabel("Batch:"))
         self.batch_combo = QtWidgets.QComboBox()
         self.batch_combo.currentIndexChanged.connect(self._load_report)
@@ -1559,6 +1606,12 @@ class BatchAverageView(_View):
         layout.addWidget(split)
 
     def refresh(self) -> None:
+        # Rebuild the SKU filter first, then read its selection to narrow the
+        # batch list below. The helper blocks the combo's own signal, so this
+        # does not re-enter refresh().
+        _repopulate_sku_filter(self.sku_combo, self.controller.skus())
+        sku = self.sku_combo.currentData()
+
         current = self.batch_combo.currentData()
         # Keep signals blocked through setCurrentIndex so currentIndexChanged
         # doesn't fire _load_report; we call it once, explicitly, below.
@@ -1567,6 +1620,10 @@ class BatchAverageView(_View):
         combinations = {c.id: c for c in self.controller.combinations()}
         for batch in self.controller.batches():
             combo = combinations.get(batch.combination_id)
+            # Skip batches outside the selected SKU (None == no filter). A batch
+            # whose combination is missing is only shown when unfiltered.
+            if sku is not None and (combo is None or combo.sku != sku):
+                continue
             state = "closed" if batch.closed else "open"
             label = f"#{batch.id}  {combo.label if combo else '?'}  {batch.title}  [{state}]"
             self.batch_combo.addItem(label, batch.id)
