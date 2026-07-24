@@ -164,6 +164,54 @@ def test_data_bank_sku_filter_narrows_the_tree(window, tmp_path):
     assert bv.tree.topLevelItem(0).text(0).startswith("SUP-1")
 
 
+def test_repopulate_sku_filter_preserves_selection_and_falls_back(qtbot):
+    # The two branches _repopulate_sku_filter turns on, tested on the bare combo:
+    # a still-present selection survives a rebuild; a swept-away one falls back to
+    # the "All SKUs" sentinel rather than silently landing on the wrong SKU.
+    from PySide6 import QtWidgets
+
+    from sound_metric_app.ui.main_window import _repopulate_sku_filter
+
+    combo = QtWidgets.QComboBox()
+    qtbot.addWidget(combo)
+
+    _repopulate_sku_filter(combo, ["SUP-1", "SUP-2"])
+    assert [combo.itemText(i) for i in range(combo.count())] == ["All SKUs", "SUP-1", "SUP-2"]
+    assert combo.currentData() is None  # defaults to the no-filter sentinel
+
+    # Select SUP-2, then rebuild with it still present: the selection is kept.
+    combo.setCurrentIndex(2)
+    assert combo.currentData() == "SUP-2"
+    _repopulate_sku_filter(combo, ["SUP-1", "SUP-2", "SUP-3"])
+    assert combo.currentData() == "SUP-2"
+
+    # Rebuild with SUP-2 gone (its last combination was swept): fall back to All SKUs.
+    _repopulate_sku_filter(combo, ["SUP-1", "SUP-3"])
+    assert combo.currentIndex() == 0
+    assert combo.currentData() is None
+
+
+def test_repopulate_sku_filter_blocks_signals_over_the_rebuild(qtbot):
+    # The rebuild must not fire currentIndexChanged — the caller re-reads the
+    # selection and refreshes explicitly, so a signal here would double-refresh
+    # (or refresh mid-rebuild against a half-filled combo).
+    from PySide6 import QtWidgets
+
+    from sound_metric_app.ui.main_window import _repopulate_sku_filter
+
+    combo = QtWidgets.QComboBox()
+    qtbot.addWidget(combo)
+    _repopulate_sku_filter(combo, ["SUP-1", "SUP-2"])
+    combo.setCurrentIndex(2)
+
+    fired: list = []
+    combo.currentIndexChanged.connect(lambda _i: fired.append(True))
+    # SUP-2 vanishes, so the current index genuinely changes (2 -> 0) during the
+    # rebuild; without the signal block that transition would emit.
+    _repopulate_sku_filter(combo, ["SUP-1"])
+    assert fired == []
+
+
 def test_data_bank_filter_change_does_not_prune_empty_containers(window, tmp_path):
     # Changing the SKU filter is pure navigation: refresh() must not run the
     # destructive sweep, so a transiently-empty cluster survives a filter change.
