@@ -188,6 +188,28 @@ def test_data_bank_filters_to_one_sku(controller, inbox):
     assert controller.data_bank(sku="SUP-9") == []
 
 
+def test_data_bank_view_returns_skus_and_filtered_tree_from_one_read(controller, inbox):
+    _ingest_and_mark_one(controller, inbox, name="SUP-1_AR15_01_001.dxd")
+    _ingest_and_mark_one(controller, inbox, name="SUP-2_AR15_01_001.dxd")
+
+    # Unfiltered: the full SKU list for the dropdown plus the whole tree.
+    skus, nodes = controller.data_bank_view()
+    assert skus == ["SUP-1", "SUP-2"]
+    assert {n.combination.sku for n in nodes} == {"SUP-1", "SUP-2"}
+
+    # Filtered: the SKU list stays complete (so the dropdown still offers every
+    # SKU) while the tree narrows to the requested one.
+    skus, nodes = controller.data_bank_view(sku="SUP-1")
+    assert skus == ["SUP-1", "SUP-2"]
+    assert [n.combination.sku for n in nodes] == ["SUP-1"]
+
+    # A SKU that no longer exists coerces to the full tree, matching the
+    # dropdown's fallback to "All SKUs" rather than showing an empty view.
+    skus, nodes = controller.data_bank_view(sku="SUP-9")
+    assert skus == ["SUP-1", "SUP-2"]
+    assert {n.combination.sku for n in nodes} == {"SUP-1", "SUP-2"}
+
+
 # --- ingest ----------------------------------------------------------------- #
 
 

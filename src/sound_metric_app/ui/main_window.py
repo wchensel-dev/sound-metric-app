@@ -889,13 +889,17 @@ class DataBankView(_View):
         # not on every refresh.
         self._loading = True
         try:
-            # Repopulate the filter (a swept SKU may have vanished) before reading
-            # the selection back; the helper blocks the combo's own signal so the
-            # rebuild doesn't re-enter refresh().
-            _repopulate_sku_filter(self.sku_combo, self.controller.skus())
+            # One read feeds both the filter and the tree: data_bank_view() returns
+            # the full SKU list plus the tree already narrowed to the active SKU,
+            # off a single all_combinations() scan. Read the current selection first,
+            # then repopulate — a swept SKU may have vanished, and the helper (which
+            # blocks the combo's own signal so the rebuild doesn't re-enter refresh)
+            # falls back to "All SKUs" for it, matching the view's full-tree fallback.
             sku = self.sku_combo.currentData()
+            skus, nodes = self.controller.data_bank_view(sku=sku)
+            _repopulate_sku_filter(self.sku_combo, skus)
             self.tree.clear()
-            for node in self.controller.data_bank(sku=sku):
+            for node in nodes:
                 self.tree.addTopLevelItem(self._combination_item(node))
         finally:
             self._loading = False
