@@ -138,6 +138,22 @@ class _View(QtWidgets.QWidget):
     def refresh(self) -> None:  # overridden by views that show live data
         """Reload this view's data from the controller."""
 
+    def _add_sku_filter(self, row: QtWidgets.QHBoxLayout) -> QtWidgets.QComboBox:
+        """Build the shared SKU-filter dropdown into ``row`` and return it.
+
+        Both archive views (data bank, batch average) front their tree with the
+        same filter: a ``SKU:`` label and a combo whose ``currentIndexChanged``
+        re-runs this view's ``refresh``. The rows are (re)filled at refresh time
+        by :func:`_repopulate_sku_filter`, and the caller reads the choice back
+        with ``currentData()``. Kept here so the wiring lives in one place and
+        the two views can't drift.
+        """
+        combo = QtWidgets.QComboBox()
+        combo.currentIndexChanged.connect(self.refresh)
+        row.addWidget(QtWidgets.QLabel("SKU:"))
+        row.addWidget(combo)
+        return combo
+
     def _defer(self, fn) -> None:
         """Run ``fn`` from the event loop once the current signal has unwound.
 
@@ -835,10 +851,7 @@ class DataBankView(_View):
         # combinations under it. Changing it re-runs refresh(), which rebuilds
         # both the dropdown and the filtered tree.
         filter_row = QtWidgets.QHBoxLayout()
-        filter_row.addWidget(QtWidgets.QLabel("SKU:"))
-        self.sku_combo = QtWidgets.QComboBox()
-        self.sku_combo.currentIndexChanged.connect(self.refresh)
-        filter_row.addWidget(self.sku_combo)
+        self.sku_combo = self._add_sku_filter(filter_row)
         filter_row.addStretch(1)
         layout.addLayout(filter_row)
 
@@ -1574,10 +1587,7 @@ class BatchAverageView(_View):
         # SKU filter, left of the batch picker: narrows the batch list to one
         # SKU's sessions. Changing it re-runs refresh(), which rebuilds the
         # filtered batch list and reloads the report.
-        picker_row.addWidget(QtWidgets.QLabel("SKU:"))
-        self.sku_combo = QtWidgets.QComboBox()
-        self.sku_combo.currentIndexChanged.connect(self.refresh)
-        picker_row.addWidget(self.sku_combo)
+        self.sku_combo = self._add_sku_filter(picker_row)
         picker_row.addWidget(QtWidgets.QLabel("Batch:"))
         self.batch_combo = QtWidgets.QComboBox()
         self.batch_combo.currentIndexChanged.connect(self._load_report)
