@@ -882,9 +882,11 @@ class DataBankView(_View):
     # ---- render ---------------------------------------------------------- #
 
     def refresh(self) -> None:
-        # Prune empty clusters/batches/combinations before rendering; data_bank()
-        # itself is a pure read, so the sweep is an explicit step on this path.
-        self.controller.sweep_empty()
+        # A pure read/render: rebuild the filter and tree from data_bank() without
+        # touching the archive, so this stays safe on navigation (tab and SKU-filter
+        # changes both land here). Pruning empty clusters/batches/combinations is a
+        # destructive step, so it lives in notify_changed() — run after a mutation,
+        # not on every refresh.
         self._loading = True
         try:
             # Repopulate the filter (a swept SKU may have vanished) before reading
@@ -1858,6 +1860,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def notify_changed(self) -> None:
         """Reload every view after a mutating action (ingest / mark / include / close)."""
+        # A mutation is the only thing that orphans a cluster/batch/combination (a
+        # re-mark or edit can empty the old container), so the destructive sweep is
+        # tied to the mutation here rather than to every refresh() — pure navigation
+        # must never delete rows.
+        self.controller.sweep_empty()
         for view in self._views:
             view.refresh()
 

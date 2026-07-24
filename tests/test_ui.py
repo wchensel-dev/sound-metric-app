@@ -132,8 +132,8 @@ def test_window_builds_with_four_tabs(window):
 def _seed_marked_shot(window, tmp_path, name):
     """Ingest + mark one capture through the controller (real DSP over sine frames).
 
-    A fully marked shot means its combination/batch/cluster survive the data
-    bank's ``sweep_empty()``, so the SKU-filter tests have real rows to filter.
+    A fully marked shot gives the SKU-filter tests a real combination/batch/
+    cluster/shot path to filter on.
     """
     folder = tmp_path / "seed"
     folder.mkdir(exist_ok=True)
@@ -162,6 +162,39 @@ def test_data_bank_sku_filter_narrows_the_tree(window, tmp_path):
     bv.sku_combo.setCurrentIndex(labels.index("SUP-1"))
     assert bv.tree.topLevelItemCount() == 1
     assert bv.tree.topLevelItem(0).text(0).startswith("SUP-1")
+
+
+def test_data_bank_filter_change_does_not_prune_empty_containers(window, tmp_path):
+    # Changing the SKU filter is pure navigation: refresh() must not run the
+    # destructive sweep, so a transiently-empty cluster survives a filter change.
+    _seed_marked_shot(window, tmp_path, "SUP-1_AR15_01_0000.dxd")
+    bv = window.bank_view
+    with window.controller._repo() as repo:
+        batch = window.controller.batches()[0]
+        stray = repo.upsert_cluster(batch.id, 9)
+
+    bv.refresh()
+    labels = [bv.sku_combo.itemText(i) for i in range(bv.sku_combo.count())]
+    bv.sku_combo.setCurrentIndex(labels.index("SUP-1"))  # fires refresh via the combo
+
+    tree = window.controller.data_bank()
+    cluster_ids = {c.cluster.id for n in tree for b in n.batches for c in b.clusters}
+    assert stray in cluster_ids
+
+
+def test_notify_changed_prunes_empty_containers(window, tmp_path):
+    # A mutation is where orphans are created, so notify_changed() (the post-mutation
+    # funnel) is where the sweep runs and the stray empty cluster is dropped.
+    _seed_marked_shot(window, tmp_path, "SUP-1_AR15_01_0000.dxd")
+    with window.controller._repo() as repo:
+        batch = window.controller.batches()[0]
+        stray = repo.upsert_cluster(batch.id, 9)
+
+    window.notify_changed()
+
+    tree = window.controller.data_bank()
+    cluster_ids = {c.cluster.id for n in tree for b in n.batches for c in b.clusters}
+    assert stray not in cluster_ids
 
 
 def test_batch_average_sku_filter_narrows_the_batch_list(window, tmp_path):
