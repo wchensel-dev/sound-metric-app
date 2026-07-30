@@ -1989,9 +1989,12 @@ class BatchAverageView(_View):
         """The Copy button that ends one averaged row.
 
         The string is built once, here, rather than on click: the row's numbers
-        are fixed for as long as the row exists (a re-average rebuilds the whole
-        tree), and holding the finished line lets the tooltip show exactly what
-        the button will copy.
+        are fixed for as long as the row exists, and holding the finished line
+        lets the tooltip show exactly what the button will copy. Nothing can
+        change those numbers without going through MainWindow.notify_changed(),
+        which refreshes every view -- and this view's refresh clears the tree,
+        destroying these buttons and rebuilding them off the new averages. So a
+        captured line cannot outlive the numbers it was built from.
 
         The tooltip also names the batch and the slot, because the string itself
         does not: which test the numbers belong to is decided by the box they are
