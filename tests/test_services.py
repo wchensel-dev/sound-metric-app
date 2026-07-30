@@ -16,12 +16,14 @@ import pytest
 from sound_metric_app.dsp.metrics import pa_to_db
 from sound_metric_app.models import Frame, MetricResult, MicPosition, ShotRole
 from sound_metric_app.services import (
+    SCOUT_METRIC_KEYS,
     AggregationService,
     ClosedBatchError,
     ClusteringService,
     InclusionService,
     IngestionService,
     MarkingService,
+    slot_line,
 )
 from sound_metric_app.storage import WorkflowRepository
 
@@ -825,3 +827,58 @@ def test_aggregation_unknown_ids_raise(repo):
         agg.batch_averages(9999)
     with pytest.raises(LookupError):
         agg.combination_report(9999)
+
+
+# --------------------------------------------------------------------------- #
+# Scout paste strings (SSR1)
+# --------------------------------------------------------------------------- #
+
+
+def test_slot_line_renders_the_four_values_in_contract_order():
+    # Positional and in this order: LIAeq100ms dB, Peak dB, Peak dBA, Impulse
+    # Pa·ms. Anything else misfiles numbers into the wrong column on their end.
+    line = slot_line(
+        MicPosition.SE,
+        ShotRole.FRP,
+        {
+            "liaeq_100ms_db": 137.9,
+            "peak_db": 172.6,
+            "peak_dba": 156.4,
+            "impulse_pa_ms": 4.88,
+            # Our linear magnitudes have no column over there and must not leak
+            # into the string.
+            "peak_pa": 999.0,
+            "n": 3,
+        },
+    )
+    assert line == "SSR1|frp|SE=137.90,172.60,156.40,4.88"
+
+
+def test_slot_line_maps_the_regular_role_to_the_sub_shot_type():
+    average = dict.fromkeys(SCOUT_METRIC_KEYS, 1.0)
+    assert slot_line(MicPosition.ML, ShotRole.REGULAR, average).startswith("SSR1|sub|ML=")
+
+
+def test_slot_line_leaves_unusable_values_empty_rather_than_failing_the_line():
+    # A present-but-non-numeric slot rejects the *whole* line on their end, so a
+    # NULL / NaN / inf metric has to degrade to an empty slot ("not measured")
+    # and let the other three land.
+    line = slot_line(
+        MicPosition.ML,
+        ShotRole.REGULAR,
+        {
+            "liaeq_100ms_db": 140.1,
+            "peak_db": None,
+            "peak_dba": float("nan"),
+            # missing "impulse_pa_ms" entirely
+        },
+    )
+    assert line == "SSR1|sub|ML=140.10,,,"
+
+
+def test_slot_line_never_emits_scientific_notation():
+    # A tiny impulse would print as "1e-07" under str()/repr(), which their
+    # parser rejects; fixed-point keeps it a plain decimal.
+    line = slot_line(MicPosition.SE, ShotRole.FRP, {"impulse_pa_ms": 0.0000001})
+    assert line.endswith(",0.00")
+    assert "e" not in line.split("=")[1]

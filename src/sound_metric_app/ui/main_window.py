@@ -11,7 +11,8 @@ Four views over the same Phase B services the ``sma`` CLI drives, wired through
    which ones feed an average, plus session editing and Close batch.
 4. **Batch average** — the four position x role output slots per batch
    (muzzle-left / shooter's-ear crossed with FRP / regular), positions and roles
-   never mixed.
+   never mixed, each averaged row ending in a Copy button that yields the
+   SilencerScout ``SSR1`` paste string for that slot.
 
 The split between tabs 3 and 4 is the directive's two views: the data bank is the
 complete archive where nothing is deleted for being left out, and the batch
@@ -36,8 +37,8 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..dsp import SMOOTHING_FAST, SMOOTHING_INSTANT, SMOOTHING_SLOW
-from ..models import MicPosition, Shot, role_for_order
-from ..services import AVERAGE_SLOTS
+from ..models import MicPosition, Shot, ShotRole, role_for_order
+from ..services import AVERAGE_SLOTS, slot_line
 from .controller import WorkflowController
 
 _NONE_LABEL = "(none)"
@@ -48,6 +49,40 @@ _EMPTY = "—"
 
 #: Sentinel row in a SKU-filter dropdown that clears the filter (data ``None``).
 _ALL_SKUS_LABEL = "All SKUs"
+
+#: Text on an averaged row's Scout-paste button, and the confirmation it flashes
+#: after a click (a clipboard write is otherwise invisible) with how long it
+#: holds that text.
+_COPY_LABEL = "Copy"
+_COPIED_LABEL = "Copied ✓"
+_COPIED_FLASH_MS = 1200
+
+#: Tint behind the Batch average tree's slot rows, so an averaged row is legible
+#: at a glance against the individual shots nested under it. Deliberately
+#: low-alpha: it composites over whichever base/alternate-base colour the active
+#: theme paints, so the same amber reads as a soft wash in light and dark alike.
+_AVERAGE_ROW_TINT = QtGui.QColor(255, 176, 32, 64)
+
+
+class _TopLevelRowTint(QtWidgets.QStyledItemDelegate):
+    """Wash a colour behind a tree's top-level rows, leaving children plain.
+
+    ``QTreeWidgetItem.setBackground`` cannot do this job here: once a stylesheet
+    applies to the view (see ``_style_grid_tree``), Qt paints the row background
+    from the stylesheet and drops the item's own brush, so the tint never
+    appears. Painting it ourselves sidesteps that. The fill goes *under*
+    ``super().paint()``, so the stylesheet's grid lines, the selection
+    highlight, and the text all still draw over it at full strength.
+    """
+
+    def __init__(self, color: QtGui.QColor, parent=None):
+        super().__init__(parent)
+        self._color = color
+
+    def paint(self, painter, option, index) -> None:
+        if not index.parent().isValid():
+            painter.fillRect(option.rect, self._color)
+        super().paint(painter, option, index)
 
 
 def _repopulate_sku_filter(combo: QtWidgets.QComboBox, skus: list[str]) -> None:
@@ -94,6 +129,41 @@ def _style_grid_tree(tree: QtWidgets.QTreeWidget) -> None:
         " background: palette(highlight);"
         " color: palette(highlighted-text); }"
     )
+
+
+def _tree_items(tree: QtWidgets.QTreeWidget):
+    """Yield every item in ``tree``, parents before their children."""
+
+    def walk(item):
+        yield item
+        for i in range(item.childCount()):
+            yield from walk(item.child(i))
+
+    for i in range(tree.topLevelItemCount()):
+        yield from walk(tree.topLevelItem(i))
+
+
+def _expanded_keys(tree: QtWidgets.QTreeWidget, key) -> set:
+    """Snapshot which branches are open, keyed by ``key(item)``.
+
+    Both archive trees are rebuilt from scratch on every refresh, so the
+    ``QTreeWidgetItem`` an expansion belongs to is gone by the time the new one
+    exists. Keying by row *identity* rather than position lets the state survive
+    that: a batch that gained a cluster, or moved because another one was swept,
+    still reopens. Rows whose ``key`` is ``None`` are skipped.
+    """
+    return {
+        k
+        for item in _tree_items(tree)
+        if item.isExpanded() and (k := key(item)) is not None
+    }
+
+
+def _restore_expanded(tree: QtWidgets.QTreeWidget, keys: set, key) -> None:
+    """Reopen the branches named by ``keys`` (the inverse of _expanded_keys)."""
+    for item in _tree_items(tree):
+        if key(item) in keys:
+            item.setExpanded(True)
 
 
 # --------------------------------------------------------------------------- #
@@ -861,8 +931,9 @@ class DataBankView(_View):
         # Double-click means "edit" here, so Qt's default expand/collapse on the
         # same gesture is off: a batch row is editable *and* has children, and
         # one double-click must not both toggle the branch and pop a modal
-        # (cancelling the modal would leave the branch toggled anyway). Expanding
-        # stays on the branch arrow, the keyboard, and expandAll() in refresh().
+        # (cancelling the modal would leave the branch toggled anyway). Since
+        # refresh() leaves the tree collapsed, expanding is the branch arrow and
+        # the keyboard.
         self.tree.setExpandsOnDoubleClick(False)
         self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.tree.itemChanged.connect(self._on_item_changed)
@@ -900,6 +971,11 @@ class DataBankView(_View):
         # changes both land here). Pruning empty clusters/batches/combinations is a
         # destructive step, so it lives in notify_changed() — run after a mutation,
         # not on every refresh.
+        #
+        # Take the expansion snapshot before the rebuild: every edit, tick and
+        # bring-forward lands here, and re-collapsing the archive under the user
+        # each time would lose the place they were working in.
+        open_rows = _expanded_keys(self.tree, self._row_key)
         self._loading = True
         try:
             # One read feeds both the filter and the tree: data_bank_view() returns
@@ -916,10 +992,30 @@ class DataBankView(_View):
                 self.tree.addTopLevelItem(self._combination_item(node))
         finally:
             self._loading = False
+        # Size the columns against every row, then collapse back to whatever was
+        # open before. A first load has nothing to restore, so the tree opens on
+        # the Combination rows only — a big archive is a short list rather than a
+        # wall of shots. Sizing while fully expanded means the widths already fit
+        # the deeper rows by the time one is opened.
         self.tree.expandAll()
         for col in range(len(self._COLUMNS)):
             self.tree.resizeColumnToContents(col)
+        self.tree.collapseAll()
+        _restore_expanded(self.tree, open_rows, self._row_key)
         self._update_actions_enabled()
+
+    @staticmethod
+    def _row_key(item: QtWidgets.QTreeWidgetItem):
+        """Identify a row by what it stands for, not where it sits.
+
+        Rows carry their payload as ``(kind, obj, *context)``; the kind plus the
+        record's primary key is stable across a rebuild. An unsaved record (no
+        id) has nothing to match on, so it is left out.
+        """
+        payload = item.data(0, QtCore.Qt.UserRole)
+        if not payload or payload[1].id is None:
+            return None
+        return (payload[0], payload[1].id)
 
     def _combination_item(self, node) -> QtWidgets.QTreeWidgetItem:
         combo = node.combination
@@ -1239,6 +1335,16 @@ class MetricGraph(QtWidgets.QWidget):
     _PICK_PEN = pg.mkPen((30, 30, 30), width=1)
     #: How near (screen pixels) a click must land to a sample to select it.
     _PICK_TOLERANCE_PX = 20.0
+    #: Left edge (ms) shared by every onset close-up: a fixed point on the
+    #: capture's own time axis, just past the trigger, rather than wherever
+    #: onset detection happened to fire. Fixed is the point -- the same slice of
+    #: every shot lands in the same place, so close-ups compare shot to shot.
+    _ONSET_ZOOM_START_MS = 10.5
+    #: Widths (ms) of the onset close-ups -- ``_ONSET_ZOOM_START_MS`` to this far
+    #: past it -- one button each, in the order they appear on the toolbar. 10 ms
+    #: matches the Peak-10 ms-Leq integration length, so that close-up frames the
+    #: same slice that metric reports on; 5 ms halves it for the rise itself.
+    _ONSET_ZOOM_MS = (5.0, 10.0)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1294,6 +1400,23 @@ class MetricGraph(QtWidgets.QWidget):
         self._frame_window_btn.setEnabled(False)
         self._frame_window_btn.clicked.connect(self.frame_calc_window)
         toolbar.addWidget(self._frame_window_btn)
+        #: One onset close-up button per span in ``_ONSET_ZOOM_MS``, all enabled
+        #: and disabled together (they share the one precondition: a drawn curve).
+        self._frame_onset_btns: list[QtWidgets.QPushButton] = []
+        for span_ms in self._ONSET_ZOOM_MS:
+            btn = QtWidgets.QPushButton(f"+{span_ms:g} ms")
+            btn.setToolTip(
+                f"Snap the X range to {self._ONSET_ZOOM_START_MS:g}"
+                f"–{self._ONSET_ZOOM_START_MS + span_ms:g} ms\n"
+                "(the onset transient, in detail)."
+            )
+            btn.setEnabled(False)
+            # Default-arg binding, not a bare closure over the loop variable,
+            # which would leave every button framing the last span. ``*_`` eats
+            # the ``checked`` flag ``clicked`` sends.
+            btn.clicked.connect(lambda *_, ms=span_ms: self.frame_onset_zoom(ms))
+            toolbar.addWidget(btn)
+            self._frame_onset_btns.append(btn)
         toolbar.addStretch(1)
 
         # Readout box (bottom right): shows the clicked sample's value + time. The
@@ -1322,6 +1445,10 @@ class MetricGraph(QtWidgets.QWidget):
         #: same two times the dashed window lines mark -- or None when no trace is
         #: shown or the window has no width to frame. Drives Frame Calc Window.
         self._window_x_bounds: tuple[float, float] | None = None
+        #: (y_min, y_max) covering the whole curve (plus the level line, which
+        #: autorange would also take in), or None when no trace is shown. Every
+        #: framing button pins Y here, so the zoom levels stay comparable.
+        self._y_bounds: tuple[float, float] | None = None
         #: The trace currently drawn, kept so a plot click can find the sample it
         #: landed on. None whenever the plot shows a message rather than a curve.
         self._trace = None
@@ -1354,22 +1481,43 @@ class MetricGraph(QtWidgets.QWidget):
         self._plot.setLabel("left", "")
         self._x_bounds = None
         self._window_x_bounds = None
+        self._y_bounds = None
         self._trace = None
         self.clear_readout()
         self._auto_frame_btn.setEnabled(False)
         self._frame_window_btn.setEnabled(False)
+        self._set_onset_btns_enabled(False)
+
+    def _set_onset_btns_enabled(self, enabled: bool) -> None:
+        """Enable/disable every onset close-up button at once."""
+        for btn in self._frame_onset_btns:
+            btn.setEnabled(enabled)
+
+    def _frame_x(self, span: tuple[float, float] | None, padding: float = 0) -> None:
+        """Snap the X range to ``span``, or do nothing when it is None.
+
+        The one place the framing buttons meet. Y is pinned to the whole curve's
+        vertical extent — the same range Auto Frame lands on — for *every* span,
+        rather than autoranging to the framed slice. Letting Y refit meant a
+        narrow close-up rescaled the axis to that slice's few dB, so the ticks
+        collapsed to single-digit steps and the curve redrew at a wildly
+        different height than the wider views: the zoom levels stopped being
+        comparable. A fixed Y makes zooming in a purely horizontal move.
+        """
+        if span is None:
+            return
+        self._plot.setXRange(span[0], span[1], padding=padding)
+        if self._y_bounds is None:
+            self._plot.enableAutoRange(axis="y")
+        else:
+            self._plot.setYRange(*self._y_bounds)
 
     def auto_frame(self) -> None:
         """Snap the X range to the drawn curve's extent (first to last live sample).
 
-        A no-op when no trace is shown. Y is left on autorange so the fitted
-        width still shows the curve's full vertical extent.
+        A no-op when no trace is shown.
         """
-        if self._x_bounds is None:
-            return
-        x0, x1 = self._x_bounds
-        self._plot.setXRange(x0, x1, padding=0)
-        self._plot.enableAutoRange(axis="y")
+        self._frame_x(self._x_bounds)
 
     def frame_calc_window(self) -> None:
         """Snap the X range to the calculation window's start/end lines.
@@ -1378,14 +1526,23 @@ class MetricGraph(QtWidgets.QWidget):
         bracketing only the samples that fed the reported number. A little
         padding is kept so both window lines stay visible at the edges rather
         than sitting exactly on the frame. A no-op when the trace carries no
-        window. Y is left on autorange, so the framed slice shows its own
-        vertical extent rather than the whole curve's.
+        window.
         """
-        if self._window_x_bounds is None:
+        self._frame_x(self._window_x_bounds, padding=0.02)
+
+    def frame_onset_zoom(self, span_ms: float) -> None:
+        """Snap the X range to ``span_ms`` starting at :data:`_ONSET_ZOOM_START_MS`.
+
+        The most zoomed-in of the framing actions: the onset transient itself.
+        Unlike the other two, both edges are fixed times rather than fitted to
+        the trace — that is the point, since the same slice of every shot then
+        frames identically and close-ups can be compared across shots. A no-op
+        when no trace is shown.
+        """
+        if self._x_bounds is None:
             return
-        x0, x1 = self._window_x_bounds
-        self._plot.setXRange(x0, x1, padding=0.02)
-        self._plot.enableAutoRange(axis="y")
+        x0 = self._ONSET_ZOOM_START_MS
+        self._frame_x((x0, x0 + span_ms), padding=0.02)
 
     def show_trace(self, trace, subtitle: str = "") -> None:
         """Render a :class:`~sound_metric_app.dsp.MetricTrace` as the sole graph."""
@@ -1477,12 +1634,28 @@ class MetricGraph(QtWidgets.QWidget):
             x0 = float(xs[0])
             x1 = float(xs[-1])
             self._x_bounds = (x0, x1)
+            # Y extent of everything autorange would take in -- the curve plus
+            # the horizontal level line -- so a framed slice keeps the Y range
+            # the full view has. A flat curve would give a zero-height range Qt
+            # cannot draw, so give it a nominal 1 dB.
+            ys = [float(np.min(trace.values[finite])), float(np.max(trace.values[finite]))]
+            if trace.level is not None:
+                ys.append(float(trace.level))
+            y0, y1 = min(ys), max(ys)
+            if y1 <= y0:
+                y0, y1 = y0 - 0.5, y0 + 0.5
+            self._y_bounds = (y0, y1)
             for x in (x0, x1):
                 self._plot.addItem(pg.InfiniteLine(pos=x, angle=90, pen=self._BOUND_PEN))
             self._auto_frame_btn.setEnabled(True)
+            # The onset close-ups frame fixed times, so a drawn curve is their
+            # only precondition -- they need no calculation window at all.
+            self._set_onset_btns_enabled(True)
         else:
             self._x_bounds = None
+            self._y_bounds = None
             self._auto_frame_btn.setEnabled(False)
+            self._set_onset_btns_enabled(False)
         self._plot.enableAutoRange()
 
     # ---- point readout -------------------------------------------------- #
@@ -1557,6 +1730,11 @@ class BatchAverageView(_View):
 
     Positions and roles are never mixed: the 3-FRP / 5-regular target applies per
     position, so each channel averages the same selected shots on its own axis.
+
+    Each populated slot row ends in a Copy button that puts that row's numbers on
+    the clipboard as a SilencerScout ``SSR1`` paste string (see
+    :mod:`~sound_metric_app.services.scout_paste`), ready to drop into the Scout
+    Report editor's box for the matching test.
     """
 
     _COLUMNS = [
@@ -1564,6 +1742,7 @@ class BatchAverageView(_View):
         "Peak Pa", "Peak dB", "Peak dBA",
         "Impulse Pa·ms", "Impulse dB·ms",
         "Peak Leq10ms dBA", "LIAeq,100ms dBA",
+        "Scout paste",
     ]
     _METRIC_KEYS = (
         "peak_pa", "peak_db", "peak_dba",
@@ -1572,6 +1751,16 @@ class BatchAverageView(_View):
     )
     #: Metric columns begin here; columns 0-1 are label / n.
     _FIRST_METRIC_COL = 2
+    #: One past the last metric column — where a click stops being a graph request.
+    _END_METRIC_COL = _FIRST_METRIC_COL + len(_METRIC_KEYS)
+    #: Trailing column holding each averaged row's Copy button (see
+    #: :meth:`_paste_button`). Shot rows leave it empty: the SSR1 string carries a
+    #: batch's *averages*, so an individual shot has nothing to paste.
+    _PASTE_COL = len(_COLUMNS) - 1
+    #: Fixed width for that column — Qt sizes a column to its item *text*, and
+    #: these cells are empty text behind a button widget, so contents-sizing
+    #: would collapse the button out of view.
+    _PASTE_COL_WIDTH = 90
 
     def __init__(self, controller: WorkflowController, main: "MainWindow"):
         super().__init__(controller, main)
@@ -1617,6 +1806,12 @@ class BatchAverageView(_View):
         self.tree.setRootIsDecorated(True)
         self.tree.itemClicked.connect(self._on_cell_clicked)
         _style_grid_tree(self.tree)
+        # Amber wash behind the slot (averaging) rows, so each average reads
+        # apart from the individual shots nested under it. Held on self: the
+        # view does not take ownership of a delegate, and a garbage-collected
+        # one leaves the tree painting through a dangling C++ pointer.
+        self._row_tint = _TopLevelRowTint(_AVERAGE_ROW_TINT, self.tree)
+        self.tree.setItemDelegate(self._row_tint)
         split.addWidget(self.tree)
 
         self.graph = MetricGraph()
@@ -1658,6 +1853,10 @@ class BatchAverageView(_View):
         self._load_report()
 
     def _load_report(self, *_args) -> None:
+        # Slot rows are the same four across every batch, so an open slot stays
+        # open through a rebuild — whether that rebuild came from an edit or from
+        # switching batches. Snapshot before clear().
+        open_slots = _expanded_keys(self.tree, self._slot_key)
         self.tree.clear()
         self._graph_token += 1  # abandon any in-flight graph for the old report
         self._current_request = None
@@ -1672,28 +1871,55 @@ class BatchAverageView(_View):
             f"{report.n_included} of {report.n_shots} shot(s) brought forward   —   "
             f"{report.status.summary()}"
         )
+        # Names the batch on every Copy button's tooltip. The paste string itself
+        # carries no test identity — the receiving row is chosen by the human —
+        # so the button has to say which batch its numbers came from.
+        combination = report.combination
+        batch_label = f"Batch #{report.batch.id}  {combination.label if combination else '?'}"
         for position, role in AVERAGE_SLOTS:
             slot_label = f"{position.label} · {role.label}"
             avg = report.averages.get((position, role))
             if avg is None:
                 # Keep the empty slot visible: a missing quadrant is information,
-                # not something to hide. Pad so the row spans all _COLUMNS.
-                self._add_top(
-                    [slot_label, "0", "none included", *[""] * (len(self._METRIC_KEYS) - 1)]
-                )
+                # not something to hide. Pad so the row spans all _COLUMNS —
+                # including the (buttonless) paste column, since there is nothing
+                # to copy for a slot with no included shots.
+                row = [slot_label, "0", "none included"]
+                self._add_top([*row, *[""] * (len(self._COLUMNS) - len(row))])
                 continue
             avg_item = self._add_top(
                 [
                     slot_label,
                     str(avg["n"]),
                     *(_format_metric(avg[k]) for k in self._METRIC_KEYS),
+                    "",  # the paste column holds a button, not text
                 ]
+            )
+            self.tree.setItemWidget(
+                avg_item,
+                self._PASTE_COL,
+                self._paste_button(position, role, avg, batch_label, slot_label),
             )
             for shot in report.shots.get((position, role), ()):
                 avg_item.addChild(self._shot_item(shot, position))
+        # Size against the shot rows, then collapse to the four slot averages --
+        # the report's headline -- reopening whatever was open. The shots behind
+        # a closed slot stay one arrow away.
         self.tree.expandAll()
         for col in range(len(self._COLUMNS)):
+            if col == self._PASTE_COL:
+                # Contents-sizing measures item text, and this column's text is
+                # empty behind its buttons; give it a width that fits one.
+                self.tree.setColumnWidth(col, self._PASTE_COL_WIDTH)
+                continue
             self.tree.resizeColumnToContents(col)
+        self.tree.collapseAll()
+        _restore_expanded(self.tree, open_slots, self._slot_key)
+
+    @staticmethod
+    def _slot_key(item: QtWidgets.QTreeWidgetItem):
+        """A slot row is identified by its "position · role" label."""
+        return item.text(0) if item.parent() is None else None
 
     def _shot_item(self, shot: dict, position: MicPosition) -> QtWidgets.QTreeWidgetItem:
         cluster = shot.get("cluster_index")
@@ -1702,7 +1928,7 @@ class BatchAverageView(_View):
         # null shot_order, so order is always present.
         label = f"Cluster {cluster} · shot {order}" if cluster else f"Shot {order}"
         item = QtWidgets.QTreeWidgetItem(
-            [label, "", *(_format_metric(shot[k]) for k in self._METRIC_KEYS)]
+            [label, "", *(_format_metric(shot[k]) for k in self._METRIC_KEYS), ""]
         )
         # Carry the identity a graph request needs: the shot to re-read and which
         # mic's channel to pull. Only shot rows get this tag, so a click on an
@@ -1715,6 +1941,50 @@ class BatchAverageView(_View):
         self.tree.addTopLevelItem(item)
         return item
 
+    # ---- scout paste ------------------------------------------------------ #
+
+    def _paste_button(
+        self,
+        position: MicPosition,
+        role: ShotRole,
+        average: dict,
+        batch_label: str,
+        slot_label: str,
+    ) -> QtWidgets.QPushButton:
+        """The Copy button that ends one averaged row.
+
+        The string is built once, here, rather than on click: the row's numbers
+        are fixed for as long as the row exists (a re-average rebuilds the whole
+        tree), and holding the finished line lets the tooltip show exactly what
+        the button will copy.
+
+        The tooltip also names the batch and the slot, because the string itself
+        does not: which test the numbers belong to is decided by the box they are
+        pasted into, and a string dropped in the wrong row is accepted silently
+        over there. Naming the source here is the only check there is.
+        """
+        line = slot_line(position, role, average)
+        button = QtWidgets.QPushButton(_COPY_LABEL)
+        button.setToolTip(
+            f"Copy the SilencerScout paste string for\n{batch_label}\n{slot_label}\n\n{line}"
+        )
+        button.clicked.connect(lambda: self._copy_scout_line(button, line))
+        return button
+
+    def _copy_scout_line(self, button: QtWidgets.QPushButton, line: str) -> None:
+        """Put one row's paste string on the clipboard and say so on the button.
+
+        A clipboard write is silent, so the button confirms it by reading
+        "Copied" briefly. The timer is anchored to the button: a rebuild of the
+        tree deletes it, and an anchored ``singleShot`` is dropped rather than
+        firing into a deleted widget.
+        """
+        QtWidgets.QApplication.clipboard().setText(line)
+        button.setText(_COPIED_LABEL)
+        QtCore.QTimer.singleShot(
+            _COPIED_FLASH_MS, button, lambda: button.setText(_COPY_LABEL)
+        )
+
     # ---- graph ---------------------------------------------------------- #
 
     def _on_cell_clicked(self, item: QtWidgets.QTreeWidgetItem, column: int) -> None:
@@ -1724,7 +1994,10 @@ class BatchAverageView(_View):
             self._current_request = None
             self.graph.show_message("Select a metric cell on an individual shot row.")
             return
-        if column < self._FIRST_METRIC_COL:
+        # Columns either side of the metrics (label / n, and the trailing paste
+        # column) have no curve behind them — and indexing _METRIC_KEYS past its
+        # end would raise rather than just miss.
+        if not self._FIRST_METRIC_COL <= column < self._END_METRIC_COL:
             self._current_request = None
             self.graph.show_message("Click a metric column (Peak dB, Peak dBA, …).")
             return
