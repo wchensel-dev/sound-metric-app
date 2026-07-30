@@ -12,6 +12,8 @@ These are pure logic services with no UI, reused by both the CLI and the GUI:
   targets.
 * :class:`AggregationService` — per-batch roll-up into the four position x role
   output slots.
+* :mod:`scout_paste` — renders an averaged slot as the ``SSR1`` paste string the
+  SilencerScout report editor consumes.
 """
 
 from .aggregation_service import (
@@ -29,6 +31,12 @@ from .inclusion_service import (
 )
 from .ingestion_service import IngestionService, IngestReport
 from .marking_service import MarkedShot, MarkingService
+from .scout_paste import (
+    SCOUT_FORMAT_TAG,
+    SCOUT_METRIC_KEYS,
+    SCOUT_SHOT_TYPES,
+    slot_line,
+)
 
 __all__ = [
     "IngestionService",
@@ -46,4 +54,8 @@ __all__ = [
     "BatchAverages",
     "CombinationReport",
     "AVERAGE_SLOTS",
+    "SCOUT_FORMAT_TAG",
+    "SCOUT_METRIC_KEYS",
+    "SCOUT_SHOT_TYPES",
+    "slot_line",
 ]

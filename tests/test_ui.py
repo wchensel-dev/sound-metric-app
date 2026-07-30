@@ -15,7 +15,7 @@ import pytest
 pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 
-from PySide6 import QtCore  # noqa: E402
+from PySide6 import QtCore, QtWidgets  # noqa: E402
 
 from sound_metric_app.ingestion import ChannelInfo  # noqa: E402
 from sound_metric_app.models import Frame  # noqa: E402
@@ -79,6 +79,23 @@ def test_format_metric_blanks_null_instead_of_raising():
     assert _format_metric(0) == "0.00"
 
 
+def test_report_column_indices_stay_in_step_with_the_metric_set():
+    # The three column constants are derived from _METRIC_KEYS and _COLUMNS, so
+    # they only agree while those two lists agree with each other. Adding a
+    # metric key without its header (or slipping a column in between the metrics
+    # and the trailing Scout-paste one) would silently either push a real metric
+    # past the _on_cell_clicked guard or aim _METRIC_KEYS at the wrong column —
+    # neither of which raises. Pin the layout instead.
+    from sound_metric_app.ui.main_window import BatchAverageView as bv
+
+    # Label, n, every metric, then exactly one trailing paste column.
+    assert len(bv._COLUMNS) == bv._FIRST_METRIC_COL + len(bv._METRIC_KEYS) + 1
+    # The paste column is the first column past the metrics -> the guard's upper
+    # bound and the button's column are the same index, not two that drifted.
+    assert bv._PASTE_COL == bv._END_METRIC_COL
+    assert bv._COLUMNS[bv._PASTE_COL] == "Scout paste"
+
+
 def test_report_empty_slot_row_spans_all_columns(window, monkeypatch):
     # A slot with nothing included renders a "none included" placeholder row
     # rather than being hidden — a missing quadrant is information. It must
@@ -117,6 +134,52 @@ def test_report_empty_slot_row_spans_all_columns(window, monkeypatch):
     assert item.text(0) == "Muzzle Left · FRP"
     assert item.text(rv._FIRST_METRIC_COL) == "none included"
     assert "0 of 0 shot(s) brought forward" in rv.status_label.text()
+    # Nothing was averaged, so there is nothing to paste: no Copy button.
+    assert rv.tree.itemWidget(item, rv._PASTE_COL) is None
+
+
+def test_report_slot_rows_render_an_amber_wash(window, qtbot):
+    # Slot (averaging) rows carry a translucent amber wash so they read apart
+    # from the individual shots nested under them. Asserted on rendered pixels,
+    # not on the item's brush: the tree's stylesheet paints the row background
+    # itself and discards a QTreeWidgetItem brush, so a brush-level assertion
+    # passes while the app still shows plain grey/white.
+    from sound_metric_app.ui.main_window import _AVERAGE_ROW_TINT
+
+    assert _AVERAGE_ROW_TINT.alpha() < 255  # translucent -> composites over base
+
+    rv = window.report_view
+    # Show the tab through the window first, so the splitter lays the tree out
+    # at a real size (grabbing an unlaid-out child yields a 0x0 image) and so
+    # the tab's own refresh() -- which clears the tree -- is already done.
+    window.tabs.setCurrentWidget(rv)
+    window.resize(1200, 800)
+    window.show()
+    qtbot.waitExposed(window)
+
+    rv.tree.clear()
+    parent = rv._add_top(["slot"] * len(rv._COLUMNS))
+    child = QtWidgets.QTreeWidgetItem(["shot"] * len(rv._COLUMNS))
+    parent.addChild(child)
+    rv.tree.expandAll()
+    # Grab the viewport, not the whole tree: visualItemRect is in viewport
+    # coordinates, so this needs no header/frame offset arithmetic.
+    pixmap = rv.tree.viewport().grab()
+    image = pixmap.toImage()
+    ratio = pixmap.devicePixelRatio()  # a HiDPI grab is larger than the widget
+
+    def pixel(item):
+        # Mid-row vertically; horizontally mid-viewport, which lands in the
+        # blank part of the wide first column -- past the short label text, so
+        # we read background rather than a glyph.
+        row = rv.tree.visualItemRect(item)
+        x = int(rv.tree.viewport().width() // 2 * ratio)
+        return image.pixelColor(x, int(row.center().y() * ratio))
+
+    slot_bg, shot_bg = pixel(parent), pixel(child)
+    assert slot_bg != shot_bg  # the wash is actually visible
+    # Amber, not an arbitrary shift: warmer toward red than blue vs. the plain row.
+    assert slot_bg.red() >= shot_bg.red() and slot_bg.blue() < shot_bg.blue()
 
 
 def test_window_builds_with_four_tabs(window):
@@ -382,6 +445,73 @@ def test_clicking_metric_cell_graphs_that_shot(window, qtbot):
     assert not rv.graph._auto_frame_btn.isEnabled()
     assert rv.graph._x_bounds is None
 
+    # Same for the trailing Scout-paste column, which sits *past* the metrics:
+    # indexing _METRIC_KEYS with it would raise rather than simply miss.
+    rv._on_cell_clicked(shot_item, rv._PASTE_COL)
+    assert rv._current_request is None
+    assert len(rv.graph._plot.listDataItems()) == 0
+
+
+def test_scout_paste_button_copies_the_row_it_sits_on(window, qtbot):
+    # Every averaged row ends in a Copy button that puts that slot's SSR1 string
+    # on the clipboard for the SilencerScout report editor. The string is only
+    # trustworthy if it carries the numbers of the row it sits on -- their end
+    # cannot tell a mispasted string from a good one.
+    from sound_metric_app.ui.main_window import _COPIED_LABEL, _COPY_LABEL
+
+    _mark_all_shots(window, qtbot)
+    _include_everything(window)
+
+    rv = window.report_view
+    rv.refresh()
+    qtbot.waitUntil(lambda: rv.tree.topLevelItemCount() == 4, timeout=5000)
+
+    frp_se = next(
+        rv.tree.topLevelItem(i)
+        for i in range(rv.tree.topLevelItemCount())
+        if rv.tree.topLevelItem(i).text(0) == "Shooter's Ear · FRP"
+    )
+    button = rv.tree.itemWidget(frp_se, rv._PASTE_COL)
+    assert button is not None and button.text() == _COPY_LABEL
+    # The string names neither the test nor the shot type's source, so the button
+    # has to: the operator picks the receiving row by hand.
+    assert "Shooter's Ear · FRP" in button.toolTip()
+    assert "SUP-1 / AR15 / M855" in button.toolTip()
+
+    button.click()
+    line = QtWidgets.QApplication.clipboard().text()
+    assert button.toolTip().endswith(line)  # the tooltip previewed what was copied
+
+    tag, shot_type, field = line.split("|")
+    mic, values = field.split("=")
+    assert (tag, shot_type, mic) == ("SSR1", "frp", "SE")
+    # Four values, in the order LIAeq100ms dB, Peak dB, Peak dBA, Impulse Pa·ms
+    # -- and each one exactly what its column on this row shows.
+    columns = ["LIAeq,100ms dBA", "Peak dB", "Peak dBA", "Impulse Pa·ms"]
+    assert values.split(",") == [frp_se.text(rv._COLUMNS.index(c)) for c in columns]
+
+    # A clipboard write is invisible, so the button confirms it and then reverts.
+    assert button.text() == _COPIED_LABEL
+    qtbot.waitUntil(lambda: button.text() == _COPY_LABEL, timeout=5000)
+
+
+def test_scout_paste_button_survives_the_row_being_rebuilt(window, qtbot):
+    # The revert timer outlives the click by a second, and reloading the report
+    # deletes the button it points at. Anchoring the timer to the button is what
+    # keeps that from firing into a deleted widget and taking the window with it.
+    _mark_all_shots(window, qtbot)
+    _include_everything(window)
+
+    rv = window.report_view
+    rv.refresh()
+    qtbot.waitUntil(lambda: rv.tree.topLevelItemCount() == 4, timeout=5000)
+    button = rv.tree.itemWidget(rv.tree.topLevelItem(0), rv._PASTE_COL)
+    button.click()
+    rv._load_report()  # drops the tree, and with it the button just clicked
+
+    qtbot.wait(1500)  # past _COPIED_FLASH_MS: the revert would have fired by now
+    assert rv.tree.topLevelItemCount() == 4
+
 
 def test_auto_frame_bounds_track_finite_curve_extent(qtbot):
     # A NaN-padded curve (the Impulse ∫p·dt trace is NaN before the onset)
@@ -476,12 +606,12 @@ def test_window_start_label_says_when_no_onset_was_detected(qtbot):
         title="Peak dB",
         window_start_index=0,
         window_end_index=3,
-        onset_detected=False,
+        onset_index=None,
     )
     graph.show_trace(trace)
     assert start_label() == "calc window starts (no onset detected)"
 
-    trace.onset_detected = True
+    trace.onset_index = 0
     graph.show_trace(trace)
     assert start_label() == "calc window starts"
 
@@ -513,6 +643,10 @@ def test_frame_calc_window_zooms_to_the_window_edges(qtbot):
     # keeps both lines off the very edge.
     assert 0.0 < view_x0 < 1.0
     assert 3.0 < view_x1 < 4.0
+    # Y is unchanged from Auto Frame's: framing narrows X only.
+    window_y = graph._plot.getViewBox().viewRange()[1]
+    graph.auto_frame()
+    assert graph._plot.getViewBox().viewRange()[1] == pytest.approx(window_y)
 
     # A trace with only one window edge -- or none at all -- has no span to
     # frame, so the button goes back to disabled.
@@ -523,6 +657,167 @@ def test_frame_calc_window_zooms_to_the_window_edges(qtbot):
 
     graph.show_message("nothing graphed")
     assert not graph._frame_window_btn.isEnabled()
+
+
+def test_frame_calc_window_autoranges_y_on_an_all_nan_curve(qtbot):
+    # The window lines come from the trace's indices, which are set before the
+    # finite-sample check -- so an all-NaN curve can still leave Frame Calc
+    # Window enabled with no Y extent to pin to. Framing must fall back to
+    # autoranging Y rather than unpacking a None _y_bounds.
+    from sound_metric_app.dsp.graphing import MetricTrace
+    from sound_metric_app.ui.main_window import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+
+    trace = MetricTrace(
+        t_ms=np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+        values=np.full(5, np.nan),
+        y_label="Impulse ∫p·dt (Pa·ms)",
+        title="Peak Impulse",
+        window_start_index=1,
+        window_end_index=3,
+    )
+    graph.show_trace(trace)
+    assert graph._y_bounds is None
+    assert graph._window_x_bounds == (1.0, 3.0)
+    assert graph._frame_window_btn.isEnabled()
+    assert not graph._auto_frame_btn.isEnabled()
+
+    graph.frame_calc_window()  # must not raise
+    view_x0, view_x1 = graph._plot.getViewBox().viewRange()[0]
+    assert 0.0 < view_x0 < 1.0
+    assert 3.0 < view_x1 < 4.0
+
+
+def test_y_bounds_ignore_a_non_finite_level_line(qtbot):
+    # trace.level is appended to a list already seeded with the curve's finite
+    # min/max, so a NaN level compares False against the running accumulator and
+    # drops out of min()/max() instead of poisoning the Y range.
+    from sound_metric_app.dsp.graphing import MetricTrace
+    from sound_metric_app.ui.main_window import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+
+    trace = MetricTrace(
+        t_ms=np.array([0.0, 1.0, 2.0]),
+        values=np.array([10.0, 20.0, 15.0]),
+        y_label="SPL (dB)",
+        title="Peak dB",
+        level=float("nan"),
+    )
+    graph.show_trace(trace)
+    assert graph._y_bounds == (10.0, 20.0)
+
+
+def test_onset_zoom_opens_at_the_detected_onset(qtbot):
+    # The onset close-ups open at the *onset* -- the instant every metric window
+    # is anchored to -- so "+10 ms" frames exactly the [onset, onset + 10] slice
+    # Peak-10 ms-Leq reports on, with the shock front and the peak just inside
+    # the left edge. The trace's own *window* start does not move them: that is
+    # a trailing-RMS length before the onset on the very metric whose window the
+    # 10 ms button claims to frame.
+    from sound_metric_app.dsp.graphing import MetricTrace
+    from sound_metric_app.ui.main_window import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+
+    onset_ms = 10.0
+    trace = MetricTrace(
+        t_ms=np.arange(0.0, 100.0, 1.0),
+        values=np.arange(0.0, 100.0, 1.0),
+        y_label="SPL (dB)",
+        title="Peak Leq 10 ms",
+        window_start_index=5,  # a Peak-10 ms-Leq-style pre-onset window opening
+        window_end_index=None,
+        onset_index=int(onset_ms),
+    )
+    graph.show_trace(trace)
+    # No end line, so Frame Calc Window is out -- but the close-ups need no
+    # calculation window at all, only an onset on a drawn curve.
+    assert not graph._frame_window_btn.isEnabled()
+    assert all(btn.isEnabled() for btn in graph._frame_onset_btns)
+
+    # One button per configured span, each labelled with and framing its own --
+    # driven through the button, so a mis-bound click handler shows up here.
+    assert [btn.text() for btn in graph._frame_onset_btns] == [
+        f"+{ms:g} ms" for ms in MetricGraph._ONSET_ZOOM_MS
+    ]
+    for btn, span in zip(graph._frame_onset_btns, MetricGraph._ONSET_ZOOM_MS):
+        btn.click()
+        view_x0, view_x1 = graph._plot.getViewBox().viewRange()[0]
+        # Anchored on the onset -- not the window start line at 5 ms -- with
+        # `span` ms to its right; the small padding keeps it off the edge.
+        assert view_x0 == pytest.approx(onset_ms - span * 0.02)
+        assert view_x1 == pytest.approx(onset_ms + span * 1.02)
+
+    # A capture that triggered late frames its own transient, rather than
+    # leaving the onset off the left edge as a fixed start would.
+    trace.onset_index = 40
+    graph.show_trace(trace)
+    graph._frame_onset_btns[0].click()
+    span = MetricGraph._ONSET_ZOOM_MS[0]
+    assert graph._plot.getViewBox().viewRange()[0][0] == pytest.approx(40.0 - span * 0.02)
+
+    # Zooming in is a purely *horizontal* move: every framing button lands on
+    # the same Y range Auto Frame does. Letting Y refit to the framed slice
+    # rescaled the axis to a few dB and redrew the curve at a different height,
+    # so the zoom levels could not be compared by eye.
+    graph.auto_frame()
+    auto_y = graph._plot.getViewBox().viewRange()[1]
+    graph._frame_onset_btns[0].click()
+    assert graph._plot.getViewBox().viewRange()[1] == pytest.approx(auto_y)
+
+    graph.show_message("nothing graphed")
+    assert not any(btn.isEnabled() for btn in graph._frame_onset_btns)
+
+
+def test_onset_zoom_falls_back_to_the_trigger_time_and_goes_dark_off_curve(qtbot):
+    # No onset detected: there is no acoustic event to anchor to, so the
+    # close-ups stand in the nominal trigger time -- the pre-trigger lead, which
+    # is where the shot *should* have been -- rather than a hand-copied constant.
+    from sound_metric_app.config import LEAD_MS
+    from sound_metric_app.dsp.graphing import MetricTrace
+    from sound_metric_app.ui.main_window import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+    assert MetricGraph._ONSET_ZOOM_FALLBACK_START_MS == LEAD_MS
+
+    trace = MetricTrace(
+        t_ms=np.arange(0.0, 100.0, 1.0),
+        values=np.arange(0.0, 100.0, 1.0),
+        y_label="SPL (dB)",
+        title="Peak dB",
+        onset_index=None,
+    )
+    graph.show_trace(trace)
+    assert all(btn.isEnabled() for btn in graph._frame_onset_btns)
+    span = MetricGraph._ONSET_ZOOM_MS[0]
+    graph._frame_onset_btns[0].click()
+    assert graph._plot.getViewBox().viewRange()[0][0] == pytest.approx(
+        LEAD_MS - span * 0.02
+    )
+
+    # A frame too short to reach that fallback has nothing there to close up on;
+    # framing it anyway would snap the view onto blank axis, so the buttons go
+    # dark -- Auto Frame, which fits the curve itself, stays live.
+    short = MetricTrace(
+        t_ms=np.arange(0.0, 4.0, 1.0),
+        values=np.arange(0.0, 4.0, 1.0),
+        y_label="SPL (dB)",
+        title="Peak dB",
+        onset_index=None,
+    )
+    graph.show_trace(short)
+    assert graph._auto_frame_btn.isEnabled()
+    assert not any(btn.isEnabled() for btn in graph._frame_onset_btns)
+    # And the action itself is a no-op, not a jump to empty space.
+    before = graph._plot.getViewBox().viewRange()[0]
+    graph.frame_onset_zoom(span)
+    assert graph._plot.getViewBox().viewRange()[0] == pytest.approx(before)
 
 
 def test_window_marker_labels_run_vertically_from_the_top(qtbot):
@@ -704,6 +999,59 @@ def test_action_buttons_track_the_selected_level(window, qtbot):
     bv.tree.setCurrentItem(shot_item)
     assert bv.include_btn.isEnabled() and bv.exclude_btn.isEnabled()
     assert bv.edit_btn.isEnabled()  # shot: re-mark
+
+
+def test_data_bank_tree_opens_collapsed_and_keeps_what_the_user_opened(window, qtbot):
+    """Collapsed on arrival, but a refresh must not undo the user's expanding.
+
+    Every edit, tick and bring-forward rebuilds this tree from scratch. If the
+    rebuild always collapsed, the user would be thrown back to the top of the
+    archive after each click.
+    """
+    _mark_all_shots(window, qtbot)
+
+    bv = window.bank_view
+    bv.refresh()
+    combination_item, batch_item, cluster_item, _shot = _tree_nodes(bv)
+    assert not combination_item.isExpanded()
+    assert not batch_item.isExpanded()
+
+    # Open a branch down to the shots, then force the rebuild an edit would.
+    combination_item.setExpanded(True)
+    batch_item.setExpanded(True)
+    bv.refresh()
+
+    # Fresh items -- the old ones were freed by the rebuild -- carrying the old
+    # state, matched by record identity rather than row position.
+    combination_item, batch_item, cluster_item, _shot = _tree_nodes(bv)
+    assert combination_item.isExpanded()
+    assert batch_item.isExpanded()
+    assert not cluster_item.isExpanded()  # never opened: still closed
+
+
+def test_report_tree_opens_collapsed_and_keeps_open_slots(window, qtbot):
+    _mark_all_shots(window, qtbot)
+    _include_everything(window)
+
+    rv = window.report_view
+    rv.refresh()
+    qtbot.waitUntil(lambda: rv.tree.topLevelItemCount() == 4, timeout=5000)
+    slot = next(
+        rv.tree.topLevelItem(i)
+        for i in range(rv.tree.topLevelItemCount())
+        if rv.tree.topLevelItem(i).childCount()
+    )
+    assert not slot.isExpanded()
+    label = slot.text(0)
+
+    slot.setExpanded(True)
+    rv.refresh()
+    reopened = next(
+        rv.tree.topLevelItem(i)
+        for i in range(rv.tree.topLevelItemCount())
+        if rv.tree.topLevelItem(i).text(0) == label
+    )
+    assert reopened.isExpanded()
 
 
 def test_shot_checkbox_toggles_inclusion(window, qtbot):

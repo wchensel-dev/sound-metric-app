@@ -273,7 +273,32 @@ same local database. It opens four tabs matching the workflow:
 - **Batch average** — the four position × role output slots for the selected
   batch, over its included shots only. Empty slots are shown as *none included*
   rather than hidden, and each populated slot expands into the shots behind it.
-  Clicking a metric cell on a shot row graphs it.
+  Clicking a metric cell on a shot row graphs it. Each populated slot row ends in
+  a **Copy** button that puts that row on the clipboard as a SilencerScout
+  `SSR1` paste string (see below).
+
+#### Scout paste strings (`SSR1`)
+
+The SilencerScout report editor takes its numbers by paste: one box per test,
+one string per shot type. The Copy button on an averaged row emits that row's
+string —
+
+```
+SSR1|frp|SE=137.90,172.60,156.40,4.88
+```
+
+— the format tag, the shot type (`frp` for our FRP slot, `sub` for our regular
+one), and the mic position followed by four positional values: **LIAeq,100ms
+(dB), Peak (dB), Peak (dBA), Impulse (Pa·ms)**. An unavailable metric is emitted
+as an empty slot, which the receiving end reads as *not measured* and leaves
+alone. A slot's line carries one mic, which is valid on its own; the four rows
+copy independently and write to different cells.
+
+The string deliberately carries **no test identity** — which test the numbers
+belong to is decided by the box they are pasted into, so a string dropped in the
+wrong row is accepted silently over there. Each button's tooltip therefore names
+its batch and slot, and previews the exact string it will copy. See
+`services/scout_paste.py`.
 
 Ingest and mark run off the UI thread, so a large capture never freezes the
 window; service errors surface as dialogs.
