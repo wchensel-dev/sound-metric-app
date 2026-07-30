@@ -659,6 +659,58 @@ def test_frame_calc_window_zooms_to_the_window_edges(qtbot):
     assert not graph._frame_window_btn.isEnabled()
 
 
+def test_frame_calc_window_autoranges_y_on_an_all_nan_curve(qtbot):
+    # The window lines come from the trace's indices, which are set before the
+    # finite-sample check -- so an all-NaN curve can still leave Frame Calc
+    # Window enabled with no Y extent to pin to. Framing must fall back to
+    # autoranging Y rather than unpacking a None _y_bounds.
+    from sound_metric_app.dsp.graphing import MetricTrace
+    from sound_metric_app.ui.main_window import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+
+    trace = MetricTrace(
+        t_ms=np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+        values=np.full(5, np.nan),
+        y_label="Impulse ∫p·dt (Pa·ms)",
+        title="Peak Impulse",
+        window_start_index=1,
+        window_end_index=3,
+    )
+    graph.show_trace(trace)
+    assert graph._y_bounds is None
+    assert graph._window_x_bounds == (1.0, 3.0)
+    assert graph._frame_window_btn.isEnabled()
+    assert not graph._auto_frame_btn.isEnabled()
+
+    graph.frame_calc_window()  # must not raise
+    view_x0, view_x1 = graph._plot.getViewBox().viewRange()[0]
+    assert 0.0 < view_x0 < 1.0
+    assert 3.0 < view_x1 < 4.0
+
+
+def test_y_bounds_ignore_a_non_finite_level_line(qtbot):
+    # trace.level is appended to a list already seeded with the curve's finite
+    # min/max, so a NaN level compares False against the running accumulator and
+    # drops out of min()/max() instead of poisoning the Y range.
+    from sound_metric_app.dsp.graphing import MetricTrace
+    from sound_metric_app.ui.main_window import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+
+    trace = MetricTrace(
+        t_ms=np.array([0.0, 1.0, 2.0]),
+        values=np.array([10.0, 20.0, 15.0]),
+        y_label="SPL (dB)",
+        title="Peak dB",
+        level=float("nan"),
+    )
+    graph.show_trace(trace)
+    assert graph._y_bounds == (10.0, 20.0)
+
+
 def test_onset_zoom_opens_at_the_detected_onset(qtbot):
     # The onset close-ups open at the *onset* -- the instant every metric window
     # is anchored to -- so "+10 ms" frames exactly the [onset, onset + 10] slice
