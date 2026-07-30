@@ -164,13 +164,8 @@ def test_undetected_onset_is_flagged_on_the_trace(metric_key):
         samples=np.full(N, 0.01), sample_rate=FS, channel="AI 1", source_file="x.dxd"
     )
     assert find_onset(quiet.samples) is None
-    assert build_metric_trace(quiet, metric_key).onset_index is None
-    # A real shot carries the onset itself, not just the fact of one: the window
-    # start is not always it (Peak-10 ms-Leq opens a trailing-RMS length earlier),
-    # so a caller framing the transient cannot read it off the window.
-    shot = _shot_frame()
-    onset = find_onset(shot.samples)
-    assert build_metric_trace(shot, metric_key).onset_index == onset
+    assert build_metric_trace(quiet, metric_key).onset_detected is False
+    assert build_metric_trace(_shot_frame(), metric_key).onset_detected is True
 
 
 def test_window_end_marker_survives_a_window_closing_at_the_capture_end():

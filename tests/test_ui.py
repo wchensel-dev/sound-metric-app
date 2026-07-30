@@ -606,12 +606,12 @@ def test_window_start_label_says_when_no_onset_was_detected(qtbot):
         title="Peak dB",
         window_start_index=0,
         window_end_index=3,
-        onset_index=None,
+        onset_detected=False,
     )
     graph.show_trace(trace)
     assert start_label() == "calc window starts (no onset detected)"
 
-    trace.onset_index = 0
+    trace.onset_detected = True
     graph.show_trace(trace)
     assert start_label() == "calc window starts"
 
@@ -711,32 +711,27 @@ def test_y_bounds_ignore_a_non_finite_level_line(qtbot):
     assert graph._y_bounds == (10.0, 20.0)
 
 
-def test_onset_zoom_opens_at_the_detected_onset(qtbot):
-    # The onset close-ups open at the *onset* -- the instant every metric window
-    # is anchored to -- so "+10 ms" frames exactly the [onset, onset + 10] slice
-    # Peak-10 ms-Leq reports on, with the shock front and the peak just inside
-    # the left edge. The trace's own *window* start does not move them: that is
-    # a trailing-RMS length before the onset on the very metric whose window the
-    # 10 ms button claims to frame.
+def test_onset_zoom_frames_fixed_times_off_the_capture_axis(qtbot):
+    # The onset close-ups frame *fixed* times -- a set start, a set width -- so
+    # the same slice of every shot frames identically and close-ups compare shot
+    # to shot. Nothing about the trace's own window moves them.
     from sound_metric_app.dsp.graphing import MetricTrace
     from sound_metric_app.ui.main_window import MetricGraph
 
     graph = MetricGraph()
     qtbot.addWidget(graph)
 
-    onset_ms = 10.0
     trace = MetricTrace(
         t_ms=np.arange(0.0, 100.0, 1.0),
         values=np.arange(0.0, 100.0, 1.0),
         y_label="SPL (dB)",
-        title="Peak Leq 10 ms",
-        window_start_index=5,  # a Peak-10 ms-Leq-style pre-onset window opening
+        title="Peak dB",
+        window_start_index=20,
         window_end_index=None,
-        onset_index=int(onset_ms),
     )
     graph.show_trace(trace)
     # No end line, so Frame Calc Window is out -- but the close-ups need no
-    # calculation window at all, only an onset on a drawn curve.
+    # calculation window at all, only a drawn curve.
     assert not graph._frame_window_btn.isEnabled()
     assert all(btn.isEnabled() for btn in graph._frame_onset_btns)
 
@@ -745,21 +740,14 @@ def test_onset_zoom_opens_at_the_detected_onset(qtbot):
     assert [btn.text() for btn in graph._frame_onset_btns] == [
         f"+{ms:g} ms" for ms in MetricGraph._ONSET_ZOOM_MS
     ]
+    start = MetricGraph._ONSET_ZOOM_START_MS
     for btn, span in zip(graph._frame_onset_btns, MetricGraph._ONSET_ZOOM_MS):
         btn.click()
         view_x0, view_x1 = graph._plot.getViewBox().viewRange()[0]
-        # Anchored on the onset -- not the window start line at 5 ms -- with
-        # `span` ms to its right; the small padding keeps it off the edge.
-        assert view_x0 == pytest.approx(onset_ms - span * 0.02)
-        assert view_x1 == pytest.approx(onset_ms + span * 1.02)
-
-    # A capture that triggered late frames its own transient, rather than
-    # leaving the onset off the left edge as a fixed start would.
-    trace.onset_index = 40
-    graph.show_trace(trace)
-    graph._frame_onset_btns[0].click()
-    span = MetricGraph._ONSET_ZOOM_MS[0]
-    assert graph._plot.getViewBox().viewRange()[0][0] == pytest.approx(40.0 - span * 0.02)
+        # Anchored at the fixed start -- not the window start line at 20 ms --
+        # with `span` ms to its right; the small padding keeps it off the edge.
+        assert view_x0 == pytest.approx(start - span * 0.02)
+        assert view_x1 == pytest.approx(start + span * 1.02)
 
     # Zooming in is a purely *horizontal* move: every framing button lands on
     # the same Y range Auto Frame does. Letting Y refit to the framed slice
@@ -770,54 +758,13 @@ def test_onset_zoom_opens_at_the_detected_onset(qtbot):
     graph._frame_onset_btns[0].click()
     assert graph._plot.getViewBox().viewRange()[1] == pytest.approx(auto_y)
 
-    graph.show_message("nothing graphed")
-    assert not any(btn.isEnabled() for btn in graph._frame_onset_btns)
-
-
-def test_onset_zoom_falls_back_to_the_trigger_time_and_goes_dark_off_curve(qtbot):
-    # No onset detected: there is no acoustic event to anchor to, so the
-    # close-ups stand in the nominal trigger time -- the pre-trigger lead, which
-    # is where the shot *should* have been -- rather than a hand-copied constant.
-    from sound_metric_app.config import LEAD_MS
-    from sound_metric_app.dsp.graphing import MetricTrace
-    from sound_metric_app.ui.main_window import MetricGraph
-
-    graph = MetricGraph()
-    qtbot.addWidget(graph)
-    assert MetricGraph._ONSET_ZOOM_FALLBACK_START_MS == LEAD_MS
-
-    trace = MetricTrace(
-        t_ms=np.arange(0.0, 100.0, 1.0),
-        values=np.arange(0.0, 100.0, 1.0),
-        y_label="SPL (dB)",
-        title="Peak dB",
-        onset_index=None,
-    )
+    # A trace with no window at all still frames -- the times are the trace's,
+    # not the window's -- but no curve at all leaves nothing to frame.
+    trace.window_start_index = None
     graph.show_trace(trace)
     assert all(btn.isEnabled() for btn in graph._frame_onset_btns)
-    span = MetricGraph._ONSET_ZOOM_MS[0]
-    graph._frame_onset_btns[0].click()
-    assert graph._plot.getViewBox().viewRange()[0][0] == pytest.approx(
-        LEAD_MS - span * 0.02
-    )
-
-    # A frame too short to reach that fallback has nothing there to close up on;
-    # framing it anyway would snap the view onto blank axis, so the buttons go
-    # dark -- Auto Frame, which fits the curve itself, stays live.
-    short = MetricTrace(
-        t_ms=np.arange(0.0, 4.0, 1.0),
-        values=np.arange(0.0, 4.0, 1.0),
-        y_label="SPL (dB)",
-        title="Peak dB",
-        onset_index=None,
-    )
-    graph.show_trace(short)
-    assert graph._auto_frame_btn.isEnabled()
+    graph.show_message("nothing graphed")
     assert not any(btn.isEnabled() for btn in graph._frame_onset_btns)
-    # And the action itself is a no-op, not a jump to empty space.
-    before = graph._plot.getViewBox().viewRange()[0]
-    graph.frame_onset_zoom(span)
-    assert graph._plot.getViewBox().viewRange()[0] == pytest.approx(before)
 
 
 def test_window_marker_labels_run_vertically_from_the_top(qtbot):
