@@ -36,6 +36,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from ..config import LEAD_MS
 from ..dsp import SMOOTHING_FAST, SMOOTHING_INSTANT, SMOOTHING_SLOW
 from ..models import MicPosition, Shot, ShotRole, role_for_order
 from ..services import AVERAGE_SLOTS, slot_line
@@ -1335,15 +1336,18 @@ class MetricGraph(QtWidgets.QWidget):
     _PICK_PEN = pg.mkPen((30, 30, 30), width=1)
     #: How near (screen pixels) a click must land to a sample to select it.
     _PICK_TOLERANCE_PX = 20.0
-    #: Left edge (ms) shared by every onset close-up: a fixed point on the
-    #: capture's own time axis, just past the trigger, rather than wherever
-    #: onset detection happened to fire. Fixed is the point -- the same slice of
-    #: every shot lands in the same place, so close-ups compare shot to shot.
-    _ONSET_ZOOM_START_MS = 10.5
-    #: Widths (ms) of the onset close-ups -- ``_ONSET_ZOOM_START_MS`` to this far
-    #: past it -- one button each, in the order they appear on the toolbar. 10 ms
-    #: matches the Peak-10 ms-Leq integration length, so that close-up frames the
-    #: same slice that metric reports on; 5 ms halves it for the rise itself.
+    #: Left edge (ms) of every onset close-up when the trace carries no detected
+    #: onset: the nominal trigger time, i.e. the pre-trigger lead. A capture that
+    #: never crossed the threshold has no acoustic event to anchor to, so the
+    #: close-ups fall back to where the shot *should* have been. When an onset was
+    #: detected the close-ups anchor to it instead (see :meth:`frame_onset_zoom`),
+    #: which is what makes the spans below mean what their labels say.
+    _ONSET_ZOOM_FALLBACK_START_MS = LEAD_MS
+    #: Widths (ms) of the onset close-ups -- the onset to this far past it -- one
+    #: button each, in the order they appear on the toolbar. 10 ms matches the
+    #: Peak-10 ms-Leq integration length, so that close-up frames the same slice
+    #: [onset, onset + 10] that metric reports on; 5 ms halves it for the rise
+    #: itself, where the shock front and the peak both sit.
     _ONSET_ZOOM_MS = (5.0, 10.0)
 
     def __init__(self, parent=None):
@@ -1406,8 +1410,7 @@ class MetricGraph(QtWidgets.QWidget):
         for span_ms in self._ONSET_ZOOM_MS:
             btn = QtWidgets.QPushButton(f"+{span_ms:g} ms")
             btn.setToolTip(
-                f"Snap the X range to {self._ONSET_ZOOM_START_MS:g}"
-                f"–{self._ONSET_ZOOM_START_MS + span_ms:g} ms\n"
+                f"Snap the X range to the {span_ms:g} ms from the detected onset\n"
                 "(the onset transient, in detail)."
             )
             btn.setEnabled(False)
@@ -1445,6 +1448,11 @@ class MetricGraph(QtWidgets.QWidget):
         #: same two times the dashed window lines mark -- or None when no trace is
         #: shown or the window has no width to frame. Drives Frame Calc Window.
         self._window_x_bounds: tuple[float, float] | None = None
+        #: Left edge (ms) the onset close-ups open at -- the current trace's
+        #: detected onset, or None when no trace is shown or its onset lies
+        #: outside the drawn curve (there being nothing to close up on then).
+        #: Drives both the close-up buttons' framing and their enabled state.
+        self._onset_zoom_start_ms: float | None = None
         #: (y_min, y_max) covering the whole curve (plus the level line, which
         #: autorange would also take in), or None when no trace is shown. Every
         #: framing button pins Y here, so the zoom levels stay comparable.
@@ -1481,12 +1489,30 @@ class MetricGraph(QtWidgets.QWidget):
         self._plot.setLabel("left", "")
         self._x_bounds = None
         self._window_x_bounds = None
+        self._onset_zoom_start_ms = None
         self._y_bounds = None
         self._trace = None
         self.clear_readout()
         self._auto_frame_btn.setEnabled(False)
         self._frame_window_btn.setEnabled(False)
         self._set_onset_btns_enabled(False)
+
+    def _onset_zoom_start(self, trace, x0: float, x1: float) -> float | None:
+        """Where the onset close-ups should open for ``trace``, or None if nowhere.
+
+        The trace's detected onset, in ms off the capture's own axis; when it
+        detected none, the nominal trigger time
+        (:data:`_ONSET_ZOOM_FALLBACK_START_MS`, the pre-trigger lead) stands in
+        for it. Returns None when that time falls outside ``[x0, x1)``, the drawn
+        curve's extent — there is no transient there to close up on, and framing
+        it would leave the view on blank axis.
+        """
+        index = trace.onset_index
+        if index is not None and 0 <= index < trace.t_ms.size:
+            start = float(trace.t_ms[index])
+        else:
+            start = float(self._ONSET_ZOOM_FALLBACK_START_MS)
+        return start if x0 <= start < x1 else None
 
     def _set_onset_btns_enabled(self, enabled: bool) -> None:
         """Enable/disable every onset close-up button at once."""
@@ -1531,17 +1557,21 @@ class MetricGraph(QtWidgets.QWidget):
         self._frame_x(self._window_x_bounds, padding=0.02)
 
     def frame_onset_zoom(self, span_ms: float) -> None:
-        """Snap the X range to ``span_ms`` starting at :data:`_ONSET_ZOOM_START_MS`.
+        """Snap the X range to the ``span_ms`` beginning at the detected onset.
 
         The most zoomed-in of the framing actions: the onset transient itself.
-        Unlike the other two, both edges are fixed times rather than fitted to
-        the trace — that is the point, since the same slice of every shot then
-        frames identically and close-ups can be compared across shots. A no-op
-        when no trace is shown.
+        The left edge is the onset — the same instant every metric's window is
+        anchored to — so ``+10 ms`` frames exactly the ``[onset, onset + 10]``
+        slice Peak-10 ms-Leq reports on, and the shock front and peak sit just
+        inside the left edge rather than off it. Anchoring beats a fixed time on
+        its own terms too: aligning the *event* is what lets close-ups be
+        compared across shots, and a capture that triggered early or late still
+        frames its own transient. Widths stay fixed, so the zoom level is
+        constant. A no-op when there is no onset inside the drawn curve.
         """
-        if self._x_bounds is None:
+        if self._onset_zoom_start_ms is None:
             return
-        x0 = self._ONSET_ZOOM_START_MS
+        x0 = self._onset_zoom_start_ms
         self._frame_x((x0, x0 + span_ms), padding=0.02)
 
     def show_trace(self, trace, subtitle: str = "") -> None:
@@ -1592,7 +1622,7 @@ class MetricGraph(QtWidgets.QWidget):
         # mis-triggered or silent capture reads as a confident onset at 0 ms.
         start_text = (
             "calc window starts"
-            if trace.onset_detected
+            if trace.onset_index is not None
             else "calc window starts (no onset detected)"
         )
         window_xs: list[float] = []
@@ -1648,12 +1678,17 @@ class MetricGraph(QtWidgets.QWidget):
             for x in (x0, x1):
                 self._plot.addItem(pg.InfiniteLine(pos=x, angle=90, pen=self._BOUND_PEN))
             self._auto_frame_btn.setEnabled(True)
-            # The onset close-ups frame fixed times, so a drawn curve is their
-            # only precondition -- they need no calculation window at all.
-            self._set_onset_btns_enabled(True)
+            # The close-ups open at the onset, so they need no calculation window
+            # -- but they do need that onset to land on drawn curve. A frame that
+            # never triggered falls back to the nominal trigger time, which a
+            # short or non-nominal capture may not even reach; framing there would
+            # snap the view onto empty space, so the buttons go dark instead.
+            self._onset_zoom_start_ms = self._onset_zoom_start(trace, x0, x1)
+            self._set_onset_btns_enabled(self._onset_zoom_start_ms is not None)
         else:
             self._x_bounds = None
             self._y_bounds = None
+            self._onset_zoom_start_ms = None
             self._auto_frame_btn.setEnabled(False)
             self._set_onset_btns_enabled(False)
         self._plot.enableAutoRange()
