@@ -79,6 +79,23 @@ def test_format_metric_blanks_null_instead_of_raising():
     assert _format_metric(0) == "0.00"
 
 
+def test_report_column_indices_stay_in_step_with_the_metric_set():
+    # The three column constants are derived from _METRIC_KEYS and _COLUMNS, so
+    # they only agree while those two lists agree with each other. Adding a
+    # metric key without its header (or slipping a column in between the metrics
+    # and the trailing Scout-paste one) would silently either push a real metric
+    # past the _on_cell_clicked guard or aim _METRIC_KEYS at the wrong column —
+    # neither of which raises. Pin the layout instead.
+    from sound_metric_app.ui.main_window import BatchAverageView as bv
+
+    # Label, n, every metric, then exactly one trailing paste column.
+    assert len(bv._COLUMNS) == bv._FIRST_METRIC_COL + len(bv._METRIC_KEYS) + 1
+    # The paste column is the first column past the metrics -> the guard's upper
+    # bound and the button's column are the same index, not two that drifted.
+    assert bv._PASTE_COL == bv._END_METRIC_COL
+    assert bv._COLUMNS[bv._PASTE_COL] == "Scout paste"
+
+
 def test_report_empty_slot_row_spans_all_columns(window, monkeypatch):
     # A slot with nothing included renders a "none included" placeholder row
     # rather than being hidden — a missing quadrant is information. It must
