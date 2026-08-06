@@ -9,6 +9,8 @@ Run headless:  QT_QPA_PLATFORM=offscreen pytest tests/test_ui.py
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -80,20 +82,36 @@ def test_format_metric_blanks_null_instead_of_raising():
 
 
 def test_report_column_indices_stay_in_step_with_the_metric_set():
-    # The three column constants are derived from _METRIC_KEYS and _COLUMNS, so
-    # they only agree while those two lists agree with each other. Adding a
-    # metric key without its header (or slipping a column in between the metrics
-    # and the trailing Scout-paste one) would silently either push a real metric
-    # past the _on_cell_clicked guard or aim _METRIC_KEYS at the wrong column —
-    # neither of which raises. Pin the layout instead.
+    # The column constants are derived from _METRIC_KEYS and _COLUMNS, so they
+    # only agree while those two lists agree with each other. Adding a metric key
+    # without its header (or slipping a column in between the metrics and the
+    # trailing button ones) would silently either push a real metric past the
+    # _on_cell_clicked guard or aim _METRIC_KEYS at the wrong column — neither of
+    # which raises. Pin the layout instead.
     from sound_metric_app.ui.main_window import BatchAverageView as bv
 
-    # Label, n, every metric, then exactly one trailing paste column.
-    assert len(bv._COLUMNS) == bv._FIRST_METRIC_COL + len(bv._METRIC_KEYS) + 1
-    # The paste column is the first column past the metrics -> the guard's upper
-    # bound and the button's column are the same index, not two that drifted.
-    assert bv._PASTE_COL == bv._END_METRIC_COL
+    # Label, n, every metric, then exactly the two trailing button columns.
+    assert len(bv._COLUMNS) == bv._FIRST_METRIC_COL + len(bv._METRIC_KEYS) + 2
+    # Compare is the first column past the metrics -> the guard's upper bound and
+    # the button's column are the same index, not two that drifted; paste follows
+    # it, so "Compare sits before Copy" is a property of the constants.
+    assert bv._COMPARE_COL == bv._END_METRIC_COL
+    assert bv._PASTE_COL == bv._COMPARE_COL + 1
+    assert bv._COLUMNS[bv._COMPARE_COL] == "Compare"
     assert bv._COLUMNS[bv._PASTE_COL] == "Scout paste"
+
+
+def test_report_columns_and_compare_metrics_come_from_one_list():
+    # The Batch average tree's metric columns and the Compare tab's metric picker
+    # are the same set spent two ways. Deriving both from _REPORT_METRICS is what
+    # stops a metric added to one from going missing on the other.
+    from sound_metric_app.ui.main_window import _REPORT_METRICS
+    from sound_metric_app.ui.main_window import BatchAverageView as bv
+
+    assert bv._METRIC_KEYS == tuple(key for _label, key in _REPORT_METRICS)
+    assert bv._COLUMNS[bv._FIRST_METRIC_COL : bv._END_METRIC_COL] == [
+        label for label, _key in _REPORT_METRICS
+    ]
 
 
 def test_report_empty_slot_row_spans_all_columns(window, monkeypatch):
@@ -182,13 +200,14 @@ def test_report_slot_rows_render_an_amber_wash(window, qtbot):
     assert slot_bg.red() >= shot_bg.red() and slot_bg.blue() < shot_bg.blue()
 
 
-def test_window_builds_with_four_tabs(window):
-    assert window.tabs.count() == 4
-    assert [window.tabs.tabText(i) for i in range(4)] == [
+def test_window_builds_with_five_tabs(window):
+    assert window.tabs.count() == 5
+    assert [window.tabs.tabText(i) for i in range(5)] == [
         "Ingest",
         "Mark",
         "Data bank",
         "Batch average",
+        "Compare",
     ]
 
 
@@ -377,6 +396,65 @@ def test_ingest_table_shows_cluster_and_role(window, qtbot):
     assert table.item(1, role_col).text() == "Regular"
 
 
+def test_ingest_discard_and_restore_bad_file(window, tmp_path, qtbot):
+    inbox = tmp_path / "inbox"
+    bad = inbox / "not-a-valid-name.dxd"
+    bad.write_bytes(b"")
+    source_file = str(bad.resolve())
+
+    view = window.ingest_view
+    view._ingest()
+    qtbot.waitUntil(lambda: view.bad_files_tree.topLevelItemCount() == 1, timeout=5000)
+    assert view.bad_files_tree.topLevelItem(0).text(0) == bad.name
+
+    # _discard bypasses the confirmation dialog (_prompt_discard), matching how
+    # other tests here drive controller-facing methods directly rather than
+    # simulating a click through a modal.
+    view._discard(source_file, "test reason")
+    qtbot.waitUntil(lambda: view.bad_files_tree.topLevelItemCount() == 0, timeout=5000)
+    qtbot.waitUntil(lambda: view.discarded_tree.topLevelItemCount() == 1, timeout=5000)
+    assert view.discarded_tree.topLevelItem(0).text(1) == "test reason"
+
+    view._restore(source_file)
+    qtbot.waitUntil(lambda: view.discarded_tree.topLevelItemCount() == 0, timeout=5000)
+
+    # Restoring doesn't retroactively re-ingest; the file only resurfaces as
+    # malformed on the next explicit scan.
+    view._ingest()
+    qtbot.waitUntil(lambda: view.bad_files_tree.topLevelItemCount() == 1, timeout=5000)
+
+
+def test_discard_unmarked_shot_from_ingest_and_mark_pages(window, qtbot):
+    view = window.ingest_view
+    mv = window.marking_view
+    view._ingest()
+    qtbot.waitUntil(lambda: view.table.rowCount() == 2, timeout=5000)
+    mv.refresh()
+    qtbot.waitUntil(lambda: mv.shot_combo.count() == 2, timeout=5000)
+
+    first_id = int(view.table.item(0, 0).text())
+    source_file = next(
+        s.source_file for s in window.controller.unmarked_shots() if s.id == first_id
+    )
+
+    # Bypass the confirmation dialog (_prompt_discard_shot) and drive the
+    # controller directly, same convention as the bad-file discard test.
+    window.controller.discard_shot(first_id, reason="wrong recording")
+    window.notify_changed()
+
+    qtbot.waitUntil(lambda: view.table.rowCount() == 1, timeout=5000)
+    qtbot.waitUntil(lambda: mv.shot_combo.count() == 1, timeout=5000)
+    assert all(
+        int(view.table.item(row, 0).text()) != first_id for row in range(view.table.rowCount())
+    )
+    qtbot.waitUntil(lambda: view.discarded_tree.topLevelItemCount() == 1, timeout=5000)
+    assert view.discarded_tree.topLevelItem(0).text(0) == Path(source_file).name
+
+    # A discarded shot's file must not resurface on the next scan.
+    view._ingest()
+    qtbot.waitUntil(lambda: view.table.rowCount() == 1, timeout=5000)
+
+
 def _mark_all_shots(window, qtbot):
     """Ingest the fixture inbox and mark every shot (auto-tagged AI 1 / AI 2)."""
     window.ingest_view._ingest()
@@ -511,6 +589,263 @@ def test_scout_paste_button_survives_the_row_being_rebuilt(window, qtbot):
 
     qtbot.wait(1500)  # past _COPIED_FLASH_MS: the revert would have fired by now
     assert rv.tree.topLevelItemCount() == 4
+
+
+def _frp_compare_buttons(rv):
+    """The Compare button on the first shot row of each populated FRP slot.
+
+    Both FRP slots hold the *same* shot (one capture carries both mics), so the
+    pair is the ML and SE series of one gunshot — the overlay this feature was
+    asked for.
+    """
+    return [
+        rv.tree.itemWidget(top.child(0), rv._COMPARE_COL)
+        for i in range(rv.tree.topLevelItemCount())
+        if (top := rv.tree.topLevelItem(i)).text(0).endswith("FRP") and top.childCount()
+    ]
+
+
+def _row_button(cv, row: int, column: int):
+    """The button in one Compare row's action column."""
+    return cv.tree.itemWidget(cv.tree.topLevelItem(row), column)
+
+
+def _loaded_report(window, qtbot):
+    """Mark + include the fixture shots and return the loaded Batch average view."""
+    _mark_all_shots(window, qtbot)
+    _include_everything(window)
+    rv = window.report_view
+    rv.refresh()
+    qtbot.waitUntil(lambda: rv.tree.topLevelItemCount() == 4, timeout=5000)
+    return rv
+
+
+def test_compare_button_pins_a_shot_row_to_the_compare_tab(window, qtbot):
+    # The Compare button sits on shot rows only, one column before Copy: an
+    # average has no capture to draw a curve from, and a shot has no paste
+    # string. Which mic it pins is the slot the row sits under, so pinning the
+    # same shot from both FRP slots overlays its ML and SE curves.
+    from sound_metric_app.models import MicPosition
+    from sound_metric_app.ui.main_window import (
+        _COMPARE_ADDED_LABEL,
+        _COMPARE_ALREADY_LABEL,
+        _COMPARE_LABEL,
+    )
+
+    rv = _loaded_report(window, qtbot)
+    cv = window.compare_view
+    compare_tab = window.tabs.indexOf(cv)
+
+    # An averaged (top-level) row has no Compare button; its shot rows do.
+    assert rv.tree.itemWidget(rv.tree.topLevelItem(0), rv._COMPARE_COL) is None
+    buttons = _frp_compare_buttons(rv)
+    assert len(buttons) == 2
+
+    for button in buttons:
+        assert button.text() == _COMPARE_LABEL
+        button.click()
+        assert button.text() == _COMPARE_ADDED_LABEL  # pinning shows nowhere else
+
+    assert [s.position for s in cv._series] == [MicPosition.ML, MicPosition.SE]
+    assert len({s.shot_id for s in cv._series}) == 1  # one shot, both its mics
+    # Pinning happens on this tab and draws on another, so the count travels
+    # with the tab title.
+    assert window.tabs.tabText(compare_tab) == "Compare (2)"
+    # A repeat pin would draw a curve exactly on top of itself: refused, and said so.
+    buttons[0].click()
+    assert buttons[0].text() == _COMPARE_ALREADY_LABEL
+    assert len(cv._series) == 2
+
+    # Both curves are drawn, keyed by a legend, over the default Impulse metric.
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 2, timeout=5000)
+    assert cv.metric_combo.currentData() == "impulse_pa_ms"
+    assert cv.graph._legend.isVisible()
+    assert cv.tree.topLevelItemCount() == 2
+    assert "2 of 2 drawn" in cv.status_label.text()
+    # The rows are the legend's index: one per series, in the drawn order.
+    assert [
+        cv.tree.topLevelItem(i).text(cv._LABEL_COL) for i in range(2)
+    ] == [s.label for s in cv._series]
+    assert str(cv._series[0].shot_id) in cv._series[0].label
+    assert cv._series[0].label.endswith("ML")
+
+
+def test_compare_removes_and_clears_pinned_shots(window, qtbot):
+    rv = _loaded_report(window, qtbot)
+    cv = window.compare_view
+    compare_tab = window.tabs.indexOf(cv)
+    for button in _frp_compare_buttons(rv):
+        button.click()
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 2, timeout=5000)
+
+    # Subtracting a shot: the row's own Remove takes it and its curve off. The
+    # survivor's trace is already loaded, so this redraws with no capture read.
+    _row_button(cv, 0, cv._REMOVE_COL).click()
+    # Deferred a turn of the event loop: the handler rebuilds the very tree the
+    # button lives in, so it must not run inside the click it was clicked by.
+    qtbot.waitUntil(lambda: len(cv._series) == 1, timeout=5000)
+    assert [s.position.value for s in cv._series] == ["SE"]
+    assert len(cv.graph._plot.listDataItems()) == 1
+    assert not cv.graph._legend.isVisible()  # one curve needs no key
+    assert window.tabs.tabText(compare_tab) == "Compare (1)"
+
+    cv.clear()
+    assert cv._series == []
+    assert cv.tree.topLevelItemCount() == 0
+    assert len(cv.graph._plot.listDataItems()) == 0
+    assert window.tabs.tabText(compare_tab) == "Compare"
+
+
+def test_compare_row_gives_its_width_to_the_label_not_the_buttons(window, qtbot):
+    # A tree header stretches its *last* section by default, which handed the
+    # spare width to the Remove column and elided every row down to "#7 ·…".
+    # The label is what identifies a row, so the stretch belongs to it and the
+    # button columns stay at what a button needs.
+    cv = window.compare_view
+    header = cv.tree.header()
+
+    assert not header.stretchLastSection()
+    assert header.sectionResizeMode(cv._LABEL_COL) == QtWidgets.QHeaderView.Stretch
+    for col in (cv._HIDE_COL, cv._REMOVE_COL):
+        assert header.sectionResizeMode(col) == QtWidgets.QHeaderView.Fixed
+        # Sized from a real button, so a larger system font widens the column
+        # instead of spilling out of it.
+        assert cv.tree.columnWidth(col) >= QtWidgets.QPushButton("Remove").sizeHint().width()
+
+
+def test_compare_hide_takes_a_curve_off_without_unpinning_it(window, qtbot):
+    # Hide is the "read three of these five" control: the curve leaves the
+    # graph, the row stays, and the colours of everything still drawn hold
+    # still -- a reshuffle on every toggle would undo the legend the operator
+    # has just learned.
+    rv = _loaded_report(window, qtbot)
+    cv = window.compare_view
+    compare_tab = window.tabs.indexOf(cv)
+    for button in _frp_compare_buttons(rv):
+        button.click()
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 2, timeout=5000)
+    second_color = cv.graph._series[1][2]
+
+    assert _row_button(cv, 0, cv._HIDE_COL).text() == "Hide"
+    _row_button(cv, 0, cv._HIDE_COL).click()
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 1, timeout=5000)
+
+    # Still pinned: same rows, same count on the tab, nothing unloaded.
+    assert len(cv._series) == 2
+    assert cv.tree.topLevelItemCount() == 2
+    assert window.tabs.tabText(compare_tab) == "Compare (2)"
+    assert len(cv._traces) == 2  # the hidden curve is kept, so unhiding is free
+    assert "1 of 2 drawn" in cv.status_label.text()
+    assert "1 hidden" in cv.status_label.text()
+    # The survivor kept its colour rather than sliding up to the first one.
+    assert cv.graph._series[0][2] == second_color
+
+    # The button now offers the way back, and takes it.
+    assert _row_button(cv, 0, cv._HIDE_COL).text() == "Show"
+    _row_button(cv, 0, cv._HIDE_COL).click()
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 2, timeout=5000)
+    assert cv._hidden == set()
+    assert "2 of 2 drawn" in cv.status_label.text()
+    assert cv.graph._series[1][2] == second_color
+
+
+def test_compare_hidden_shot_is_not_read_back_off_disk(window, qtbot):
+    # A hidden curve is not drawn, so its capture is not worth re-reading when
+    # the metric changes. Unhiding is what asks for it.
+    rv = _loaded_report(window, qtbot)
+    cv = window.compare_view
+    for button in _frp_compare_buttons(rv):
+        button.click()
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 2, timeout=5000)
+    _row_button(cv, 0, cv._HIDE_COL).click()
+    qtbot.waitUntil(lambda: len(cv._hidden) == 1, timeout=5000)
+
+    cv.metric_combo.setCurrentIndex(cv.metric_combo.findData("peak_db"))
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 1, timeout=5000)
+    assert len(cv._traces) == 1  # only the shown one was re-read
+
+    # Unhiding loads it, at the metric now selected.
+    _row_button(cv, 0, cv._HIDE_COL).click()
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 2, timeout=5000)
+    assert cv.graph._plot.getAxis("left").labelText == "SPL (dB)"
+
+
+def test_compare_keeps_its_framing_across_a_tab_switch(window, qtbot):
+    # Pinning is done on the *other* tab, so the operator crosses back and forth
+    # while assembling an overlay. A refresh that redrew would autorange away
+    # whatever they had just framed -- so navigation leaves the graph alone, and
+    # only an actual mutation (which can change what a curve is drawn from)
+    # forces the reload.
+    rv = _loaded_report(window, qtbot)
+    cv = window.compare_view
+    _frp_compare_buttons(rv)[0].click()
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 1, timeout=5000)
+
+    window.tabs.setCurrentWidget(cv)
+    cv.graph._frame_onset_btns[0].click()
+    framed = cv.graph._plot.getViewBox().viewRange()[0]
+
+    window.tabs.setCurrentWidget(rv)
+    window.tabs.setCurrentWidget(cv)
+    assert cv.graph._plot.getViewBox().viewRange()[0] == pytest.approx(framed)
+    assert len(cv.graph._plot.listDataItems()) == 1
+
+    # A mutation drops the memoized curves, so the next refresh does reload them.
+    window.notify_changed()
+    assert cv._traces == {}
+    qtbot.waitUntil(lambda: len(cv._traces) == 1, timeout=5000)
+    assert len(cv.graph._plot.listDataItems()) == 1
+
+
+def test_compare_metric_switch_redraws_every_pinned_shot(window, qtbot):
+    # The metric is chosen once for the whole overlay -- curves have to share a Y
+    # axis to be read against each other -- so switching it reloads all of them.
+    rv = _loaded_report(window, qtbot)
+    cv = window.compare_view
+    for button in _frp_compare_buttons(rv):
+        button.click()
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 2, timeout=5000)
+    assert cv.graph._plot.getAxis("left").labelText == "Impulse ∫p·dt (Pa·ms)"
+
+    cv.metric_combo.setCurrentIndex(cv.metric_combo.findData("peak_dba"))
+    qtbot.waitUntil(
+        lambda: cv.graph._plot.getAxis("left").labelText == "SPL (dBA)", timeout=5000
+    )
+    assert len(cv.graph._plot.listDataItems()) == 2
+    assert len(cv._traces) == 2  # the new metric's curves, not the old ones
+
+
+def test_compare_draws_the_shots_it_can_and_flags_the_ones_it_cannot(window, qtbot):
+    # A pinned shot whose capture has moved must not take the rest of the
+    # overlay down with it -- and must not pop a dialog either, since every
+    # redraw would pop it again. It is reported against its own row instead.
+    rv = _loaded_report(window, qtbot)
+    cv = window.compare_view
+    for button in _frp_compare_buttons(rv):
+        button.click()
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 2, timeout=5000)
+
+    good = cv._series[1]
+    real_trace = cv.controller.metric_trace
+
+    def flaky(shot_id, position, metric_key, **kwargs):
+        if position is not good.position:
+            raise FileNotFoundError("capture has moved")
+        return real_trace(shot_id, position, metric_key, **kwargs)
+
+    cv.controller.metric_trace = flaky
+    cv.invalidate_traces()
+    cv.refresh()
+
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 1, timeout=5000)
+    row = cv.tree.topLevelItem(0)
+    assert cv.tree.topLevelItemCount() == 2  # the failed shot keeps its row
+    assert "unavailable" in row.text(cv._LABEL_COL)
+    assert "capture has moved" in row.toolTip(cv._LABEL_COL)
+    assert "1 of 2 drawn" in cv.status_label.text()
+    assert "1 unavailable" in cv.status_label.text()
+    # Its row still offers both actions -- an unloadable curve is still unpinnable.
+    assert _row_button(cv, 0, cv._REMOVE_COL) is not None
 
 
 def test_auto_frame_bounds_track_finite_curve_extent(qtbot):
@@ -852,6 +1187,119 @@ def test_graph_point_readout_shows_value_and_clears(qtbot):
     assert not graph._readout_label.isVisible()
 
 
+#: Two palette entries, named so the overlay tests read as "these two colours".
+BLUE = (66, 135, 245)
+RED = (214, 90, 70)
+
+
+def _overlay_traces():
+    """Two curves of the same metric with deliberately different extents.
+
+    A runs 0-2 ms and is all-finite; B is NaN until 2 ms and runs to 4 ms, and
+    their calculation windows only partly overlap — so every union the overlay
+    takes is a different number from either curve's own.
+    """
+    from sound_metric_app.dsp.graphing import MetricTrace
+
+    a = MetricTrace(
+        t_ms=np.array([0.0, 1.0, 2.0]),
+        values=np.array([1.0, 5.0, 2.0]),
+        y_label="Impulse ∫p·dt (Pa·ms)",
+        title="Peak Impulse",
+        peak_index=1,
+        connected=True,
+        window_start_index=0,
+        window_end_index=1,
+    )
+    b = MetricTrace(
+        t_ms=np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+        values=np.array([np.nan, np.nan, 3.0, 9.0, 4.0]),
+        y_label="Impulse ∫p·dt (Pa·ms)",
+        title="Peak Impulse",
+        peak_index=3,
+        connected=True,
+        window_start_index=1,
+        window_end_index=4,
+    )
+    return a, b
+
+
+def test_overlaid_series_draw_with_a_legend_and_union_bounds(qtbot):
+    # The Compare tab hands the same widget several traces instead of one. Each
+    # gets its own colour and legend row, and every bound the framing buttons
+    # use widens to cover all of them -- a bound fitted to whichever curve was
+    # drawn first would frame away the others.
+    from sound_metric_app.ui.main_window import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+    a, b = _overlay_traces()
+
+    graph.show_traces([("first", a, BLUE), ("second", b, RED)], "two shots")
+    assert len(graph._plot.listDataItems()) == 2
+    assert graph._legend.isVisible() and len(graph._legend.items) == 2
+    # X spans A's start to B's end; Y spans A's floor to B's ceiling; the window
+    # brackets the earliest start and the latest end of the two.
+    assert graph._x_bounds == (0.0, 4.0)
+    assert graph._y_bounds == (1.0, 9.0)
+    assert graph._window_x_bounds == (0.0, 4.0)
+    assert graph._frame_window_btn.isEnabled()
+    assert graph._auto_frame_btn.isEnabled()
+
+    # Framing still lands on those unions, so both curves stay in view.
+    graph.auto_frame()
+    view_x0, view_x1 = graph._plot.getViewBox().viewRange()[0]
+    assert (view_x0, view_x1) == pytest.approx((0.0, 4.0))
+
+    # Each curve is drawn in the colour it was handed, so a caller that can hide
+    # one keeps the rest on the colours they already had.
+    pens = [item.opts["pen"].color().getRgb()[:3] for item in graph._plot.listDataItems()]
+    assert pens == [BLUE, RED]
+    # The palette itself lives here, so a view listing the same series reads it
+    # from the graph rather than keeping a second copy.
+    assert MetricGraph.series_color(0) == MetricGraph._SERIES_COLORS[0]
+    assert MetricGraph.series_color(len(MetricGraph._SERIES_COLORS)) == MetricGraph.series_color(0)
+
+
+def test_single_trace_keeps_the_plain_legend_free_graph(qtbot):
+    # The Batch average tab draws one curve through the same code path. It must
+    # come out exactly as before: no legend, and the bounds of that one trace.
+    from sound_metric_app.ui.main_window import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+    a, b = _overlay_traces()
+
+    graph.show_traces([("first", a, BLUE), ("second", b, RED)], "two shots")
+    graph.show_trace(a)
+    assert len(graph._plot.listDataItems()) == 1
+    assert not graph._legend.isVisible()  # and the stale two rows are gone
+    assert len(graph._legend.items) == 0
+    assert graph._x_bounds == (0.0, 2.0)
+    assert graph._window_x_bounds == (0.0, 1.0)
+
+    graph.show_message("nothing graphed")
+    assert not graph._legend.isVisible()
+
+
+def test_readout_names_which_overlaid_curve_was_picked(qtbot):
+    # With one curve the number speaks for itself; with several it does not say
+    # which shot it came from, so the series' label leads the readout.
+    from sound_metric_app.ui.main_window import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+    a, b = _overlay_traces()
+
+    graph.show_trace(a)
+    graph._show_readout(1, 5.0)
+    assert graph._readout_label.text().startswith("5.000")
+
+    graph.show_traces([("first", a, BLUE), ("second", b, RED)], "two shots")
+    graph._show_readout(3, 9.0, series_index=1)
+    assert graph._readout_label.text().startswith("second:  9.000")
+
+
 def test_full_workflow_through_widgets(window, qtbot):
     from sound_metric_app.models import MicPosition, ShotRole
 
@@ -1095,6 +1543,103 @@ def test_exclude_prompts_for_a_reason_and_records_it(window, qtbot, monkeypatch)
     bv.refresh()
     _, _, _cluster, refreshed = _tree_nodes(bv)
     assert "high winds" in refreshed.text(1)
+
+
+def test_data_bank_compare_buttons_pin_an_idle_shots_ml_and_se(window, qtbot):
+    # The data bank is the one tab that can reach a shot before it is ever
+    # brought forward -- that idle reach is the whole point of pinning from
+    # here rather than only from Batch average.
+    from sound_metric_app.models import MicPosition
+    from sound_metric_app.ui.main_window import _COMPARE_ADDED_LABEL
+
+    _mark_all_shots(window, qtbot)
+
+    bv = window.bank_view
+    bv.refresh()
+    _, _, _cluster_item, shot_item = _tree_nodes(bv)
+    _kind, shot, *_rest = shot_item.data(0, QtCore.Qt.UserRole)
+    assert shot.included is False  # never brought forward
+
+    widget = bv.tree.itemWidget(shot_item, bv._COMPARE_COL)
+    buttons = widget.findChildren(QtWidgets.QPushButton)
+    assert [b.text() for b in buttons] == ["ML", "SE"]
+
+    cv = window.compare_view
+    for button in buttons:
+        button.click()
+        assert button.text() == _COMPARE_ADDED_LABEL
+
+    assert {s.position for s in cv._series} == {MicPosition.ML, MicPosition.SE}
+    assert {s.shot_id for s in cv._series} == {shot.id}
+    # The idle status is surfaced in the tooltip/detail rather than hidden.
+    assert all("idle" in s.detail for s in cv._series)
+
+
+def test_data_bank_compare_button_only_appears_for_a_marked_channel(window, qtbot):
+    # A shot row's Compare cell has one button per tagged channel -- not scoped
+    # to a single mic the way a Batch average shot row is (it sits under one
+    # position's slot). A single-mic shot only gets one.
+    _mark_all_shots(window, qtbot)
+
+    bv = window.bank_view
+    bv.refresh()
+    _, _, _cluster_item, shot_item = _tree_nodes(bv)
+    _kind, shot, *_rest = shot_item.data(0, QtCore.Qt.UserRole)
+    with window.controller._repo() as repo:
+        repo._conn.execute("UPDATE shots SET se_channel = NULL WHERE id = ?", (shot.id,))
+        repo._conn.commit()
+    bv.refresh()
+    _, _, _cluster_item, shot_item = _tree_nodes(bv)
+
+    widget = bv.tree.itemWidget(shot_item, bv._COMPARE_COL)
+    buttons = widget.findChildren(QtWidgets.QPushButton)
+    assert [b.text() for b in buttons] == ["ML"]
+
+
+def test_pinning_the_same_shot_from_data_bank_and_batch_average_is_a_no_op(window, qtbot):
+    # The user's worry: picking the same shot/mic from two different tabs must
+    # not draw it twice. CompareSeries keys on (shot_id, position) regardless
+    # of which tab built it, so the second pin -- from whichever tab it comes
+    # from -- has to be refused exactly like a same-tab repeat.
+    from sound_metric_app.ui.main_window import _COMPARE_ADDED_LABEL, _COMPARE_ALREADY_LABEL
+
+    rv = _loaded_report(window, qtbot)  # marks + includes every shot
+    bv = window.bank_view
+    bv.refresh()
+    cv = window.compare_view
+
+    report_button = _frp_compare_buttons(rv)[0]  # an ML or SE FRP shot row
+    report_button.click()
+    assert report_button.text() == _COMPARE_ADDED_LABEL
+    assert len(cv._series) == 1
+    pinned_key = cv._series[0].key
+
+    # Grab both buttons by their stable ML/SE identity *before* clicking either
+    # -- a click flashes the label to "Added"/"Pinned", so matching by current
+    # text after that point would grab the wrong one.
+    _, _, _cluster_item, shot_item = _tree_nodes(bv)
+    bank_widget = bv.tree.itemWidget(shot_item, bv._COMPARE_COL)
+    bank_buttons = {b.text(): b for b in bank_widget.findChildren(QtWidgets.QPushButton)}
+    bank_button = bank_buttons[pinned_key[1].value]
+    other_bank_button = bank_buttons[next(v for v in bank_buttons if v != pinned_key[1].value)]
+
+    bank_button.click()
+    # Same (shot_id, position): refused, not duplicated, and the button says so.
+    assert bank_button.text() == _COMPARE_ALREADY_LABEL
+    assert len(cv._series) == 1
+
+    # And the reverse direction: pin from the data bank first, then repeat from
+    # Batch average for the shot/mic that button was never scoped to.
+    other_bank_button.click()
+    assert other_bank_button.text() == _COMPARE_ADDED_LABEL
+    assert len(cv._series) == 2
+
+    other_report_button = next(
+        b for b in _frp_compare_buttons(rv) if b is not report_button
+    )
+    other_report_button.click()
+    assert other_report_button.text() == _COMPARE_ALREADY_LABEL
+    assert len(cv._series) == 2
 
 
 def test_edit_batch_session_metadata_via_tree(window, qtbot, monkeypatch):

@@ -47,7 +47,7 @@ class IngestReport:
 
     ``ingested`` holds the freshly created unmarked shots; the remaining lists
     account for every other capture-extension file the scan saw, so the sum of
-    all four equals the number of candidate files considered.
+    all five equals the number of candidate files considered.
     """
 
     ingested: list[Shot] = field(default_factory=list)
@@ -57,6 +57,9 @@ class IngestReport:
     malformed: list[tuple[str, str]] = field(default_factory=list)
     #: (path, reason) for files that could not be opened/read.
     unreadable: list[tuple[str, str]] = field(default_factory=list)
+    #: source paths skipped because the operator previously discarded them —
+    #: see :meth:`~sound_metric_app.storage.repository.WorkflowRepository.discard_file`.
+    discarded: list[str] = field(default_factory=list)
 
     @property
     def n_ingested(self) -> int:
@@ -99,6 +102,10 @@ class IngestionService:
         for path in self._capture_files(folder):
             source_file = str(path.resolve())
 
+            if self._repo.is_discarded(source_file):
+                report.discarded.append(source_file)
+                continue
+
             try:
                 parsed = parse_capture_filename(path.name)
             except ValueError as exc:
@@ -113,7 +120,11 @@ class IngestionService:
                 try:
                     self._reader(source_file)
                 except Exception as exc:  # noqa: BLE001 — reader failures are reported, not raised
-                    report.unreadable.append((source_file, str(exc)))
+                    # dwdatareader's DWError carries its real DLL message on
+                    # `.message`; str(exc) alone degrades to a bare status code
+                    # (e.g. "2") because DWStatus is an IntEnum.
+                    reason = getattr(exc, "message", None) or str(exc)
+                    report.unreadable.append((source_file, reason))
                     continue
 
             shot_id = self._repo.add_unmarked_shot(

@@ -4,7 +4,7 @@ containment tree.
 This is the workflow store described in the README's "Data Model & Workflow".
 It lives alongside the legacy flat :class:`~sound_metric_app.storage.database.ResultsDatabase`
 (the single-file CLI path) in the same database file, and only ever creates its
-own five tables, so the two can share a ``.db`` without interfering.
+own six tables, so the two can share a ``.db`` without interfering.
 
 The tree is pure containment. Two separate concerns ride on top of it:
 
@@ -31,6 +31,7 @@ from ..models import (
     Batch,
     Cluster,
     Combination,
+    DiscardedFile,
     MetricResult,
     MicPosition,
     Shot,
@@ -111,6 +112,12 @@ CREATE TABLE IF NOT EXISTS channel_metrics (
     liaeq_100ms_db  REAL,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (shot_id, mic_position)
+);
+
+CREATE TABLE IF NOT EXISTS discarded_files (
+    source_file  TEXT PRIMARY KEY,    -- resolved absolute path, same identity as shots.source_file
+    reason       TEXT,                -- why it's being ignored (operator-edited)
+    discarded_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
 
@@ -620,6 +627,60 @@ class WorkflowRepository(_SqliteStore):
         )
         return int(cur.fetchone()[0])
 
+    # ---- discarded files -------------------------------------------------- #
+
+    def discard_file(self, source_file: str, *, reason: str | None = None) -> None:
+        """Blocklist a bad capture path so future ingest scans skip it silently.
+
+        Idempotent: re-discarding an already-discarded path updates its reason
+        and timestamp rather than erroring, so discarding the same row twice
+        (e.g. a stale UI row still on screen) is harmless.
+        """
+        self._conn.execute(
+            """
+            INSERT INTO discarded_files (source_file, reason) VALUES (?, ?)
+            ON CONFLICT (source_file) DO UPDATE SET reason = excluded.reason,
+                                                     discarded_at = datetime('now')
+            """,
+            (source_file, reason),
+        )
+        self._commit()
+
+    def restore_file(self, source_file: str) -> None:
+        """Un-blocklist a path. No-op if it was not discarded."""
+        self._conn.execute("DELETE FROM discarded_files WHERE source_file = ?", (source_file,))
+        self._commit()
+
+    def is_discarded(self, source_file: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM discarded_files WHERE source_file = ?", (source_file,)
+        ).fetchone()
+        return row is not None
+
+    def discarded_files(self) -> list[DiscardedFile]:
+        """Every blocklisted path, most-recently-discarded first."""
+        cur = self._conn.execute("SELECT * FROM discarded_files ORDER BY discarded_at DESC")
+        return [_row_to_discarded_file(r) for r in cur.fetchall()]
+
+    def discard_unmarked_shot(self, shot_id: int, *, reason: str | None = None) -> None:
+        """Delete an unmarked shot and blocklist its source file.
+
+        Guards that the shot is unmarked: a marked shot carries metrics
+        (channel_metrics, ON DELETE CASCADE) and a cluster/batch placement, and
+        leaving the data bank is set_shot_included's job (excluded, not
+        deleted). An unmarked shot has neither, so this is a plain leaf delete.
+        """
+        shot = self.get_shot(shot_id)
+        if shot is None:
+            raise LookupError(f"No shot with id {shot_id}")
+        if shot.marked:
+            raise ValueError(
+                f"Shot {shot_id} is already marked; exclude it instead of discarding."
+            )
+        with self.transaction():
+            self.discard_file(shot.source_file, reason=reason)
+            self._conn.execute("DELETE FROM shots WHERE id = ?", (shot_id,))
+
     # ---- inclusion ------------------------------------------------------ #
 
     def set_shot_included(
@@ -1012,4 +1073,12 @@ def _row_to_shot(row: sqlite3.Row) -> Shot:
         cluster_id=row["cluster_id"],
         created_at=row["created_at"],
         captured_at=row["captured_at"],
+    )
+
+
+def _row_to_discarded_file(row: sqlite3.Row) -> DiscardedFile:
+    return DiscardedFile(
+        source_file=row["source_file"],
+        reason=row["reason"],
+        discarded_at=row["discarded_at"],
     )

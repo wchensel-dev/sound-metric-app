@@ -248,7 +248,8 @@ python -m sound_metric_app.ui.main_window
 ```
 
 The desktop app is the GUI counterpart to the `sma` CLI below — same services,
-same local database. It opens four tabs matching the workflow:
+same local database. It opens five tabs — four matching the workflow, plus the
+cross-batch Compare view:
 
 - **Ingest** — shows the configured input folder, an **Ingest** button, and the
   list of Unmarked Data Sets with their parsed cluster, shot order, and derived
@@ -275,7 +276,31 @@ same local database. It opens four tabs matching the workflow:
   rather than hidden, and each populated slot expands into the shots behind it.
   Clicking a metric cell on a shot row graphs it. Each populated slot row ends in
   a **Copy** button that puts that row on the clipboard as a SilencerScout
-  `SSR1` paste string (see below).
+  `SSR1` paste string (see below); each *shot* row carries the mirror-image
+  button one column earlier — **Compare**, which pins that shot's curve to the
+  Compare tab.
+- **Compare** — one metric's curve for any number of shots, overlaid on a single
+  graph with a legend. Shots are pinned from the Batch average tab and stay
+  until removed, so a comparison can mix batches, SKUs, and both mics; the tab
+  title carries the running count. Which mic a pinned curve is of is the slot
+  its row sat under, so pinning one shot from under both Muzzle Left and
+  Shooter's Ear overlays its ML and SE curves. The **Metric** dropdown picks
+  what everything is drawn as (defaulting to **Impulse Pa·ms**) — one metric for
+  the whole overlay, since curves have to share a Y axis to be read against each
+  other. Each pinned row carries its own **Hide** and **Remove**: Hide takes
+  that curve off the graph but leaves it pinned — the way to read three of five
+  without losing the other two — and the row keeps its colour while hidden, so
+  unhiding puts it back where the eye left it; Remove unpins outright.
+  **Clear all** empties the tab.
+
+Both graphs are the same widget: Auto Frame, Frame Calc Window, the +5/+10 ms
+onset close-ups, the Instantaneous/Fast/Slow **Level** dropdown, and the
+click-to-read-a-point box behave identically on the two tabs because they *are*
+the one implementation, used twice. Where a single curve draws one bracket, an
+overlay draws the union of its curves' — so the framing buttons still land
+somewhere that contains every curve. The onset close-ups frame fixed times off
+the capture's own axis, which is what makes the same slice of two shots
+comparable side by side.
 
 #### Scout paste strings (`SSR1`)
 

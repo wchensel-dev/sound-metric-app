@@ -1,6 +1,6 @@
 """PySide6 desktop app for the ingest -> mark -> bring-forward -> report workflow.
 
-Four views over the same Phase B services the ``sma`` CLI drives, wired through
+Five views over the same Phase B services the ``sma`` CLI drives, wired through
 :class:`~sound_metric_app.ui.controller.WorkflowController`:
 
 1. **Ingest / Unmarked** — scan the input folder, list Unmarked Data Sets.
@@ -13,6 +13,16 @@ Four views over the same Phase B services the ``sma`` CLI drives, wired through
    (muzzle-left / shooter's-ear crossed with FRP / regular), positions and roles
    never mixed, each averaged row ending in a Copy button that yields the
    SilencerScout ``SSR1`` paste string for that slot.
+5. **Compare** — one metric's curve for any number of shots overlaid on a single
+   graph, pinned there by a Compare button on a Batch average shot row or a
+   Data bank shot row — the former one button per slot's mic, the latter one
+   button per marked channel, since a data-bank row is not scoped to a
+   position. Either source can reach an idle shot's curve just as well as an
+   included one. Shots from different batches, SKUs, and mics all coexist
+   here, and pinning the same shot/mic from both tabs is a no-op the second
+   time (:class:`CompareSeries` keys on shot id + position, not on which tab
+   sent it) — the batch-average and data-bank tabs are where shots are
+   chosen, this one is where they are read against each other.
 
 The split between tabs 3 and 4 is the directive's two views: the data bank is the
 complete archive where nothing is deleted for being left out, and the batch
@@ -29,6 +39,7 @@ Run with:  python -m sound_metric_app.ui.main_window   (needs the 'gui' extra)
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -36,9 +47,9 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from ..dsp import SMOOTHING_FAST, SMOOTHING_INSTANT, SMOOTHING_SLOW
+from ..dsp import SMOOTHING_FAST, SMOOTHING_INSTANT, SMOOTHING_SLOW, MetricTrace
 from ..models import MicPosition, Shot, ShotRole, role_for_order
-from ..services import AVERAGE_SLOTS, slot_line
+from ..services import AVERAGE_SLOTS, BatchAverages, slot_line
 from .controller import WorkflowController
 
 _NONE_LABEL = "(none)"
@@ -56,6 +67,40 @@ _ALL_SKUS_LABEL = "All SKUs"
 _COPY_LABEL = "Copy"
 _COPIED_LABEL = "Copied ✓"
 _COPIED_FLASH_MS = 1200
+
+#: Text on a shot row's Compare button, and the two confirmations it flashes:
+#: pinning happens on another tab, so the button is the only feedback there is.
+#: "already" is its own message rather than a silent repeat of "added" — the
+#: same shot/mic can only be pinned once, and a click that changed nothing
+#: should say so.
+_COMPARE_LABEL = "Compare"
+_COMPARE_ADDED_LABEL = "Added ✓"
+_COMPARE_ALREADY_LABEL = "Pinned ✓"
+
+#: The Compare tab's title, which grows a count of what is pinned to it (see
+#: :meth:`MainWindow.update_compare_count`).
+_COMPARE_TAB_LABEL = "Compare"
+
+#: The report's metric columns, in display order: (header label, stored metric
+#: key). Shared by the Batch average tree (which spends them as columns) and the
+#: Compare tab's metric picker (which spends them as dropdown rows), so the two
+#: can only ever offer the same metrics under the same names. Every key is one
+#: :func:`~sound_metric_app.dsp.build_metric_trace` accepts.
+_REPORT_METRICS = (
+    ("Peak Pa", "peak_pa"),
+    ("Peak dB", "peak_db"),
+    ("Peak dBA", "peak_dba"),
+    ("Impulse Pa·ms", "impulse_pa_ms"),
+    ("Impulse dB·ms", "peak_impulse_db"),
+    ("Peak Leq10ms dBA", "leq10ms_db"),
+    ("LIAeq,100ms dBA", "liaeq_100ms_db"),
+)
+
+#: Mid-grey for a Compare row that is not on the graph: the text of a hidden
+#: one (set aside, but still pinned) and the outline of the empty swatch an
+#: unloadable one gets. A *hidden* row keeps its colour swatch at full strength
+#: — that is what its curve comes back as.
+_MUTED_INK = QtGui.QColor(140, 140, 148)
 
 #: Tint behind the Batch average tree's slot rows, so an averaged row is legible
 #: at a glance against the individual shots nested under it. Deliberately
@@ -129,6 +174,37 @@ def _style_grid_tree(tree: QtWidgets.QTreeWidget) -> None:
         " background: palette(highlight);"
         " color: palette(highlighted-text); }"
     )
+
+
+def _flash_button(button: QtWidgets.QPushButton, message: str, revert_to: str) -> None:
+    """Briefly swap a button's text to confirm an action that leaves no mark.
+
+    Both of the Batch average tree's row buttons act somewhere the operator is
+    not looking — the clipboard, and the Compare tab — so the button itself has
+    to acknowledge the click. The revert timer is anchored to the button: a
+    rebuild of the tree deletes it, and an anchored ``singleShot`` is dropped
+    rather than firing into a deleted widget.
+    """
+    button.setText(message)
+    QtCore.QTimer.singleShot(
+        _COPIED_FLASH_MS, button, lambda: button.setText(revert_to)
+    )
+
+
+def _color_swatch(color: tuple[int, int, int] | None) -> QtGui.QIcon:
+    """A small filled square in ``color`` — the Compare list's legend key.
+
+    ``None`` (a series that could not be loaded) yields a hollow outline, so an
+    undrawn row is visibly not claiming one of the graph's colours.
+    """
+    pixmap = QtGui.QPixmap(12, 12)
+    pixmap.fill(QtGui.QColor(*color) if color else QtCore.Qt.transparent)
+    if color is None:
+        painter = QtGui.QPainter(pixmap)
+        painter.setPen(_MUTED_INK)
+        painter.drawRect(0, 0, 11, 11)
+        painter.end()
+    return QtGui.QIcon(pixmap)
 
 
 def _tree_items(tree: QtWidgets.QTreeWidget):
@@ -274,10 +350,21 @@ class _View(QtWidgets.QWidget):
 
 
 class IngestView(_View):
-    _COLUMNS = ["ID", "File", "SKU", "Platform", "Cluster", "Shot #", "Role"]
+    _COLUMNS = ["ID", "File", "SKU", "Platform", "Cluster", "Shot #", "Role", ""]
+    _DISCARD_COL = len(_COLUMNS) - 1
+
+    #: Malformed/unreadable rows from the latest scan, one Discard button each.
+    _BAD_COLUMNS = ["File", "Kind", "Reason", ""]
+    _BAD_ACTION_COL = len(_BAD_COLUMNS) - 1
+    #: Previously discarded paths (DB truth, not scan-scoped), one Restore button each.
+    _DISCARDED_COLUMNS = ["File", "Reason", "Discarded", ""]
+    _DISCARDED_ACTION_COL = len(_DISCARDED_COLUMNS) - 1
 
     def __init__(self, controller: WorkflowController, main: "MainWindow"):
         super().__init__(controller, main)
+        #: The most recent scan's report, kept so a Discard click can drop its
+        #: row from the tree immediately instead of waiting on a re-scan.
+        self._last_report = None
         layout = QtWidgets.QVBoxLayout(self)
 
         folder_row = QtWidgets.QHBoxLayout()
@@ -304,13 +391,39 @@ class IngestView(_View):
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
+        layout.addWidget(QtWidgets.QLabel("Needs attention (this scan):"))
+        self.bad_files_tree = self._build_action_tree(
+            self._BAD_COLUMNS, self._BAD_ACTION_COL, ("Discard",)
+        )
+        # Short and scrollable rather than tall: these are exceptions to
+        # triage, not the view's primary content.
+        self.bad_files_tree.setMaximumHeight(120)
+        layout.addWidget(self.bad_files_tree)
+
+        layout.addWidget(QtWidgets.QLabel("Discarded files:"))
+        self.discarded_tree = self._build_action_tree(
+            self._DISCARDED_COLUMNS, self._DISCARDED_ACTION_COL, ("Restore",)
+        )
+        self.discarded_tree.setMaximumHeight(120)
+        layout.addWidget(self.discarded_tree)
+
         layout.addWidget(QtWidgets.QLabel("Unmarked data sets:"))
         self.table = QtWidgets.QTableWidget(0, len(self._COLUMNS))
         self.table.setHorizontalHeaderLabels(self._COLUMNS)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        # The trailing Discard column holds a button, not text — stretching it
+        # like the old last-section default would leave a wide empty strip
+        # beside a left-hung button, so File (the column worth the extra room)
+        # stretches instead and Discard is sized from the button itself.
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        header.setSectionResizeMode(self._DISCARD_COL, QtWidgets.QHeaderView.Fixed)
+        self.table.setColumnWidth(
+            self._DISCARD_COL, QtWidgets.QPushButton("Discard").sizeHint().width()
+        )
         self.table.doubleClicked.connect(lambda *_: self._mark_selected())
         layout.addWidget(self.table)
 
@@ -335,7 +448,132 @@ class IngestView(_View):
             ]
             for col, text in enumerate(values):
                 self.table.setItem(row, col, QtWidgets.QTableWidgetItem(text))
+            self._add_discard_shot_button(row, s)
         self.table.resizeColumnsToContents()
+        self._draw_discarded()
+
+    def _add_discard_shot_button(self, row: int, shot: Shot) -> None:
+        btn = QtWidgets.QPushButton("Discard")
+        btn.setToolTip("Remove this shot and ignore its file on future scans.")
+        shot_id, name = shot.id, Path(shot.source_file).name
+        btn.clicked.connect(lambda: self._defer(lambda: self._prompt_discard_shot(shot_id, name)))
+        self.table.setCellWidget(row, self._DISCARD_COL, btn)
+
+    def _prompt_discard_shot(self, shot_id: int, filename: str) -> None:
+        text, ok = QtWidgets.QInputDialog.getMultiLineText(
+            self,
+            "Discard shot",
+            f"Discard {filename!r}? It will be removed from Unmarked data sets "
+            "and ignored on future ingest scans. Optional reason:",
+            "",
+        )
+        if not ok:
+            return
+        self._run_async(
+            lambda: self.controller.discard_shot(shot_id, reason=text.strip() or None),
+            lambda _: self.main.notify_changed(),
+        )
+
+    @staticmethod
+    def _build_action_tree(
+        columns: list[str], action_col: int, button_labels: tuple[str, ...]
+    ) -> QtWidgets.QTreeWidget:
+        """A flat, headed tree whose last column hosts one button per row.
+
+        Shared shape for the bad-files and discarded-files lists: real column
+        headers (unlike CompareView's headerless pinned list) since these rows
+        carry a reason string worth a labeled column, not just a swatch and a
+        name. The action column is sized from the button's own sizeHint, since
+        resizeColumnToContents sees no text behind a setItemWidget button.
+        """
+        tree = QtWidgets.QTreeWidget()
+        tree.setColumnCount(len(columns))
+        tree.setHeaderLabels(columns)
+        tree.setRootIsDecorated(False)
+        tree.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        header = tree.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        width = max(QtWidgets.QPushButton(text).sizeHint().width() for text in button_labels)
+        header.setSectionResizeMode(action_col, QtWidgets.QHeaderView.Fixed)
+        tree.setColumnWidth(action_col, width)
+        return tree
+
+    def _draw_bad_files(self, report) -> None:
+        self.bad_files_tree.clear()
+        rows = [(p, "malformed", r) for p, r in report.malformed]
+        rows += [(p, "unreadable", r) for p, r in report.unreadable]
+        for source_file, kind, reason in rows:
+            item = QtWidgets.QTreeWidgetItem([Path(source_file).name, kind, reason])
+            item.setToolTip(2, reason)
+            self.bad_files_tree.addTopLevelItem(item)
+            self._add_discard_button(item, source_file, reason)
+
+    def _add_discard_button(
+        self, item: QtWidgets.QTreeWidgetItem, source_file: str, reason: str
+    ) -> None:
+        btn = QtWidgets.QPushButton("Discard")
+        btn.setToolTip("Ignore this file on every future scan until restored.")
+        btn.clicked.connect(lambda: self._defer(lambda: self._prompt_discard(source_file, reason)))
+        self.bad_files_tree.setItemWidget(item, self._BAD_ACTION_COL, btn)
+
+    def _prompt_discard(self, source_file: str, reason: str) -> None:
+        """Confirm (and let the operator edit) the reason before it's persisted.
+
+        Pre-filled with the scan's own failure reason so the common case is one
+        click through; the field stays editable for a truer note (e.g. "known
+        bad export, re-shooting Tuesday").
+        """
+        text, ok = QtWidgets.QInputDialog.getMultiLineText(
+            self, "Discard file", f"Why discard {Path(source_file).name!r}?", reason
+        )
+        if not ok:
+            return
+        self._discard(source_file, text.strip() or reason)
+
+    def _discard(self, source_file: str, reason: str) -> None:
+        self._run_async(
+            lambda: self.controller.discard_file(source_file, reason=reason),
+            lambda _: self._after_discard(source_file),
+        )
+
+    def _after_discard(self, source_file: str) -> None:
+        """Drop the just-discarded row from the live report and redraw both trees.
+
+        No re-scan needed: the report already in memory just loses this entry,
+        while the Discarded panel (DB truth) picks up the new row.
+        """
+        if self._last_report is not None:
+            self._last_report.malformed = [
+                (p, r) for p, r in self._last_report.malformed if p != source_file
+            ]
+            self._last_report.unreadable = [
+                (p, r) for p, r in self._last_report.unreadable if p != source_file
+            ]
+            self._draw_bad_files(self._last_report)
+        self._draw_discarded()
+
+    def _draw_discarded(self) -> None:
+        self.discarded_tree.clear()
+        for d in self.controller.discarded_files():
+            item = QtWidgets.QTreeWidgetItem(
+                [Path(d.source_file).name, d.reason or _EMPTY, d.discarded_at or _EMPTY]
+            )
+            item.setToolTip(1, d.reason or "")
+            self.discarded_tree.addTopLevelItem(item)
+            self._add_restore_button(item, d.source_file)
+
+    def _add_restore_button(self, item: QtWidgets.QTreeWidgetItem, source_file: str) -> None:
+        btn = QtWidgets.QPushButton("Restore")
+        btn.setToolTip("Stop ignoring this file; it will be re-evaluated on the next scan.")
+        btn.clicked.connect(lambda: self._defer(lambda: self._restore(source_file)))
+        self.discarded_tree.setItemWidget(item, self._DISCARDED_ACTION_COL, btn)
+
+    def _restore(self, source_file: str) -> None:
+        self._run_async(
+            lambda: self.controller.restore_file(source_file),
+            lambda _: self._draw_discarded(),
+        )
 
     def _update_folder_label(self) -> None:
         folder = self.controller.input_folder()
@@ -357,17 +595,15 @@ class IngestView(_View):
         )
 
     def _on_ingested(self, report) -> None:
-        lines = [
+        self._last_report = report
+        self.status_label.setText(
             f"Ingested {report.n_ingested}, "
             f"already present {len(report.already_present)}, "
             f"malformed {len(report.malformed)}, "
-            f"unreadable {len(report.unreadable)}."
-        ]
-        for path, reason in report.malformed:
-            lines.append(f"  malformed: {Path(path).name} — {reason}")
-        for path, reason in report.unreadable:
-            lines.append(f"  unreadable: {Path(path).name} — {reason}")
-        self.status_label.setText("\n".join(lines))
+            f"unreadable {len(report.unreadable)}, "
+            f"discarded {len(report.discarded)}."
+        )
+        self._draw_bad_files(report)
         self.main.notify_changed()
 
     def _selected_shot_id(self) -> int | None:
@@ -443,7 +679,13 @@ class MarkingView(_View):
 
         self.mark_btn = QtWidgets.QPushButton("Mark")
         self.mark_btn.clicked.connect(self._mark)
-        layout.addWidget(self.mark_btn)
+        self.discard_btn = QtWidgets.QPushButton("Discard")
+        self.discard_btn.setToolTip("Remove this shot and ignore its file on future scans.")
+        self.discard_btn.clicked.connect(self._discard_current)
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addWidget(self.mark_btn)
+        button_row.addWidget(self.discard_btn)
+        layout.addLayout(button_row)
 
         self.status_label = QtWidgets.QLabel("")
         self.status_label.setWordWrap(True)
@@ -677,6 +919,32 @@ class MarkingView(_View):
         self.rh_edit.clear()
         self.main.notify_changed()
 
+    # ---- discard ---------------------------------------------------------- #
+
+    def _discard_current(self) -> None:
+        shot = self._current_shot()
+        if shot is None:
+            QtWidgets.QMessageBox.information(self, "No shot", "No unmarked shot selected.")
+            return
+
+        text, ok = QtWidgets.QInputDialog.getMultiLineText(
+            self,
+            "Discard shot",
+            f"Discard {Path(shot.source_file).name!r}? It will be removed from "
+            "Unmarked data sets and ignored on future ingest scans. Optional reason:",
+            "",
+        )
+        if not ok:
+            return
+
+        shot_id = shot.id
+        self.status_label.setText("Discarding…")
+        self._run_async(
+            lambda: self.controller.discard_shot(shot_id, reason=text.strip() or None),
+            lambda _: self.main.notify_changed(),
+            busy=(self.mark_btn, self.discard_btn),
+        )
+
 
 # --------------------------------------------------------------------------- #
 # 3. Data bank: Combination -> Batch -> Cluster -> Shot tree
@@ -908,7 +1176,20 @@ class DataBankView(_View):
     lands on 3 FRPs and 5 regulars.
     """
 
-    _COLUMNS = ["Combination / Batch / Cluster / Shot", "Detail", "Role", "Timestamp"]
+    _COLUMNS = [
+        "Combination / Batch / Cluster / Shot",
+        "Detail",
+        "Role",
+        "Timestamp",
+        "Compare",
+    ]
+    #: The Compare column trails the rest; only shot rows fill it, with one
+    #: button per marked mic (ML, SE, or both).
+    _COMPARE_COL = len(_COLUMNS) - 1
+    #: Wide enough for the ML and SE buttons side by side — resizeColumnToContents
+    #: sees no text behind them (they are widgets, not cell text), so this column
+    #: is sized by hand rather than measured, same as Batch average's button columns.
+    _COMPARE_COL_WIDTH = 130
 
     def __init__(self, controller: WorkflowController, main: "MainWindow"):
         super().__init__(controller, main)
@@ -999,6 +1280,12 @@ class DataBankView(_View):
         # the deeper rows by the time one is opened.
         self.tree.expandAll()
         for col in range(len(self._COLUMNS)):
+            if col == self._COMPARE_COL:
+                # Contents-sizing measures cell text, and this column's cells
+                # are empty behind their buttons; give it a hand-picked width
+                # instead, same as Batch average's button columns.
+                self.tree.setColumnWidth(col, self._COMPARE_COL_WIDTH)
+                continue
             self.tree.resizeColumnToContents(col)
         self.tree.collapseAll()
         _restore_expanded(self.tree, open_rows, self._row_key)
@@ -1051,7 +1338,13 @@ class DataBankView(_View):
         )
         item.setData(0, QtCore.Qt.UserRole, ("cluster", cluster, batch, combo))
         for shot in node.shots:
-            item.addChild(self._shot_item(shot, cluster, batch, combo))
+            shot_item = self._shot_item(shot, cluster, batch, combo)
+            item.addChild(shot_item)
+            # setItemWidget needs the row parented first, same reason as the
+            # Batch average tab's Compare column (see BatchAverageView._load_report).
+            self.tree.setItemWidget(
+                shot_item, self._COMPARE_COL, self._compare_widget(shot, cluster, batch, combo)
+            )
         return item
 
     def _shot_item(self, shot, cluster, batch, combo) -> QtWidgets.QTreeWidgetItem:
@@ -1266,6 +1559,88 @@ class DataBankView(_View):
             return
         self.main.notify_changed()
 
+    # ---- compare ----------------------------------------------------------- #
+
+    def _compare_widget(self, shot: Shot, cluster, batch, combo) -> QtWidgets.QWidget:
+        """One shot row's Compare cell: a button per marked mic, ML then SE.
+
+        Unlike the Batch average tab (where a shot row sits under one position's
+        slot, so one button pins one curve), a data-bank shot row is not scoped
+        to a mic — both channels live on the same row. An unmarked shot has
+        neither channel set and gets no button at all, since there is no curve
+        to pin yet.
+        """
+        container = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(container)
+        row.setContentsMargins(2, 0, 2, 0)
+        row.setSpacing(4)
+        for position, channel in (
+            (MicPosition.ML, shot.ml_channel),
+            (MicPosition.SE, shot.se_channel),
+        ):
+            if not channel:
+                continue
+            row.addWidget(self._compare_button(shot, position, cluster, batch, combo))
+        row.addStretch(1)
+        return container
+
+    def _series_for(
+        self, shot: Shot, position: MicPosition, cluster, batch, combo
+    ) -> CompareSeries:
+        """Name one data-bank shot/mic as a Compare-tab series.
+
+        Mirrors :meth:`BatchAverageView._series_for` — same key shape, same
+        label/detail conventions — so a shot pinned from here reads identically
+        to one pinned from Batch average, and the two cannot double-pin the same
+        curve (``CompareView.add_series`` dedupes on ``(shot_id, position)``
+        regardless of which tab it arrived from).
+        """
+        where = (
+            f"C{shot.cluster_index}·S{shot.shot_order}"
+            if shot.cluster_index
+            else f"S{shot.shot_order}"
+        )
+        sku = combo.sku if combo else "?"
+        return CompareSeries(
+            shot_id=shot.id,
+            position=position,
+            label=f"#{shot.id} · {sku} · {where} · {position.value}",
+            detail=(
+                f"{combo.label if combo else '?'}\n"
+                f"Batch #{batch.id} · {where} · {position.label}"
+                + ("" if shot.included else "  (idle — not brought forward)")
+            ),
+        )
+
+    def _compare_button(
+        self, shot: Shot, position: MicPosition, cluster, batch, combo
+    ) -> QtWidgets.QPushButton:
+        """A small ML/SE button that pins one channel — the row has room for two."""
+        series = self._series_for(shot, position, cluster, batch, combo)
+        button = QtWidgets.QPushButton(position.value)
+        button.setToolTip(
+            f"Overlay this shot's {position.label} curve on the Compare tab.\n\n"
+            f"{series.detail}"
+        )
+        button.clicked.connect(lambda: self._pin_for_compare(button, series))
+        return button
+
+    def _pin_for_compare(
+        self, button: QtWidgets.QPushButton, series: CompareSeries
+    ) -> None:
+        """Pin one shot/mic to the Compare tab, without leaving the data bank.
+
+        Same pattern as :meth:`BatchAverageView._pin_for_compare`: the button
+        flashes to confirm, then reverts to its own label (ML or SE, not the
+        other tab's "Compare") rather than a shared constant.
+        """
+        added = self.main.add_to_compare(series)
+        _flash_button(
+            button,
+            _COMPARE_ADDED_LABEL if added else _COMPARE_ALREADY_LABEL,
+            series.position.value,
+        )
+
 
 # --------------------------------------------------------------------------- #
 # 4. Report view
@@ -1273,17 +1648,31 @@ class DataBankView(_View):
 
 
 class MetricGraph(QtWidgets.QWidget):
-    """The Report tab's right-hand pane: one metric's time series for one shot.
+    """One metric's time series, for one shot or for several overlaid.
+
+    Used unchanged by both graphing tabs — the Batch average tab hands it a
+    single trace, the Compare tab a list — so the framing buttons, the
+    level-weighting dropdown, the point readout, and the theming are one
+    implementation that cannot drift between the two. Overlaying is the only
+    difference between the callers, and it is expressed as the *count* of series
+    passed in: :meth:`show_trace` is :meth:`show_traces` with one.
 
     A thin wrapper over a :class:`pyqtgraph.PlotWidget`, with a header row above
     it: the graph title on the left and a level-weighting dropdown on the right.
     That dropdown chooses how the SPL-over-time curve is drawn — the raw
     per-sample level (a point cloud) or a Fast/Slow time-weighted RMS envelope (a
     continuous line). It emits :attr:`smoothingChanged` when the user switches so
-    the owning view can re-request the trace. Colours track the active light/dark
-    palette so the plot doesn't clash with the rest of the window.
+    the owning view can re-request the trace(s). Colours track the active
+    light/dark palette so the plot doesn't clash with the rest of the window.
 
-    Clicking a point on the drawn curve snaps to the nearest sample and shows its
+    With more than one series, each curve takes the next colour from
+    :data:`_SERIES_COLORS` and a legend keyed by the caller's labels appears; the
+    annotations that bracket a single curve (calculation window, drawn extent)
+    become the *union* over the series, so the framing buttons still land on a
+    span that contains every curve's. A lone series keeps exactly the plain,
+    legend-free graph it had.
+
+    Clicking a point on a drawn curve snaps to the nearest sample and shows its
     value (with the trace's unit) and time in a small readout box at the bottom
     right, plus a highlight ring on the picked sample. The box has a Clear button
     that dismisses both.
@@ -1299,11 +1688,25 @@ class MetricGraph(QtWidgets.QWidget):
         ("Slow (1 s)", SMOOTHING_SLOW),
     )
 
-    #: Small dots so the thousands of samples read as a point cloud, not a mass.
-    _DOT_BRUSH = pg.mkBrush(66, 135, 245)
-    #: A joined line for the time-weighted envelope (the smooth SLM-style curve).
-    _LINE_PEN = pg.mkPen((66, 135, 245), width=1)
-    _MARK_PEN = pg.mkPen((214, 90, 70), width=1)
+    #: Colour cycle for overlaid series, in the order they are handed over.
+    #: Entry 0 is the blue a single-trace graph has always drawn, so the Batch
+    #: average tab is unchanged by there being a cycle at all. Chosen to stay
+    #: distinguishable against both the light and dark plot backgrounds.
+    _SERIES_COLORS = (
+        (66, 135, 245),   # blue
+        (214, 90, 70),    # red
+        (46, 160, 90),    # green
+        (170, 90, 200),   # purple
+        (230, 160, 30),   # amber
+        (40, 180, 190),   # teal
+        (200, 70, 140),   # magenta
+        (120, 130, 145),  # slate
+    )
+    #: Colour of the peak marker / level line on a *single*-series graph, where
+    #: the annotation reads best set apart from the curve. Overlaid series take
+    #: their own colour for these instead — with several curves in the plot, the
+    #: shared colour is the only thing tying a peak line to the curve it marks.
+    _MARK_COLOR = (214, 90, 70)
     #: Yellow dotted verticals on the first/last sample — the drawn-curve extent.
     _BOUND_PEN = pg.mkPen((240, 200, 0), width=1, style=QtCore.Qt.DotLine)
     #: Dashed verticals on *both* edges of the metric's calculation window.
@@ -1379,6 +1782,11 @@ class MetricGraph(QtWidgets.QWidget):
         self._plot.setDownsampling(auto=True, mode="peak")
         self._plot.showGrid(x=True, y=True, alpha=0.15)
         self._plot.setLabel("bottom", "Time (ms)")
+        # The legend is built once and refilled per render (pyqtgraph only ever
+        # hands out one per plot). It stays hidden until there are at least two
+        # curves to tell apart, so a single-trace graph is unchanged by it.
+        self._legend = self._plot.addLegend(offset=(-12, 12))
+        self._legend.setVisible(False)
         layout.addWidget(self._plot)
 
         # Bottom toolbar: ease-of-use view controls for the plot above, plus the
@@ -1445,13 +1853,15 @@ class MetricGraph(QtWidgets.QWidget):
         #: same two times the dashed window lines mark -- or None when no trace is
         #: shown or the window has no width to frame. Drives Frame Calc Window.
         self._window_x_bounds: tuple[float, float] | None = None
-        #: (y_min, y_max) covering the whole curve (plus the level line, which
+        #: (y_min, y_max) covering every drawn curve (plus any level line, which
         #: autorange would also take in), or None when no trace is shown. Every
         #: framing button pins Y here, so the zoom levels stay comparable.
         self._y_bounds: tuple[float, float] | None = None
-        #: The trace currently drawn, kept so a plot click can find the sample it
-        #: landed on. None whenever the plot shows a message rather than a curve.
-        self._trace = None
+        #: The (label, trace, colour) series currently drawn, in the order they
+        #: were handed over — which is also the legend's order. Kept so a plot
+        #: click can find the sample it landed on. Empty whenever the plot shows
+        #: a message rather than curves.
+        self._series: list[tuple[str, MetricTrace, tuple[int, int, int]]] = []
         #: Scatter item marking the picked sample, or None when nothing is picked.
         self._pick_marker: pg.ScatterPlotItem | None = None
 
@@ -1465,6 +1875,15 @@ class MetricGraph(QtWidgets.QWidget):
         """The ``build_metric_trace`` smoothing mode currently selected."""
         return self._smoothing_combo.currentData()
 
+    @classmethod
+    def series_color(cls, index: int) -> tuple[int, int, int]:
+        """The RGB an overlaid series at ``index`` is drawn in, cycling.
+
+        Public so a view listing the same series (the Compare tab's swatches)
+        keys off the graph's palette rather than keeping a second copy of it.
+        """
+        return cls._SERIES_COLORS[index % len(cls._SERIES_COLORS)]
+
     def _apply_theme(self) -> None:
         pal = self.palette()
         self._fg = pal.color(QtGui.QPalette.Text)
@@ -1473,16 +1892,25 @@ class MetricGraph(QtWidgets.QWidget):
             axis = self._plot.getAxis(name)
             axis.setPen(self._fg)
             axis.setTextPen(self._fg)
+        # pyqtgraph draws legend text in its own default foreground, which is a
+        # light grey that vanishes on a light theme's Base background. Track the
+        # palette like the axes do, and float the labels on a Base-coloured
+        # panel so they stay readable where curves run under them.
+        self._legend.setLabelTextColor(self._fg)
+        self._legend.setBrush(pg.mkBrush(pal.color(QtGui.QPalette.Base)))
+        self._legend.setPen(pg.mkPen(pal.color(QtGui.QPalette.Mid)))
 
     def show_message(self, text: str) -> None:
         """Clear the plot and show a short prompt in place of a graph."""
         self._plot.clear()
+        self._legend.clear()
+        self._legend.setVisible(False)
         self._title_label.setText(text)
         self._plot.setLabel("left", "")
         self._x_bounds = None
         self._window_x_bounds = None
         self._y_bounds = None
-        self._trace = None
+        self._series = []
         self.clear_readout()
         self._auto_frame_btn.setEnabled(False)
         self._frame_window_btn.setEnabled(False)
@@ -1545,103 +1973,109 @@ class MetricGraph(QtWidgets.QWidget):
         self._frame_x((x0, x0 + span_ms), padding=0.02)
 
     def show_trace(self, trace, subtitle: str = "") -> None:
-        """Render a :class:`~sound_metric_app.dsp.MetricTrace` as the sole graph."""
+        """Render a :class:`~sound_metric_app.dsp.MetricTrace` as the sole graph.
+
+        The one-series case of :meth:`show_traces`, spelled out because it is
+        what the Batch average tab always wants: no legend, no label, and the
+        annotations in their own colour rather than the curve's.
+        """
+        self.show_traces([("", trace, self.series_color(0))], subtitle)
+
+    def show_traces(self, series, subtitle: str = "") -> None:
+        """Draw ``series`` — ordered ``(label, MetricTrace, colour)`` — overlaid.
+
+        Every trace is assumed to be the *same* metric over different shots, so
+        they share one Y axis, one unit, and one set of framing bounds; the y
+        label and the fallback title come from the first. An empty sequence
+        leaves the prompt ``subtitle`` on an empty plot rather than an axis with
+        nothing under it.
+
+        Colour is the caller's to assign rather than this widget's to derive from
+        position: a view that can hide a curve without unpinning it has to keep
+        the survivors on the colours they already had, which position alone
+        cannot express. :meth:`series_color` is the palette to spend.
+        """
+        series = [(label, trace, color) for label, trace, color in series]
+        if not series:
+            self.show_message(subtitle or "Nothing to graph.")
+            return
+
         self._plot.clear()
-        self._title_label.setText(subtitle or trace.title)
-        self._plot.setLabel("left", trace.y_label)
-        # A new curve invalidates any prior point pick (different samples/units).
-        self._trace = trace
+        self._legend.clear()
+        # One curve needs no key: the title already names it.
+        self._legend.setVisible(len(series) > 1)
+        # New curves invalidate any prior point pick (different samples/units).
+        self._series = series
         self.clear_readout()
-        if trace.connected:
-            # Time-weighted envelope: a joined line reads as the continuous level
-            # a meter shows. NaN samples break the line into gaps.
-            self._plot.plot(trace.t_ms, trace.values, pen=self._LINE_PEN)
-        else:
-            # One dot per sample, no connecting line (pen=None). NaN samples
-            # (silent Impulse tail) simply don't plot a point. pxMode keeps dots
-            # a fixed screen size regardless of zoom.
-            self._plot.plot(
-                trace.t_ms,
-                trace.values,
-                pen=None,
-                symbol="o",
-                symbolSize=2,
-                symbolPen=None,
-                symbolBrush=self._DOT_BRUSH,
-                pxMode=True,
-            )
-        if trace.peak_index is not None:
-            x = float(trace.t_ms[trace.peak_index])
-            self._plot.addItem(pg.InfiniteLine(pos=x, angle=90, pen=self._MARK_PEN))
-        if trace.level is not None:
-            self._plot.addItem(
-                pg.InfiniteLine(
-                    pos=trace.level, angle=0,
-                    pen=pg.mkPen((214, 90, 70), width=1, style=QtCore.Qt.DashLine),
+        first = series[0][1]
+        self._title_label.setText(subtitle or first.title)
+        self._plot.setLabel("left", first.y_label)
+        multiple = len(series) > 1
+
+        # Accumulated across the series, so every bound below brackets *all* of
+        # them: the framing buttons must land somewhere that contains each curve
+        # rather than whichever one happened to be drawn first.
+        finite_x: list[float] = []
+        finite_y: list[float] = []
+        window_starts: list[float] = []
+        window_ends: list[float] = []
+
+        for label, trace, color in series:
+            mark_color = color if multiple else self._MARK_COLOR
+            # A label is only spent on a legend entry when there is a legend;
+            # pyqtgraph adds one row per named curve regardless of visibility.
+            self._draw_curve(trace, color, label if multiple else None)
+            if trace.peak_index is not None:
+                self._plot.addItem(
+                    pg.InfiniteLine(
+                        pos=float(trace.t_ms[trace.peak_index]), angle=90,
+                        pen=pg.mkPen(mark_color, width=1),
+                    )
                 )
-            )
-        # The calculation window's edges. The curve runs straight through both so
-        # a pre-onset or late event stays visible, but only samples *between* them
-        # reached the reported number — the labels say so, since a curve that
-        # simply continues would otherwise read as all-included. The start also
-        # shows where onset detection fired — the same time for every metric bar
-        # Peak-10 ms-Leq, which opens its window a trailing-RMS length earlier so
-        # the bracket still contains every sample that fed the reported number.
-        # When nothing crossed the onset threshold the window falls back to the
-        # frame start, so the start label says that outright — otherwise a
-        # mis-triggered or silent capture reads as a confident onset at 0 ms.
-        start_text = (
-            "calc window starts"
-            if trace.onset_detected
-            else "calc window starts (no onset detected)"
-        )
-        window_xs: list[float] = []
-        for index, text in (
-            (trace.window_start_index, start_text),
-            (trace.window_end_index, "calc window ends"),
-        ):
-            if index is None:
+            if trace.level is not None:
+                self._plot.addItem(
+                    pg.InfiniteLine(
+                        pos=trace.level, angle=0,
+                        pen=pg.mkPen(mark_color, width=1, style=QtCore.Qt.DashLine),
+                    )
+                )
+            if trace.window_start_index is not None:
+                window_starts.append(float(trace.t_ms[trace.window_start_index]))
+            if trace.window_end_index is not None:
+                window_ends.append(float(trace.t_ms[trace.window_end_index]))
+            # The drawn curve's extent: the finite (non-NaN) span rather than the
+            # raw sample axis. The Impulse ∫p·dt curve is NaN before the onset
+            # (the integral is undefined there), so framing to the full frame
+            # would open with dead space at the left. Full-frame SPL traces are
+            # all-finite, so their bounds are unchanged.
+            finite = np.isfinite(trace.values)
+            if not finite.any():
                 continue
-            x = float(trace.t_ms[index])
-            window_xs.append(x)
-            self._plot.addItem(
-                pg.InfiniteLine(
-                    pos=x, angle=90, pen=self._WINDOW_PEN,
-                    label=text,
-                    labelOpts=self._WINDOW_LABEL_OPTS,
-                )
-            )
-        # Frame Calc Window needs both edges to have a span to zoom to: a trace
-        # with only one line (or a zero-width window) has nothing to frame.
-        if len(window_xs) == 2 and window_xs[1] > window_xs[0]:
-            self._window_x_bounds = (window_xs[0], window_xs[1])
-            self._frame_window_btn.setEnabled(True)
-        else:
-            self._window_x_bounds = None
-            self._frame_window_btn.setEnabled(False)
-        # Yellow dotted verticals bracket the drawn curve's extent (first/last
-        # sample that actually carries a value), so the data stays visible however
-        # far the user pans or zooms. Use the finite (non-NaN) span rather than the
-        # raw sample axis: the Impulse ∫p·dt curve is NaN before the onset (the
-        # integral is undefined there), so framing to the full frame would open
-        # with dead space at the left. Full-frame SPL traces are all-finite, so
-        # their bounds are unchanged. Note this is the *drawn* extent, which now
-        # runs to the end of the capture — the calculation window's end is the
-        # separate dashed line above.
-        finite = np.isfinite(trace.values)
-        if finite.any():
             xs = trace.t_ms[finite]
-            x0 = float(xs[0])
-            x1 = float(xs[-1])
-            self._x_bounds = (x0, x1)
+            finite_x += [float(xs[0]), float(xs[-1])]
             # Y extent of everything autorange would take in -- the curve plus
             # the horizontal level line -- so a framed slice keeps the Y range
-            # the full view has. A flat curve would give a zero-height range Qt
-            # cannot draw, so give it a nominal 1 dB.
-            ys = [float(np.min(trace.values[finite])), float(np.max(trace.values[finite]))]
+            # the full view has. A non-finite level compares False against the
+            # running min/max and drops out rather than poisoning the range,
+            # which is why it is appended to an already-seeded list.
+            finite_y += [
+                float(np.min(trace.values[finite])),
+                float(np.max(trace.values[finite])),
+            ]
             if trace.level is not None:
-                ys.append(float(trace.level))
-            y0, y1 = min(ys), max(ys)
+                finite_y.append(float(trace.level))
+
+        self._draw_window_markers(series, window_starts, window_ends)
+        # Yellow dotted verticals bracket the drawn extent, so the data stays
+        # visible however far the user pans or zooms. Note this is the *drawn*
+        # extent, which runs to the end of the capture — the calculation
+        # window's end is the separate dashed line above.
+        if finite_x:
+            x0, x1 = min(finite_x), max(finite_x)
+            self._x_bounds = (x0, x1)
+            y0, y1 = min(finite_y), max(finite_y)
+            # A flat curve would give a zero-height range Qt cannot draw, so give
+            # it a nominal 1 dB.
             if y1 <= y0:
                 y0, y1 = y0 - 0.5, y0 + 0.5
             self._y_bounds = (y0, y1)
@@ -1658,16 +2092,97 @@ class MetricGraph(QtWidgets.QWidget):
             self._set_onset_btns_enabled(False)
         self._plot.enableAutoRange()
 
+    def _draw_curve(self, trace, color: tuple[int, int, int], name: str | None) -> None:
+        """Plot one trace's samples in ``color``, legending it as ``name`` if given."""
+        if trace.connected:
+            # Time-weighted envelope: a joined line reads as the continuous level
+            # a meter shows. NaN samples break the line into gaps.
+            self._plot.plot(
+                trace.t_ms, trace.values, pen=pg.mkPen(color, width=1), name=name
+            )
+        else:
+            # One dot per sample, no connecting line (pen=None). NaN samples
+            # (silent Impulse tail) simply don't plot a point. pxMode keeps dots
+            # a fixed screen size regardless of zoom.
+            self._plot.plot(
+                trace.t_ms,
+                trace.values,
+                pen=None,
+                symbol="o",
+                symbolSize=2,
+                symbolPen=None,
+                symbolBrush=pg.mkBrush(*color),
+                pxMode=True,
+                name=name,
+            )
+
+    def _draw_window_markers(
+        self, series, starts: list[float], ends: list[float]
+    ) -> None:
+        """Bracket the calculation window and arm Frame Calc Window.
+
+        The curves run straight through both edges so a pre-onset or late event
+        stays visible, but only samples *between* them reached the reported
+        numbers — the labels say so, since a curve that simply continues would
+        otherwise read as all-included. The start also shows where onset
+        detection fired — the same time for every metric bar Peak-10 ms-Leq,
+        which opens its window a trailing-RMS length earlier so the bracket still
+        contains every sample that fed the reported number. When nothing crossed
+        the onset threshold the window falls back to the frame start, so the
+        start label says that outright — otherwise a mis-triggered or silent
+        capture reads as a confident onset at 0 ms.
+
+        Overlaid series each detect their own onset, so one pair of lines is
+        drawn at the *union* of their windows rather than a pair per curve: N
+        labelled brackets would be unreadable, and the union keeps the reading
+        true — outside it, no series' number saw a sample. (A superset, the same
+        way Peak-10 ms-Leq's lookback already widens a single trace's bracket.)
+        """
+        start_text = "calc window starts"
+        if not all(trace.onset_detected for _label, trace, _color in series):
+            start_text += (
+                " (no onset detected)"
+                if len(series) == 1
+                else " (a series had no onset)"
+            )
+        window_xs: list[float] = []
+        for x, text in (
+            (min(starts) if starts else None, start_text),
+            (max(ends) if ends else None, "calc window ends"),
+        ):
+            if x is None:
+                continue
+            window_xs.append(x)
+            self._plot.addItem(
+                pg.InfiniteLine(
+                    pos=x, angle=90, pen=self._WINDOW_PEN,
+                    label=text,
+                    labelOpts=self._WINDOW_LABEL_OPTS,
+                )
+            )
+        # Frame Calc Window needs both edges to have a span to zoom to: a trace
+        # with only one line (or a zero-width window) has nothing to frame.
+        if len(window_xs) == 2 and window_xs[1] > window_xs[0]:
+            self._window_x_bounds = (window_xs[0], window_xs[1])
+            self._frame_window_btn.setEnabled(True)
+        else:
+            self._window_x_bounds = None
+            self._frame_window_btn.setEnabled(False)
+
     # ---- point readout -------------------------------------------------- #
 
     def _on_plot_clicked(self, event) -> None:
         """Select the sample nearest the click and show its value + time.
 
-        Snaps to the nearest sample in time, then keeps the pick only if the
-        click landed within :data:`_PICK_TOLERANCE_PX` screen pixels of that
-        sample — so clicking empty space leaves any current readout untouched.
+        Considers the two samples bracketing the click in time on *every* drawn
+        curve and keeps the one nearest in screen pixels — so with several curves
+        overlaid the click reads the one it visually landed on, and a click on
+        empty space (nothing within :data:`_PICK_TOLERANCE_PX`) leaves any
+        current readout untouched. NaN samples are skipped rather than
+        abandoning the pick: a gap in one curve is no reason to ignore another
+        running through the same instant.
         """
-        if self._trace is None or self._trace.t_ms.size == 0:
+        if not self._series:
             return
         scene_pos = event.scenePos()
         if not self._plot.sceneBoundingRect().contains(scene_pos):
@@ -1675,27 +2190,39 @@ class MetricGraph(QtWidgets.QWidget):
         vb = self._plot.getPlotItem().vb
         view_pos = vb.mapSceneToView(scene_pos)
 
-        t = self._trace.t_ms
-        # t_ms is sorted ascending; find the nearer of the two bracketing samples.
-        i = int(np.searchsorted(t, view_pos.x()))
-        candidates = [j for j in (i - 1, i) if 0 <= j < t.size]
-        idx = min(candidates, key=lambda j: abs(t[j] - view_pos.x()))
+        best: tuple[float, int, int, float] | None = None  # (px, series, idx, value)
+        for s_index, (_label, trace, _color) in enumerate(self._series):
+            t = trace.t_ms
+            # t_ms is sorted ascending; the click falls between i-1 and i.
+            i = int(np.searchsorted(t, view_pos.x()))
+            for idx in (i - 1, i):
+                if not 0 <= idx < t.size:
+                    continue
+                value = float(trace.values[idx])
+                if not np.isfinite(value):
+                    continue
+                # Map the sample back to screen space so the comparison is the
+                # true pixel distance, not just nearness in time.
+                point = vb.mapViewToScene(QtCore.QPointF(float(t[idx]), value))
+                distance = float(
+                    np.hypot(point.x() - scene_pos.x(), point.y() - scene_pos.y())
+                )
+                if best is None or distance < best[0]:
+                    best = (distance, s_index, idx, value)
 
-        value = float(self._trace.values[idx])
-        if not np.isfinite(value):
-            return  # a silent/NaN gap (e.g. Impulse tail) has no level to show
-
-        # Reject clicks that only landed near in time but far from the sample: map
-        # the sample back to screen space and measure the true pixel distance.
-        point_scene = vb.mapViewToScene(QtCore.QPointF(float(t[idx]), value))
-        if np.hypot(point_scene.x() - scene_pos.x(), point_scene.y() - scene_pos.y()) > self._PICK_TOLERANCE_PX:
+        if best is None or best[0] > self._PICK_TOLERANCE_PX:
             return
+        _distance, s_index, idx, value = best
+        self._show_readout(idx, value, series_index=s_index)
 
-        self._show_readout(idx, value)
+    def _show_readout(self, idx: int, value: float, series_index: int = 0) -> None:
+        """Mark sample ``idx`` of one series on the plot and fill the readout box.
 
-    def _show_readout(self, idx: int, value: float) -> None:
-        """Mark sample ``idx`` on the plot and fill the readout box."""
-        x = float(self._trace.t_ms[idx])
+        The series' label prefixes the value when there is one, since with
+        curves overlaid the number alone does not say which shot it came from.
+        """
+        label, trace, _color = self._series[series_index]
+        x = float(trace.t_ms[idx])
         if self._pick_marker is not None:
             self._plot.removeItem(self._pick_marker)
         self._pick_marker = pg.ScatterPlotItem(
@@ -1703,9 +2230,10 @@ class MetricGraph(QtWidgets.QWidget):
         )
         self._plot.addItem(self._pick_marker)
 
-        unit = _unit_of(self._trace.y_label)
+        unit = _unit_of(trace.y_label)
         unit_suffix = f" {unit}" if unit else ""
-        self._readout_label.setText(f"{value:.3f}{unit_suffix}  @ {x:.2f} ms")
+        prefix = f"{label}:  " if label else ""
+        self._readout_label.setText(f"{prefix}{value:.3f}{unit_suffix}  @ {x:.2f} ms")
         self._readout_label.setVisible(True)
         self._readout_clear_btn.setVisible(True)
 
@@ -1735,32 +2263,35 @@ class BatchAverageView(_View):
     the clipboard as a SilencerScout ``SSR1`` paste string (see
     :mod:`~sound_metric_app.services.scout_paste`), ready to drop into the Scout
     Report editor's box for the matching test.
+
+    Each *shot* row carries the mirror-image button one column earlier: Compare,
+    which pins that shot's curve to the Compare tab. The two never appear on the
+    same row, and for the same reason — a paste string is a batch average, so an
+    individual shot has none; a curve is read off a capture, so an average has
+    none. Which mic a pinned curve is of is the slot the shot row sits under, so
+    choosing ML or SE needs no extra control: pin it from under Muzzle Left for
+    ML, from under Shooter's Ear for SE, or from both to overlay the pair.
     """
 
+    _METRIC_KEYS = tuple(key for _label, key in _REPORT_METRICS)
     _COLUMNS = [
         "Slot / Shot", "n",
-        "Peak Pa", "Peak dB", "Peak dBA",
-        "Impulse Pa·ms", "Impulse dB·ms",
-        "Peak Leq10ms dBA", "LIAeq,100ms dBA",
-        "Scout paste",
+        *(label for label, _key in _REPORT_METRICS),
+        "Compare", "Scout paste",
     ]
-    _METRIC_KEYS = (
-        "peak_pa", "peak_db", "peak_dba",
-        "impulse_pa_ms", "peak_impulse_db",
-        "leq10ms_db", "liaeq_100ms_db",
-    )
     #: Metric columns begin here; columns 0-1 are label / n.
     _FIRST_METRIC_COL = 2
     #: One past the last metric column — where a click stops being a graph request.
     _END_METRIC_COL = _FIRST_METRIC_COL + len(_METRIC_KEYS)
-    #: Trailing column holding each averaged row's Copy button (see
-    #: :meth:`_paste_button`). Shot rows leave it empty: the SSR1 string carries a
-    #: batch's *averages*, so an individual shot has nothing to paste.
-    _PASTE_COL = len(_COLUMNS) - 1
-    #: Fixed width for that column — Qt sizes a column to its item *text*, and
-    #: these cells are empty text behind a button widget, so contents-sizing
-    #: would collapse the button out of view.
-    _PASTE_COL_WIDTH = 90
+    #: The two trailing button columns, in the order the operator meets them:
+    #: Compare (shot rows, see :meth:`_compare_button`) then Scout paste
+    #: (averaged rows, see :meth:`_paste_button`).
+    _COMPARE_COL = _END_METRIC_COL
+    _PASTE_COL = _COMPARE_COL + 1
+    #: Fixed width for both — Qt sizes a column to its item *text*, and these
+    #: cells are empty text behind a button widget, so contents-sizing would
+    #: collapse the button out of view.
+    _BUTTON_COL_WIDTH = 90
 
     def __init__(self, controller: WorkflowController, main: "MainWindow"):
         super().__init__(controller, main)
@@ -1901,16 +2432,24 @@ class BatchAverageView(_View):
                 self._paste_button(position, role, avg, batch_label, slot_label),
             )
             for shot in report.shots.get((position, role), ()):
-                avg_item.addChild(self._shot_item(shot, position))
+                shot_item = self._shot_item(shot, position)
+                # setItemWidget needs the row to be in the tree already, so the
+                # Compare button goes on after the child is parented.
+                avg_item.addChild(shot_item)
+                self.tree.setItemWidget(
+                    shot_item,
+                    self._COMPARE_COL,
+                    self._compare_button(self._series_for(shot, position, report)),
+                )
         # Size against the shot rows, then collapse to the four slot averages --
         # the report's headline -- reopening whatever was open. The shots behind
         # a closed slot stay one arrow away.
         self.tree.expandAll()
         for col in range(len(self._COLUMNS)):
-            if col == self._PASTE_COL:
-                # Contents-sizing measures item text, and this column's text is
-                # empty behind its buttons; give it a width that fits one.
-                self.tree.setColumnWidth(col, self._PASTE_COL_WIDTH)
+            if col in (self._COMPARE_COL, self._PASTE_COL):
+                # Contents-sizing measures item text, and these columns' text is
+                # empty behind their buttons; give them a width that fits one.
+                self.tree.setColumnWidth(col, self._BUTTON_COL_WIDTH)
                 continue
             self.tree.resizeColumnToContents(col)
         self.tree.collapseAll()
@@ -1927,8 +2466,10 @@ class BatchAverageView(_View):
         # Every shot here comes from shot_metrics_for_batch, which filters out
         # null shot_order, so order is always present.
         label = f"Cluster {cluster} · shot {order}" if cluster else f"Shot {order}"
+        # Trailing pair: the Compare column (filled with a button once the row is
+        # parented) and the paste column (empty on a shot row).
         item = QtWidgets.QTreeWidgetItem(
-            [label, "", *(_format_metric(shot[k]) for k in self._METRIC_KEYS), ""]
+            [label, "", *(_format_metric(shot[k]) for k in self._METRIC_KEYS), "", ""]
         )
         # Carry the identity a graph request needs: the shot to re-read and which
         # mic's channel to pull. Only shot rows get this tag, so a click on an
@@ -1975,17 +2516,64 @@ class BatchAverageView(_View):
         return button
 
     def _copy_scout_line(self, button: QtWidgets.QPushButton, line: str) -> None:
-        """Put one row's paste string on the clipboard and say so on the button.
-
-        A clipboard write is silent, so the button confirms it by reading
-        "Copied" briefly. The timer is anchored to the button: a rebuild of the
-        tree deletes it, and an anchored ``singleShot`` is dropped rather than
-        firing into a deleted widget.
-        """
+        """Put one row's paste string on the clipboard and say so on the button."""
         QtWidgets.QApplication.clipboard().setText(line)
-        button.setText(_COPIED_LABEL)
-        QtCore.QTimer.singleShot(
-            _COPIED_FLASH_MS, button, lambda: button.setText(_COPY_LABEL)
+        _flash_button(button, _COPIED_LABEL, _COPY_LABEL)
+
+    # ---- compare ---------------------------------------------------------- #
+
+    def _series_for(
+        self, shot: dict, position: MicPosition, report: BatchAverages
+    ) -> CompareSeries:
+        """Name one shot row as a Compare-tab series.
+
+        The label is what the legend and the Compare list carry, so it has to
+        separate this curve from any other the operator might pin — including
+        the same cluster and shot number fired in a different session, or under
+        a different SKU. The shot id leads because it is the only field that is
+        unique on its own; the rest is there to be read, not to disambiguate.
+        The longer identification (platform, ammo, batch) goes to the tooltip,
+        where there is room for it.
+        """
+        cluster = shot.get("cluster_index")
+        order = shot.get("shot_order")
+        where = f"C{cluster}·S{order}" if cluster else f"S{order}"
+        combination = report.combination
+        sku = combination.sku if combination else "?"
+        return CompareSeries(
+            shot_id=shot["shot_id"],
+            position=position,
+            label=f"#{shot['shot_id']} · {sku} · {where} · {position.value}",
+            detail=(
+                f"{combination.label if combination else '?'}\n"
+                f"Batch #{report.batch.id} · {where} · {position.label}"
+            ),
+        )
+
+    def _compare_button(self, series: CompareSeries) -> QtWidgets.QPushButton:
+        """The Compare button that sits on one shot row, before its Copy column."""
+        button = QtWidgets.QPushButton(_COMPARE_LABEL)
+        button.setToolTip(
+            f"Overlay this shot's {series.position.label} curve on the Compare tab.\n\n"
+            f"{series.detail}"
+        )
+        button.clicked.connect(lambda: self._pin_for_compare(button, series))
+        return button
+
+    def _pin_for_compare(
+        self, button: QtWidgets.QPushButton, series: CompareSeries
+    ) -> None:
+        """Pin one shot/mic to the Compare tab, without leaving this one.
+
+        Staying put is the point: comparing means picking several shots, often
+        across batches, and a tab switch per pick would fight that. The button
+        flashes instead, and the Compare tab's title carries the running count.
+        """
+        added = self.main.add_to_compare(series)
+        _flash_button(
+            button,
+            _COMPARE_ADDED_LABEL if added else _COMPARE_ALREADY_LABEL,
+            _COMPARE_LABEL,
         )
 
     # ---- graph ---------------------------------------------------------- #
@@ -2038,6 +2626,394 @@ class BatchAverageView(_View):
             ),
             done,
         )
+
+
+# --------------------------------------------------------------------------- #
+# 5. Compare view
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class CompareSeries:
+    """One curve pinned to the Compare tab: a shot, one of its mics, a name.
+
+    ``(shot_id, position)`` is the identity — the same shot can be pinned once
+    per mic, so ML and SE overlay as two series, but neither can be pinned twice.
+    ``label`` names the curve in the legend and the pinned list; ``detail`` is
+    the longer identification its tooltip carries.
+    """
+
+    shot_id: int
+    position: MicPosition
+    label: str
+    detail: str = ""
+
+    @property
+    def key(self) -> tuple[int, MicPosition]:
+        """What makes this series the same one as another (see the class doc)."""
+        return (self.shot_id, self.position)
+
+
+class CompareView(_View):
+    """The compare view: one metric's curve for any number of shots, overlaid.
+
+    Shots arrive here from the Compare buttons on the Batch average and Data
+    bank tabs and stay until removed, so a comparison can be assembled across
+    batches, SKUs, both mics, and included/idle status alike — nothing about
+    this view is scoped to one batch. The metric is
+    picked once for the whole overlay (curves have to share a Y axis to be read
+    against each other), and defaults to Impulse Pa·ms.
+
+    The graph is the same :class:`MetricGraph` the Batch average tab draws into,
+    not a copy of it: Auto Frame, Frame Calc Window, the onset close-ups, the
+    level-weighting dropdown, and the click readout are one implementation used
+    twice, so they cannot drift apart between the two tabs.
+
+    Each pinned row carries its own Hide and Remove, because both act on that
+    one shot and nothing else. Hide takes a curve off the graph but leaves it
+    pinned — the way to read three of five without losing the other two — and
+    the row keeps its colour while hidden, so unhiding puts it back exactly
+    where the eye left it. Remove unpins outright.
+
+    Traces are memoized per pinned series for as long as the metric and the
+    level weighting hold still. Pinning the ninth shot then re-reads one capture
+    rather than nine, which is what makes it reasonable to redraw on every
+    change. Changing either control drops the whole cache — it also bounds it,
+    since only one metric x weighting generation is ever held. A mutation
+    elsewhere in the app drops it too (see :meth:`invalidate_traces`).
+    """
+
+    #: Pre-selected metric: the impulse curve is what these comparisons are for.
+    _DEFAULT_METRIC = "impulse_pa_ms"
+
+    _EMPTY_MESSAGE = (
+        "Pin shots here with the Compare button on a Batch average or Data bank shot row."
+    )
+
+    #: Pinned-row columns: the shot (swatch + label), then its two own-row
+    #: actions. The buttons are sized to their text and the label takes the rest.
+    _LABEL_COL, _HIDE_COL, _REMOVE_COL = range(3)
+    #: Room the label column needs for a full series name plus its swatch. Held
+    #: as the pinned pane's minimum width (plus the buttons) so the splitter
+    #: cannot open on a column narrow enough to elide every row to "#7 ·…" —
+    #: rows the operator cannot tell apart are no index at all.
+    _LABEL_COL_MIN_WIDTH = 190
+
+    def __init__(self, controller: WorkflowController, main: "MainWindow"):
+        super().__init__(controller, main)
+        #: Pinned series, in pin order — which is the order they are drawn,
+        #: coloured, legended, and listed in. One tree row per entry, same
+        #: index, so a row's position identifies its series.
+        self._series: list[CompareSeries] = []
+        #: Keys of the pinned series currently hidden from the graph. They keep
+        #: their row, their colour, and their place in the order; only the curve
+        #: goes. Kept as keys rather than indices so removing one series cannot
+        #: silently hide its neighbour.
+        self._hidden: set[tuple[int, MicPosition]] = set()
+        #: Memoized curves and load failures for the current metric x weighting,
+        #: both keyed by ``CompareSeries.key``.
+        self._traces: dict[tuple[int, MicPosition], MetricTrace] = {}
+        self._errors: dict[tuple[int, MicPosition], str] = {}
+        #: The (metric, smoothing) the two dicts above were filled for.
+        self._cache_key: tuple[str, str] | None = None
+        #: Bumped on each load so a slow read for a superseded overlay is dropped.
+        self._graph_token = 0
+
+        layout = QtWidgets.QVBoxLayout(self)
+
+        picker_row = QtWidgets.QHBoxLayout()
+        picker_row.addWidget(QtWidgets.QLabel("Metric:"))
+        self.metric_combo = QtWidgets.QComboBox()
+        for label, key in _REPORT_METRICS:
+            self.metric_combo.addItem(label, key)
+        self.metric_combo.setCurrentIndex(self.metric_combo.findData(self._DEFAULT_METRIC))
+        self.metric_combo.setToolTip(
+            "Which metric's curve to overlay. All pinned shots are drawn with\n"
+            "this one, so they share a Y axis and can be read against each other."
+        )
+        self.metric_combo.currentIndexChanged.connect(self._render)
+        picker_row.addWidget(self.metric_combo)
+        picker_row.addStretch(1)
+        layout.addLayout(picker_row)
+
+        # Left: what is pinned. Right: the shared metric graph.
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+
+        pinned = QtWidgets.QWidget()
+        pinned_layout = QtWidgets.QVBoxLayout(pinned)
+        pinned_layout.setContentsMargins(0, 0, 0, 0)
+        pinned_layout.addWidget(QtWidgets.QLabel("Overlaid shots:"))
+        # A row per pinned shot: its swatch and label, then the two buttons that
+        # act on it alone. Flat (no expanders) and headerless -- the buttons say
+        # what they do, and three columns of headings over a narrow panel would
+        # cost more width than they explain.
+        self.tree = QtWidgets.QTreeWidget()
+        self.tree.setColumnCount(3)
+        self.tree.setHeaderHidden(True)
+        self.tree.setRootIsDecorated(False)
+        header = self.tree.header()
+        # Spare width belongs to the label, not to the trailing button column a
+        # tree header stretches by default -- which would leave every row elided
+        # to "#7 ·…" beside a Remove button four times wider than its word.
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(self._LABEL_COL, QtWidgets.QHeaderView.Stretch)
+        # Contents-sizing measures item *text*, and these cells are empty behind
+        # their buttons — so the action columns are sized from what a button
+        # actually needs at the current font and DPI, rather than a magic number
+        # that a larger system font would spill out of.
+        buttons_width = 0
+        for col, labels in (
+            (self._HIDE_COL, ("Hide", "Show")),
+            (self._REMOVE_COL, ("Remove",)),
+        ):
+            width = max(QtWidgets.QPushButton(text).sizeHint().width() for text in labels)
+            header.setSectionResizeMode(col, QtWidgets.QHeaderView.Fixed)
+            self.tree.setColumnWidth(col, width)
+            buttons_width += width
+        pinned_layout.addWidget(self.tree, 1)
+
+        button_row = QtWidgets.QHBoxLayout()
+        self.clear_btn = QtWidgets.QPushButton("Clear all")
+        self.clear_btn.setToolTip("Take every shot off the graph.")
+        self.clear_btn.clicked.connect(self.clear)
+        button_row.addWidget(self.clear_btn)
+        button_row.addStretch(1)
+        pinned_layout.addLayout(button_row)
+
+        self.status_label = QtWidgets.QLabel("")
+        self.status_label.setWordWrap(True)
+        pinned_layout.addWidget(self.status_label)
+        # Wide enough for a whole row -- label, both buttons, and a scrollbar --
+        # so the pane never opens with its rows elided down to nothing.
+        pinned.setMinimumWidth(
+            self._LABEL_COL_MIN_WIDTH
+            + buttons_width
+            + self.tree.style().pixelMetric(QtWidgets.QStyle.PM_ScrollBarExtent)
+        )
+        split.addWidget(pinned)
+
+        self.graph = MetricGraph()
+        # Re-draw with the new weighting when the dropdown changes; the cache is
+        # keyed by it, so this reloads rather than redrawing stale curves.
+        self.graph.smoothingChanged.connect(self._render)
+        split.addWidget(self.graph)
+        # The pinned rows are a narrow index; the graph is the view. Give it the
+        # width.
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 3)
+        layout.addWidget(split)
+
+        self._render()
+
+    # ---- pinned set ------------------------------------------------------- #
+
+    def add_series(self, series: CompareSeries) -> bool:
+        """Pin one shot/mic. Returns False if it was already pinned (a no-op).
+
+        A second copy of a curve would draw exactly on top of the first and take
+        a second legend row and colour to say nothing, so a repeat pin is
+        refused rather than duplicated. The caller reports which happened.
+        """
+        if any(existing.key == series.key for existing in self._series):
+            return False
+        self._series.append(series)
+        self._on_pinned_changed()
+        return True
+
+    def _remove(self, series: CompareSeries) -> None:
+        """Unpin one series — the row's own Remove button."""
+        self._series = [s for s in self._series if s.key != series.key]
+        self._forget(series)
+        self._on_pinned_changed()
+
+    def _toggle_hidden(self, series: CompareSeries) -> None:
+        """Take one series off the graph, or put it back — the row's Hide button.
+
+        The series stays pinned, keeps its row, and keeps its colour, so this is
+        purely about what the graph is crowded with. Hiding does not discard the
+        memoized curve either: unhiding is then instant, and the round trip
+        costs no capture read.
+        """
+        if series.key in self._hidden:
+            self._hidden.discard(series.key)
+        else:
+            self._hidden.add(series.key)
+        self._render()
+
+    def clear(self) -> None:
+        """Drop every pinned series."""
+        if not self._series:
+            return
+        for series in self._series:
+            self._forget(series)
+        self._series = []
+        self._on_pinned_changed()
+
+    def _forget(self, series: CompareSeries) -> None:
+        """Release a removed series' state, so nothing outlives its row."""
+        self._traces.pop(series.key, None)
+        self._errors.pop(series.key, None)
+        self._hidden.discard(series.key)
+
+    def _on_pinned_changed(self) -> None:
+        self.main.update_compare_count(len(self._series))
+        self._render()
+
+    def invalidate_traces(self) -> None:
+        """Drop the memoized curves, keeping what is pinned.
+
+        Called for a mutation elsewhere in the app rather than on every refresh:
+        a re-mark can retag which channel is ML, or repoint a shot at a
+        different capture, and the curve drawn from it is then wrong in a way no
+        amount of redrawing would fix. Navigation changes none of that, and a
+        reload per tab visit would be paid every time for nothing.
+        """
+        self._traces.clear()
+        self._errors.clear()
+        self._cache_key = None
+
+    def refresh(self) -> None:
+        """Redraw only if the curves were invalidated; navigation leaves it alone.
+
+        Nothing here is scoped to a batch or a SKU, so switching tabs has
+        nothing to re-read — and a redraw would autorange away the zoom the
+        operator had just framed, which on this tab is the whole point of the
+        visit. A dropped cache (:meth:`invalidate_traces`, i.e. an actual
+        mutation) is the one thing that forces the reload.
+        """
+        if self._cache_key is None and self._series:
+            self._render()
+
+    # ---- graph ------------------------------------------------------------ #
+
+    def _render(self, *_args) -> None:
+        """Load whatever the current overlay is missing, then draw it."""
+        cache_key = (self.metric_combo.currentData(), self.graph.current_smoothing())
+        if cache_key != self._cache_key:
+            self._traces.clear()
+            self._errors.clear()
+            self._cache_key = cache_key
+
+        self._graph_token += 1
+        token = self._graph_token
+        if not self._series:
+            self.graph.show_message(self._EMPTY_MESSAGE)
+            self.status_label.setText("")
+            self.tree.clear()
+            return
+
+        metric_key, smoothing = cache_key
+        # A hidden series is not drawn, so its capture is not worth reading --
+        # unhiding is what asks for it (and finds it already cached if it was
+        # hidden after being drawn).
+        pending = [
+            s
+            for s in self._series
+            if s.key not in self._hidden
+            and s.key not in self._traces
+            and s.key not in self._errors
+        ]
+        if not pending:
+            self._draw()
+            return
+
+        self.graph.show_message("Loading…")
+
+        def load():
+            # One worker for the whole batch of missing curves, and one failure
+            # bucket per series: a shot whose capture has moved must not take
+            # the rest of the overlay down with it (nor pop a dialog, since a
+            # redraw would pop it again). It is reported in the list instead.
+            results = []
+            for series in pending:
+                try:
+                    trace = self.controller.metric_trace(
+                        series.shot_id, series.position, metric_key, smoothing=smoothing
+                    )
+                except Exception as exc:  # noqa: BLE001 — shown against its row
+                    results.append((series, None, str(exc)))
+                else:
+                    results.append((series, trace, None))
+            return results
+
+        def done(results) -> None:
+            if token != self._graph_token:
+                return  # a newer overlay superseded this load; drop it
+            for series, trace, error in results:
+                if trace is None:
+                    self._errors[series.key] = error
+                else:
+                    self._traces[series.key] = trace
+            self._draw()
+
+        self._run_async(load, done)
+
+    def _draw(self) -> None:
+        """Rebuild the pinned rows and the overlay from the memoized traces.
+
+        Colour is taken from a series' position in the pinned order, not from
+        its position among the drawn ones: hiding a curve must leave every other
+        curve on the colour it already had, or the legend the operator has just
+        learned reshuffles under them on every toggle.
+        """
+        self.tree.clear()
+        drawn: list[tuple[str, MetricTrace, tuple[int, int, int]]] = []
+        hidden = 0
+        unavailable = 0
+        for index, series in enumerate(self._series):
+            color = MetricGraph.series_color(index)
+            trace = self._traces.get(series.key)
+            item = QtWidgets.QTreeWidgetItem([series.label, "", ""])
+            item.setToolTip(self._LABEL_COL, series.detail)
+            if series.key in self._hidden:
+                hidden += 1
+                # Keep the swatch: the colour is what the curve comes back as.
+                item.setIcon(self._LABEL_COL, _color_swatch(color))
+                item.setForeground(self._LABEL_COL, QtGui.QBrush(_MUTED_INK))
+            elif trace is None:
+                unavailable += 1
+                error = self._errors.get(series.key, "not loaded")
+                item.setText(self._LABEL_COL, f"{series.label}  — unavailable")
+                item.setIcon(self._LABEL_COL, _color_swatch(None))
+                item.setToolTip(self._LABEL_COL, f"{series.detail}\n\n{error}")
+            else:
+                item.setIcon(self._LABEL_COL, _color_swatch(color))
+                drawn.append((series.label, trace, color))
+            self.tree.addTopLevelItem(item)
+            self._add_row_buttons(item, series)
+
+        metric_label = self.metric_combo.currentText()
+        self.graph.show_traces(drawn, f"{metric_label} — {len(drawn)} shot(s) overlaid")
+        parts = [f"{len(drawn)} of {len(self._series)} drawn"]
+        if hidden:
+            parts.append(f"{hidden} hidden")
+        if unavailable:
+            parts.append(f"{unavailable} unavailable (hover for why)")
+        self.status_label.setText("   —   ".join(parts))
+
+    def _add_row_buttons(
+        self, item: QtWidgets.QTreeWidgetItem, series: CompareSeries
+    ) -> None:
+        """Put one pinned row's own Hide and Remove buttons on it.
+
+        Both handlers rebuild this very tree, which would free the button Qt is
+        still emitting the click for, so both are deferred a turn of the event
+        loop (see :meth:`_View._defer`).
+        """
+        is_hidden = series.key in self._hidden
+        hide_btn = QtWidgets.QPushButton("Show" if is_hidden else "Hide")
+        hide_btn.setToolTip(
+            "Put this shot's curve back on the graph."
+            if is_hidden
+            else "Take this shot's curve off the graph, keeping it pinned here."
+        )
+        hide_btn.clicked.connect(lambda: self._defer(lambda: self._toggle_hidden(series)))
+        self.tree.setItemWidget(item, self._HIDE_COL, hide_btn)
+
+        remove_btn = QtWidgets.QPushButton("Remove")
+        remove_btn.setToolTip("Unpin this shot from the Compare tab.")
+        remove_btn.clicked.connect(lambda: self._defer(lambda: self._remove(series)))
+        self.tree.setItemWidget(item, self._REMOVE_COL, remove_btn)
 
 
 # --------------------------------------------------------------------------- #
@@ -2119,16 +3095,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.marking_view = MarkingView(self.controller, self)
         self.bank_view = DataBankView(self.controller, self)
         self.report_view = BatchAverageView(self.controller, self)
+        self.compare_view = CompareView(self.controller, self)
 
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self.ingest_view, "Ingest")
         self.tabs.addTab(self.marking_view, "Mark")
         self.tabs.addTab(self.bank_view, "Data bank")
         self.tabs.addTab(self.report_view, "Batch average")
+        self.tabs.addTab(self.compare_view, _COMPARE_TAB_LABEL)
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.setCentralWidget(self.tabs)
 
-        self._views = [self.ingest_view, self.marking_view, self.bank_view, self.report_view]
+        self._views = [
+            self.ingest_view,
+            self.marking_view,
+            self.bank_view,
+            self.report_view,
+            self.compare_view,
+        ]
         self._build_menus()
         self.notify_changed()
 
@@ -2155,6 +3139,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # tied to the mutation here rather than to every refresh() — pure navigation
         # must never delete rows.
         self.controller.sweep_empty()
+        # Same reasoning for the Compare tab's memoized curves: a mutation can
+        # change what a pinned curve is drawn *from* (a re-mark retags which
+        # channel is ML), so they are dropped here and not on every refresh.
+        self.compare_view.invalidate_traces()
         for view in self._views:
             view.refresh()
 
@@ -2162,6 +3150,27 @@ class MainWindow(QtWidgets.QMainWindow):
         """Switch to the Mark tab focused on ``shot_id`` (from the Ingest view)."""
         self.marking_view.select_shot(shot_id)
         self.tabs.setCurrentWidget(self.marking_view)
+
+    def add_to_compare(self, series: CompareSeries) -> bool:
+        """Pin one shot/mic to the Compare tab. False if it was already there.
+
+        Deliberately does *not* switch tabs: pinning is done from the Batch
+        average tree, several rows at a time (see
+        :meth:`BatchAverageView._pin_for_compare`).
+        """
+        return self.compare_view.add_series(series)
+
+    def update_compare_count(self, count: int) -> None:
+        """Carry how many shots are pinned on the Compare tab's own label.
+
+        Pinning happens on another tab and draws nothing there, so the count is
+        what tells the operator the click landed — and what the overlay is
+        currently worth switching to.
+        """
+        index = self.tabs.indexOf(self.compare_view)
+        self.tabs.setTabText(
+            index, f"{_COMPARE_TAB_LABEL} ({count})" if count else _COMPARE_TAB_LABEL
+        )
 
 
 # --------------------------------------------------------------------------- #
