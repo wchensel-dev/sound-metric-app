@@ -347,6 +347,18 @@ class _View(QtWidgets.QWidget):
         row.addWidget(combo)
         return combo
 
+    def _prompt_discard_reason(self, title: str, message: str, default: str = "") -> str | None:
+        """Ask for an optional multi-line reason before a discard; ``None`` on Cancel.
+
+        Shared by the Ingest table, the Ingest bad-files row, and the Marking
+        tab so their discard-confirmation copy and validation can't drift
+        apart between the three.
+        """
+        text, ok = QtWidgets.QInputDialog.getMultiLineText(self, title, message, default)
+        if not ok:
+            return None
+        return text.strip()
+
     def _defer(self, fn) -> None:
         """Run ``fn`` from the event loop once the current signal has unwound.
 
@@ -507,17 +519,15 @@ class IngestView(_View):
         self.table.setCellWidget(row, self._DISCARD_COL, btn)
 
     def _prompt_discard_shot(self, shot_id: int, filename: str) -> None:
-        text, ok = QtWidgets.QInputDialog.getMultiLineText(
-            self,
+        reason = self._prompt_discard_reason(
             "Discard shot",
             f"Discard {filename!r}? It will be removed from Unmarked data sets "
             "and ignored on future ingest scans. Optional reason:",
-            "",
         )
-        if not ok:
+        if reason is None:
             return
         self._run_async(
-            lambda: self.controller.discard_shot(shot_id, reason=text.strip() or None),
+            lambda: self.controller.discard_shot(shot_id, reason=reason or None),
             lambda _: self.main.notify_changed(),
         )
 
@@ -571,12 +581,12 @@ class IngestView(_View):
         click through; the field stays editable for a truer note (e.g. "known
         bad export, re-shooting Tuesday").
         """
-        text, ok = QtWidgets.QInputDialog.getMultiLineText(
-            self, "Discard file", f"Why discard {Path(source_file).name!r}?", reason
+        new_reason = self._prompt_discard_reason(
+            "Discard file", f"Why discard {Path(source_file).name!r}?", reason
         )
-        if not ok:
+        if new_reason is None:
             return
-        self._discard(source_file, text.strip() or reason)
+        self._discard(source_file, new_reason or reason)
 
     def _discard(self, source_file: str, reason: str) -> None:
         self._run_async(
@@ -974,20 +984,18 @@ class MarkingView(_View):
             QtWidgets.QMessageBox.information(self, "No shot", "No unmarked shot selected.")
             return
 
-        text, ok = QtWidgets.QInputDialog.getMultiLineText(
-            self,
+        reason = self._prompt_discard_reason(
             "Discard shot",
             f"Discard {Path(shot.source_file).name!r}? It will be removed from "
             "Unmarked data sets and ignored on future ingest scans. Optional reason:",
-            "",
         )
-        if not ok:
+        if reason is None:
             return
 
         shot_id = shot.id
         self.status_label.setText("Discarding…")
         self._run_async(
-            lambda: self.controller.discard_shot(shot_id, reason=text.strip() or None),
+            lambda: self.controller.discard_shot(shot_id, reason=reason or None),
             lambda _: self.main.notify_changed(),
             busy=(self.mark_btn, self.discard_btn),
         )
