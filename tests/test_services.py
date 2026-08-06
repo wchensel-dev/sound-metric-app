@@ -185,6 +185,114 @@ def test_scan_reports_unreadable_files(repo, tmp_path):
     assert repo.unmarked_shots() == []
 
 
+def test_scan_prefers_reader_exception_message_over_str(repo, tmp_path):
+    """A dwdatareader-style DWError carries the real reason on `.message`; a
+    bare str(exc) can degrade to just a status code (IntEnum stringified),
+    so the report must prefer `.message` when the exception has one."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _touch(inbox, "SUP-1_AR15_01_001.dxd")
+
+    class DWErrorLike(RuntimeError):
+        def __init__(self):
+            super().__init__(2)
+            self.message = "File cannot be opened."
+
+    def boom(path):
+        raise DWErrorLike()
+
+    report = IngestionService(repo, reader=boom).scan(inbox)
+    assert len(report.unreadable) == 1
+    _, reason = report.unreadable[0]
+    assert reason == "File cannot be opened."
+
+
+def test_discard_file_round_trip(repo):
+    path = "/inbox/bad.dxd"
+    assert repo.is_discarded(path) is False
+    assert repo.discarded_files() == []
+
+    repo.discard_file(path, reason="corrupt export")
+    assert repo.is_discarded(path) is True
+    [entry] = repo.discarded_files()
+    assert entry.source_file == path
+    assert entry.reason == "corrupt export"
+
+    repo.restore_file(path)
+    assert repo.is_discarded(path) is False
+    assert repo.discarded_files() == []
+
+
+def test_discarded_source_files_returns_set(repo):
+    assert repo.discarded_source_files() == set()
+
+    repo.discard_file("/inbox/bad1.dxd", reason="corrupt export")
+    repo.discard_file("/inbox/bad2.dxd", reason="wrong platform")
+    assert repo.discarded_source_files() == {"/inbox/bad1.dxd", "/inbox/bad2.dxd"}
+
+    repo.restore_file("/inbox/bad1.dxd")
+    assert repo.discarded_source_files() == {"/inbox/bad2.dxd"}
+
+
+def test_discard_file_is_idempotent_and_updates_reason(repo):
+    path = "/inbox/bad.dxd"
+    repo.discard_file(path, reason="first reason")
+    repo.discard_file(path, reason="second reason")
+
+    entries = repo.discarded_files()
+    assert len(entries) == 1
+    assert entries[0].reason == "second reason"
+
+
+def test_scan_skips_discarded_malformed_file(repo, tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    bad = _touch(inbox, "not-a-valid-name.dxd")
+
+    report = IngestionService(repo, reader=lambda p: []).scan(inbox)
+    assert len(report.malformed) == 1
+    assert report.discarded == []
+
+    repo.discard_file(str(bad.resolve()), reason="unfixable name")
+    report = IngestionService(repo, reader=lambda p: []).scan(inbox)
+    assert report.malformed == []
+    assert report.discarded == [str(bad.resolve())]
+
+
+def test_scan_skips_discarded_unreadable_file(repo, tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    bad = _touch(inbox, "SUP-1_AR15_01_001.dxd")
+
+    def boom(path):
+        raise OSError("cannot open")
+
+    report = IngestionService(repo, reader=boom).scan(inbox)
+    assert len(report.unreadable) == 1
+    assert report.discarded == []
+
+    repo.discard_file(str(bad.resolve()), reason="corrupt")
+    report = IngestionService(repo, reader=boom).scan(inbox)
+    assert report.unreadable == []
+    assert report.discarded == [str(bad.resolve())]
+
+
+def test_scan_reingests_after_restore(repo, tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    bad = _touch(inbox, "not-a-valid-name.dxd")
+    resolved = str(bad.resolve())
+
+    repo.discard_file(resolved, reason="unfixable name")
+    report = IngestionService(repo, reader=lambda p: []).scan(inbox)
+    assert report.discarded == [resolved]
+
+    repo.restore_file(resolved)
+    report = IngestionService(repo, reader=lambda p: []).scan(inbox)
+    assert report.discarded == []
+    assert len(report.malformed) == 1
+
+
 def test_scan_validate_false_skips_reader(repo, tmp_path):
     inbox = tmp_path / "inbox"
     inbox.mkdir()
@@ -598,6 +706,53 @@ def test_mark_empty_channel_map_raises_before_marking(repo):
         svc.mark(shot_id, ammo="M855", channel_map={})
     # An empty map must not silently produce a marked shot with zero metrics.
     assert repo.get_shot(shot_id).marked is False
+
+
+# --------------------------------------------------------------------------- #
+# discard_unmarked_shot — remove a bad shot before it's ever marked
+# --------------------------------------------------------------------------- #
+
+
+def test_discard_unmarked_shot_deletes_and_blocklists(repo):
+    shot_id = _unmarked(repo, "SUP-1_AR15_01_003.dxd")
+    source_file = repo.get_shot(shot_id).source_file
+
+    repo.discard_unmarked_shot(shot_id, reason="wrong recording")
+
+    assert repo.get_shot(shot_id) is None
+    assert repo.is_discarded(source_file) is True
+    [entry] = repo.discarded_files()
+    assert entry.reason == "wrong recording"
+
+
+def test_discard_unmarked_shot_refuses_a_marked_shot(repo):
+    shot_id = _unmarked(repo)
+    svc = _marking_service(repo)
+    svc.mark(shot_id, ammo="M855", channel_map={"AI 1": MicPosition.ML, "AI 2": MicPosition.SE})
+
+    with pytest.raises(ValueError):
+        repo.discard_unmarked_shot(shot_id)
+
+    # Refused, so the shot and its metrics must be untouched.
+    shot = repo.get_shot(shot_id)
+    assert shot is not None and shot.marked is True
+    assert repo.metrics_for_shot(shot_id) != []
+
+
+def test_discard_unmarked_shot_prevents_reingest(repo, tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    good = _touch(inbox, "SUP-1_AR15_01_003.dxd")
+
+    report = IngestionService(repo, reader=lambda p: []).scan(inbox)
+    assert report.n_ingested == 1
+    shot_id = report.ingested[0].id
+
+    repo.discard_unmarked_shot(shot_id)
+
+    report = IngestionService(repo, reader=lambda p: []).scan(inbox)
+    assert report.n_ingested == 0
+    assert report.discarded == [str(good.resolve())]
 
 
 # --------------------------------------------------------------------------- #

@@ -29,7 +29,7 @@ from typing import Iterator
 from .. import config
 from ..dsp import SMOOTHING_INSTANT, MetricTrace, build_metric_trace
 from ..ingestion import ChannelInfo, autotag_map, list_channels, read_capture
-from ..models import Batch, Cluster, Combination, MicPosition, Shot
+from ..models import Batch, Cluster, Combination, DiscardedFile, MicPosition, Shot
 from ..services import (
     AggregationService,
     BatchAverages,
@@ -165,6 +165,25 @@ class WorkflowController:
     def get_shot(self, shot_id: int) -> Shot | None:
         with self._repo() as repo:
             return repo.get_shot(shot_id)
+
+    def discard_file(self, source_file: str, *, reason: str | None = None) -> None:
+        """Blocklist a bad capture path so future ingest scans skip it silently."""
+        with self._repo() as repo:
+            repo.discard_file(source_file, reason=reason)
+
+    def restore_file(self, source_file: str) -> None:
+        """Un-blocklist a previously discarded path."""
+        with self._repo() as repo:
+            repo.restore_file(source_file)
+
+    def discarded_files(self) -> list[DiscardedFile]:
+        with self._repo() as repo:
+            return repo.discarded_files()
+
+    def discard_shot(self, shot_id: int, *, reason: str | None = None) -> None:
+        """Delete an unmarked shot and blocklist its source file."""
+        with self._repo() as repo:
+            repo.discard_unmarked_shot(shot_id, reason=reason)
 
     # ---- mark ----------------------------------------------------------- #
 

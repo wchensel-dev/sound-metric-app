@@ -441,3 +441,18 @@ class Shot:
     def role(self) -> ShotRole | None:
         """FRP or Regular, derived from :attr:`shot_order` (``None`` if unordered)."""
         return role_for_order(self.shot_order)
+
+
+@dataclass
+class DiscardedFile:
+    """A capture path the operator has told the app to permanently ignore.
+
+    Recorded so a permanently-bad file (corrupt, unfixable filename) does not
+    resurface as malformed/unreadable on every ingest scan. Restoring just
+    deletes the row; the file itself is untouched and will resurface as
+    malformed/unreadable on the next scan if it's still bad.
+    """
+
+    source_file: str
+    reason: str | None = None
+    discarded_at: str | None = None

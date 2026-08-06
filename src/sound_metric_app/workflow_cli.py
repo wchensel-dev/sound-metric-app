@@ -93,6 +93,10 @@ def _cmd_ingest(args: argparse.Namespace, repo: WorkflowRepository) -> int:
         print(f"  unreadable      : {len(report.unreadable)}")
         for path, reason in report.unreadable:
             print(f"    {Path(path).name}: {reason}")
+    if report.discarded:
+        print(f"  discarded       : {len(report.discarded)}")
+        for path in report.discarded:
+            print(f"    {Path(path).name}")
     return 0
 
 

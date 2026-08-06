@@ -505,3 +505,20 @@ def test_get_shot_returns_marked_shot(controller, inbox):
     shot = controller.get_shot(shot_id)
     assert shot is not None and shot.marked is True
     assert controller.get_shot(999) is None
+
+
+def test_discard_shot_removes_it_and_blocks_reingest(controller, inbox):
+    _touch(inbox, "SUP-1_AR15_01_0000.dxd")
+    controller.ingest(inbox, validate=False)
+    shot = controller.unmarked_shots()[0]
+    source_file = shot.source_file
+
+    controller.discard_shot(shot.id, reason="mislabeled")
+
+    assert controller.get_shot(shot.id) is None
+    assert controller.unmarked_shots() == []
+    assert [d.source_file for d in controller.discarded_files()] == [source_file]
+
+    report = controller.ingest(inbox, validate=False)
+    assert report.n_ingested == 0
+    assert report.discarded == [source_file]
