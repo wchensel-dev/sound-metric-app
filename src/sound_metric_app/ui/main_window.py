@@ -191,6 +191,53 @@ def _flash_button(button: QtWidgets.QPushButton, message: str, revert_to: str) -
     )
 
 
+def _compare_series(
+    *,
+    shot_id: int,
+    position: MicPosition,
+    sku: str,
+    where: str,
+    combo_label: str,
+    batch_id: int,
+    note: str = "",
+) -> CompareSeries:
+    """Name one shot/mic as a Compare-tab series.
+
+    Both the Data bank and the Batch average tabs pin the same kind of thing --
+    one shot's one mic -- to the same Compare tab, and a curve has to read
+    identically no matter which one sent it (``CompareView.add_series`` dedupes
+    on ``(shot_id, position)`` across tabs). ``where`` is the caller's
+    cluster/shot locator (``"C{cluster}·S{order}"``, or ``"S{order}"`` with no
+    cluster); ``note`` is appended to the detail verbatim, letting the Data
+    bank tab mark an idle shot without the Batch average tab -- which never
+    sees idle shots -- carrying dead code for it.
+    """
+    return CompareSeries(
+        shot_id=shot_id,
+        position=position,
+        label=f"#{shot_id} · {sku} · {where} · {position.value}",
+        detail=f"{combo_label}\nBatch #{batch_id} · {where} · {position.label}{note}",
+    )
+
+
+def _pin_compare_series(
+    main: "MainWindow",
+    button: QtWidgets.QPushButton,
+    series: CompareSeries,
+    revert_label: str,
+) -> None:
+    """Pin one shot/mic to the Compare tab and flash the button to confirm.
+
+    Shared by the Data bank and Batch average tabs' own ``_pin_for_compare``
+    methods, which differ only in what the button reverts to afterwards (a mic
+    label there, the constant "Compare" here).
+    """
+    added = main.add_to_compare(series)
+    _flash_button(
+        button, _COMPARE_ADDED_LABEL if added else _COMPARE_ALREADY_LABEL, revert_label
+    )
+
+
 def _color_swatch(color: tuple[int, int, int] | None) -> QtGui.QIcon:
     """A small filled square in ``color`` — the Compare list's legend key.
 
@@ -1589,27 +1636,23 @@ class DataBankView(_View):
     ) -> CompareSeries:
         """Name one data-bank shot/mic as a Compare-tab series.
 
-        Mirrors :meth:`BatchAverageView._series_for` — same key shape, same
-        label/detail conventions — so a shot pinned from here reads identically
-        to one pinned from Batch average, and the two cannot double-pin the same
-        curve (``CompareView.add_series`` dedupes on ``(shot_id, position)``
-        regardless of which tab it arrived from).
+        Builds off the shared :func:`_compare_series`, adding the one thing
+        that is specific to this tab: idle shots (which Batch average never
+        shows) get a note in the detail saying so.
         """
         where = (
             f"C{shot.cluster_index}·S{shot.shot_order}"
             if shot.cluster_index
             else f"S{shot.shot_order}"
         )
-        sku = combo.sku if combo else "?"
-        return CompareSeries(
+        return _compare_series(
             shot_id=shot.id,
             position=position,
-            label=f"#{shot.id} · {sku} · {where} · {position.value}",
-            detail=(
-                f"{combo.label if combo else '?'}\n"
-                f"Batch #{batch.id} · {where} · {position.label}"
-                + ("" if shot.included else "  (idle — not brought forward)")
-            ),
+            sku=combo.sku if combo else "?",
+            where=where,
+            combo_label=combo.label if combo else "?",
+            batch_id=batch.id,
+            note="" if shot.included else "  (idle — not brought forward)",
         )
 
     def _compare_button(
@@ -1630,16 +1673,10 @@ class DataBankView(_View):
     ) -> None:
         """Pin one shot/mic to the Compare tab, without leaving the data bank.
 
-        Same pattern as :meth:`BatchAverageView._pin_for_compare`: the button
-        flashes to confirm, then reverts to its own label (ML or SE, not the
-        other tab's "Compare") rather than a shared constant.
+        Uses the shared :func:`_pin_compare_series`, but reverts the button to
+        its own label (ML or SE) rather than the other tab's "Compare" constant.
         """
-        added = self.main.add_to_compare(series)
-        _flash_button(
-            button,
-            _COMPARE_ADDED_LABEL if added else _COMPARE_ALREADY_LABEL,
-            series.position.value,
-        )
+        _pin_compare_series(self.main, button, series, series.position.value)
 
 
 # --------------------------------------------------------------------------- #
@@ -2534,21 +2571,19 @@ class BatchAverageView(_View):
         a different SKU. The shot id leads because it is the only field that is
         unique on its own; the rest is there to be read, not to disambiguate.
         The longer identification (platform, ammo, batch) goes to the tooltip,
-        where there is room for it.
+        where there is room for it. Built off the shared :func:`_compare_series`.
         """
         cluster = shot.get("cluster_index")
         order = shot.get("shot_order")
         where = f"C{cluster}·S{order}" if cluster else f"S{order}"
         combination = report.combination
-        sku = combination.sku if combination else "?"
-        return CompareSeries(
+        return _compare_series(
             shot_id=shot["shot_id"],
             position=position,
-            label=f"#{shot['shot_id']} · {sku} · {where} · {position.value}",
-            detail=(
-                f"{combination.label if combination else '?'}\n"
-                f"Batch #{report.batch.id} · {where} · {position.label}"
-            ),
+            sku=combination.sku if combination else "?",
+            where=where,
+            combo_label=combination.label if combination else "?",
+            batch_id=report.batch.id,
         )
 
     def _compare_button(self, series: CompareSeries) -> QtWidgets.QPushButton:
@@ -2567,15 +2602,11 @@ class BatchAverageView(_View):
         """Pin one shot/mic to the Compare tab, without leaving this one.
 
         Staying put is the point: comparing means picking several shots, often
-        across batches, and a tab switch per pick would fight that. The button
-        flashes instead, and the Compare tab's title carries the running count.
+        across batches, and a tab switch per pick would fight that. Uses the
+        shared :func:`_pin_compare_series`; the button reverts to the constant
+        "Compare" label, not a per-row one.
         """
-        added = self.main.add_to_compare(series)
-        _flash_button(
-            button,
-            _COMPARE_ADDED_LABEL if added else _COMPARE_ALREADY_LABEL,
-            _COMPARE_LABEL,
-        )
+        _pin_compare_series(self.main, button, series, _COMPARE_LABEL)
 
     # ---- graph ---------------------------------------------------------- #
 
