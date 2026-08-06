@@ -2423,6 +2423,7 @@ class BatchAverageView(_View):
                     slot_label,
                     str(avg["n"]),
                     *(_format_metric(avg[k]) for k in self._METRIC_KEYS),
+                    "",  # Compare column: an average has no single curve to pin
                     "",  # the paste column holds a button, not text
                 ]
             )
