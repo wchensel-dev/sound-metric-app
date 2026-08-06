@@ -182,6 +182,21 @@ def test_ingest_reports_malformed(env, capsys):
     assert "malformed       : 2" in out
 
 
+def test_ingest_reports_discarded(env, capsys):
+    # A file blocklisted via the GUI (or a prior discard) must still show up
+    # in the CLI's scan summary instead of silently vanishing from every count.
+    db, inbox = env
+    bad = inbox / "SUP-1_AR15_01_001.dxd"
+    _touch(inbox, bad.name)
+    with WorkflowRepository(db) as repo:
+        repo.discard_file(str(bad.resolve()), reason="corrupt capture")
+    assert workflow_cli.main(["ingest", str(inbox), "--db", db, "--no-validate"]) == 0
+    out = capsys.readouterr().out
+    assert "ingested       : 0" in out
+    assert "discarded       : 1" in out
+    assert bad.name in out
+
+
 # --------------------------------------------------------------------------- #
 # mark
 # --------------------------------------------------------------------------- #
