@@ -662,6 +662,16 @@ class WorkflowRepository(_SqliteStore):
         cur = self._conn.execute("SELECT * FROM discarded_files ORDER BY discarded_at DESC")
         return [_row_to_discarded_file(r) for r in cur.fetchall()]
 
+    def discarded_source_files(self) -> set[str]:
+        """Every blocklisted path as a set, for cheap in-memory membership checks.
+
+        Lets a caller that needs to test many paths (e.g. an ingest folder
+        scan) load the blocklist once instead of issuing one query per path
+        via :meth:`is_discarded`.
+        """
+        cur = self._conn.execute("SELECT source_file FROM discarded_files")
+        return {row["source_file"] for row in cur.fetchall()}
+
     def discard_unmarked_shot(self, shot_id: int, *, reason: str | None = None) -> None:
         """Delete an unmarked shot and blocklist its source file.
 

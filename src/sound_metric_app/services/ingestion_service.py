@@ -99,10 +99,11 @@ class IngestionService:
             raise NotADirectoryError(f"Input path is not a folder: {folder}")
 
         report = IngestReport()
+        discarded = self._repo.discarded_source_files()
         for path in self._capture_files(folder):
             source_file = str(path.resolve())
 
-            if self._repo.is_discarded(source_file):
+            if source_file in discarded:
                 report.discarded.append(source_file)
                 continue
 

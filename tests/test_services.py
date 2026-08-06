@@ -223,6 +223,17 @@ def test_discard_file_round_trip(repo):
     assert repo.discarded_files() == []
 
 
+def test_discarded_source_files_returns_set(repo):
+    assert repo.discarded_source_files() == set()
+
+    repo.discard_file("/inbox/bad1.dxd", reason="corrupt export")
+    repo.discard_file("/inbox/bad2.dxd", reason="wrong platform")
+    assert repo.discarded_source_files() == {"/inbox/bad1.dxd", "/inbox/bad2.dxd"}
+
+    repo.restore_file("/inbox/bad1.dxd")
+    assert repo.discarded_source_files() == {"/inbox/bad2.dxd"}
+
+
 def test_discard_file_is_idempotent_and_updates_reason(repo):
     path = "/inbox/bad.dxd"
     repo.discard_file(path, reason="first reason")
