@@ -18,6 +18,7 @@ from sound_metric_app.config import (
     LIAEQ_WINDOW_MS,
     ONSET_THRESHOLD_PA,
     P_REF,
+    PRETRIGGER_FLOOR_SAMPLES,
 )
 from sound_metric_app.dsp.metrics import (
     _positive_phase_impulse,
@@ -25,6 +26,7 @@ from sound_metric_app.dsp.metrics import (
     pa_to_db,
     positive_phase_impulse_pa_ms,
     positive_phase_peak_index,
+    pretrigger_floor_pa,
     rms_pa,
     running_leq_rms,
     signed_peak_pa,
@@ -305,3 +307,61 @@ def test_processor_handles_empty_frame_gracefully():
     assert r.n_samples == 0
     assert r.impulse_pa_ms == 0.0
     assert r.peak_db == float("-inf")
+
+
+# --------------------------------------------------------------------------- #
+# Pre-trigger floor (diagnostic)
+# --------------------------------------------------------------------------- #
+
+
+def test_pretrigger_floor_is_signed_mean_of_the_first_samples():
+    p = np.zeros(1000)
+    p[:100] = 0.6            # a displaced baseline in the pre-trigger lead
+    p[500] = 2000.0          # the blast, far outside the averaged span
+    assert pretrigger_floor_pa(p, 100) == pytest.approx(0.6)
+    # Signed, not a magnitude: a negatively displaced baseline reports negative,
+    # which is what tells the operator *which way* the channel drifted.
+    assert pretrigger_floor_pa(-p, 100) == pytest.approx(-0.6)
+
+
+def test_pretrigger_floor_reads_only_the_first_n_samples():
+    # Nothing after the averaged span may move it — that is what keeps it a
+    # measure of the baseline rather than of the shot.
+    p = np.concatenate([np.full(100, 0.25), np.full(9900, 500.0)])
+    assert pretrigger_floor_pa(p, 100) == pytest.approx(0.25)
+
+
+def test_pretrigger_floor_defaults_to_the_configured_span():
+    p = np.concatenate([np.full(PRETRIGGER_FLOOR_SAMPLES, 0.4), np.full(500, 99.0)])
+    assert pretrigger_floor_pa(p) == pytest.approx(0.4)
+
+
+def test_pretrigger_floor_degrades_on_short_and_empty_frames():
+    # Shorter than the span: average what there is rather than raise or pad.
+    assert pretrigger_floor_pa(np.full(10, 0.3), 100) == pytest.approx(0.3)
+    # Empty: nothing observed, so report no displacement rather than NaN — a NaN
+    # would propagate into the stored column and render as a broken cell.
+    assert pretrigger_floor_pa(np.array([]), 100) == 0.0
+
+
+def test_processor_reports_the_pretrigger_floor_without_correcting_anything():
+    # The diagnostic must observe the offset, and the metrics must be computed on
+    # the uncorrected signal — this is the whole contract the operator relies on
+    # when reading the column next to the numbers.
+    clean = _blast_frame(peak_pa=2000.0)
+    offset = 0.6
+    shifted = Frame(
+        samples=clean.samples + offset,
+        sample_rate=clean.sample_rate,
+        channel=clean.channel,
+        source_file=clean.source_file,
+    )
+    r_clean = MetricsProcessor().process(clean)
+    r_shifted = MetricsProcessor().process(shifted)
+
+    assert r_clean.pretrigger_floor_pa == pytest.approx(0.0, abs=1e-3)
+    assert r_shifted.pretrigger_floor_pa == pytest.approx(offset, abs=1e-3)
+    # Uncorrected: the offset rides straight through into the reported peak.
+    assert r_shifted.peak_pa == pytest.approx(r_clean.peak_pa + offset, rel=1e-6)
+    # And it has no dB companion — it is not a level.
+    assert not hasattr(r_shifted, "pretrigger_floor_db")

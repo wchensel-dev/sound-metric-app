@@ -47,6 +47,14 @@ POST_MS: float = 200.0
 CAPTURE_MS: float = LEAD_MS + POST_MS  # 210 ms nominal frame
 EXPECTED_SAMPLES: int = 42_000  # CAPTURE_MS at EXPECTED_FS
 
+# Pre-trigger floor: how many samples from the very start of the capture are
+# averaged into the per-channel baseline diagnostic (see
+# `metrics.pretrigger_floor_pa`). 100 samples is 0.5 ms at EXPECTED_FS, well
+# inside the LEAD_MS pre-trigger lead, so the mean is taken from quiet
+# pre-shot signal on a nominal capture. Purely a QC readout: no metric is
+# corrected by it, and nothing in the analysis path reads it.
+PRETRIGGER_FLOOR_SAMPLES: int = 100
+
 # Exponential RMS time-weighting constants for SPL-over-time display, IEC 61672.
 # "Fast" and "Slow" are the standard sound-level-meter time constants; they turn
 # the per-cycle swing of the raw waveform into a continuous level envelope.

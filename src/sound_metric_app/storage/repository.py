@@ -38,7 +38,7 @@ from ..models import (
     ShotRole,
 )
 from ._base import _SqliteStore
-from .database import _METRIC_COLUMNS, _PEAK_WINDOW_COLUMNS
+from .database import _METRIC_COLUMNS, _PEAK_WINDOW_COLUMNS, _STORED_COLUMNS
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS combinations (
@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS channel_metrics (
     leq10ms_db      REAL,
     liaeq_pa        REAL,
     liaeq_100ms_db  REAL,
+    pretrigger_floor_pa REAL,   -- diagnostic: pre-trigger baseline, signed mean Pa
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (shot_id, mic_position)
 );
@@ -128,10 +129,6 @@ _ROLE_CASE = (
     f"CASE WHEN s.shot_order = {FRP_SHOT_ORDER} THEN '{ShotRole.FRP.value}' "
     f"ELSE '{ShotRole.REGULAR.value}' END"
 )
-
-#: Every stored metric column (linear magnitude + its dB level), shared with the
-#: flat ResultsDatabase so both stores' schemas stay in lockstep.
-_METRIC_FIELDS = _METRIC_COLUMNS
 
 #: Linear-magnitude column -> the dB column derived from its batch-average. Batch
 #: aggregation averages the linear magnitude, then converts once (MATH.md §9).
@@ -168,9 +165,12 @@ class WorkflowRepository(_SqliteStore):
         # column on databases created before it existed.
         self._add_column_if_missing("shots", "captured_at", "TEXT")
 
-        # The linear-magnitude / new-metric columns were added after
-        # channel_metrics first shipped; back-fill them on older databases.
-        for column in _METRIC_COLUMNS:
+        # The linear-magnitude / new-metric columns and the diagnostic columns
+        # were each added after channel_metrics first shipped; back-fill them on
+        # older databases. A row written before a column existed keeps NULL
+        # there — for a diagnostic that correctly reads as "not measured", and
+        # re-marking the shot re-processes the capture and fills it in.
+        for column in _STORED_COLUMNS:
             self._add_column_if_missing("channel_metrics", column, "REAL")
 
         if self._schema_version() < 1:
@@ -590,6 +590,33 @@ class WorkflowRepository(_SqliteStore):
         )
         return [_row_to_shot(r) for r in cur.fetchall()]
 
+    def pretrigger_floors_by_shot(self) -> dict[int, dict[MicPosition, float]]:
+        """Every stored pre-trigger floor, as ``{shot_id: {position: floor_pa}}``.
+
+        One query for the whole archive rather than a lookup per shot: the data
+        bank builds its tree with a query per cluster already, and adding a
+        per-shot read on top would turn a 50-cluster batch into hundreds of
+        round-trips. The result is small (one float per channel row) and the
+        caller indexes into it.
+
+        Rows whose floor is NULL — written before the column existed and not yet
+        backfilled — are omitted rather than mapped to 0.0, so "not measured"
+        stays distinguishable from "measured, and the baseline was fine".
+        """
+        cur = self._conn.execute(
+            """
+            SELECT shot_id, mic_position, pretrigger_floor_pa
+            FROM channel_metrics
+            WHERE pretrigger_floor_pa IS NOT NULL
+            """
+        )
+        out: dict[int, dict[MicPosition, float]] = {}
+        for row in cur.fetchall():
+            out.setdefault(int(row["shot_id"]), {})[MicPosition(row["mic_position"])] = float(
+                row["pretrigger_floor_pa"]
+            )
+        return out
+
     def shots_for_batch(self, batch_id: int, *, included_only: bool = False) -> list[Shot]:
         """Every shot in a batch across all its clusters, in firing order.
 
@@ -834,9 +861,9 @@ class WorkflowRepository(_SqliteStore):
     ) -> int:
         """Persist one mic's metrics for a shot. Upserts on (shot, position)."""
         row = result.as_row()
-        metric_cols = ", ".join(_METRIC_COLUMNS)
-        placeholders = ", ".join("?" * len(_METRIC_COLUMNS))
-        updates = ", ".join(f"{c} = excluded.{c}" for c in _METRIC_COLUMNS)
+        metric_cols = ", ".join(_STORED_COLUMNS)
+        placeholders = ", ".join("?" * len(_STORED_COLUMNS))
+        updates = ", ".join(f"{c} = excluded.{c}" for c in _STORED_COLUMNS)
         cur = self._conn.execute(
             f"""
             INSERT INTO channel_metrics
@@ -856,7 +883,7 @@ class WorkflowRepository(_SqliteStore):
                 result.channel,
                 result.sample_rate,
                 result.n_samples,
-                *(row[c] for c in _METRIC_COLUMNS),
+                *(row[c] for c in _STORED_COLUMNS),
             ),
         )
         row_id = int(cur.fetchone()[0])
@@ -965,7 +992,7 @@ class WorkflowRepository(_SqliteStore):
         alongside the ones brought forward.
         """
         clause = " AND s.included = 1" if included_only else ""
-        metric_select = ", ".join(f"cm.{c}" for c in _METRIC_COLUMNS)
+        metric_select = ", ".join(f"cm.{c}" for c in _STORED_COLUMNS)
         cur = self._conn.execute(
             f"""
             SELECT cm.mic_position   AS pos,
@@ -994,7 +1021,10 @@ class WorkflowRepository(_SqliteStore):
                     "shot_order": r["shot_order"],
                     "included": bool(r["included"]),
                     "source_file": r["source_file"],
-                    **{k: r[k] for k in _METRIC_FIELDS},
+                    # Every stored column, metrics and diagnostics alike —
+                    # aggregation still reads _LINEAR_TO_DB, so widening what a
+                    # shot row carries does not widen what gets averaged.
+                    **{k: r[k] for k in _STORED_COLUMNS},
                 }
             )
         return out

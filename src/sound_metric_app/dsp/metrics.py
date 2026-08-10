@@ -13,7 +13,33 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..config import LEQ_TAU_S, ONSET_THRESHOLD_PA, P_REF
+from ..config import LEQ_TAU_S, ONSET_THRESHOLD_PA, P_REF, PRETRIGGER_FLOOR_SAMPLES
+
+
+def pretrigger_floor_pa(
+    pressure: np.ndarray, n_samples: int = PRETRIGGER_FLOOR_SAMPLES
+) -> float:
+    """Mean pressure over the first ``n_samples`` of a capture, in Pa.
+
+    A **diagnostic only**: an estimate of where the channel's baseline sits
+    before the shot arrives, for spotting captures corrupted by wind loading,
+    thermal drift, or a preamp that had not settled. Nothing in the analysis
+    path consumes it — no metric is baseline-corrected, and the onset threshold
+    is still the absolute 1 Pa of ``ONSET_THRESHOLD_PA``. It exists so an
+    operator can sort a batch by it and see which shots sat on a displaced
+    baseline.
+
+    Read as a *signed* mean, not a magnitude: the sign says which way the
+    baseline is displaced, and a value near zero is the healthy case. On a
+    nominal capture the span is inside the ``LEAD_MS`` pre-trigger lead, so it
+    samples quiet pre-shot signal; on a frame that is shorter than
+    ``n_samples`` the whole frame is averaged, and on an empty one the result
+    is ``0.0`` (nothing observed, nothing to report).
+    """
+    p = np.asarray(pressure, dtype=float)[: max(0, n_samples)]
+    if p.size == 0:
+        return 0.0
+    return float(np.mean(p))
 
 
 def find_onset(pressure: np.ndarray, threshold_pa: float = ONSET_THRESHOLD_PA) -> int | None:

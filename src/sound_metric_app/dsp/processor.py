@@ -13,6 +13,12 @@ TBAC's ``process_string.m``:
 
 Each metric carries both its linear magnitude (Pa or Pa·ms) and the dB level, so
 group aggregation can average in the linear domain (MATH.md §9).
+
+Alongside them the result carries one *diagnostic*, ``pretrigger_floor_pa`` — the
+mean pressure over the capture's first samples, before the trigger. It is not a
+metric: it has no dB companion, it is not averaged into a batch, and no metric
+above is corrected by it. It is there so an operator can spot a capture whose
+baseline was displaced by wind, thermal drift, or an unsettled preamp.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from .metrics import (
     find_onset,
     pa_to_db,
     positive_phase_impulse_pa_ms,
+    pretrigger_floor_pa,
     rms_pa,
     running_leq_rms,
     signed_peak_pa,
@@ -89,6 +96,10 @@ class MetricsProcessor:
             leq10ms_db=pa_to_db(leq10ms_pa),
             liaeq_pa=liaeq_pa,
             liaeq_100ms_db=pa_to_db(liaeq_pa),
+            # Diagnostic, deliberately computed off the *raw, unwindowed* frame:
+            # it reports what the baseline was doing before the onset the metrics
+            # above are anchored to, so it must not itself depend on that onset.
+            pretrigger_floor_pa=pretrigger_floor_pa(p),
             source_file=frame.source_file,
             channel=frame.channel,
             sample_rate=fs,

@@ -24,6 +24,19 @@ _PEAK_WINDOW_COLUMNS = (
     "impulse_pa_ms", "peak_impulse_db",
 )
 
+#: Diagnostic columns: stored per channel row like a metric, but *not* metrics.
+#: Held apart from :data:`_METRIC_COLUMNS` for two reasons — the migrations that
+#: blank metrics when a window or definition changes must not blank these (they
+#: depend on no window and no definition), and batch aggregation must not average
+#: them into an output slot.
+_DIAGNOSTIC_COLUMNS = (
+    "pretrigger_floor_pa",  # signed mean Pa over the capture's first samples
+)
+
+#: Every column a channel row persists from a MetricResult. This — not
+#: ``_METRIC_COLUMNS`` — is what schema, inserts and selects iterate.
+_STORED_COLUMNS = _METRIC_COLUMNS + _DIAGNOSTIC_COLUMNS
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,6 +55,7 @@ CREATE TABLE IF NOT EXISTS results (
     leq10ms_db      REAL,
     liaeq_pa        REAL,
     liaeq_100ms_db  REAL,
+    pretrigger_floor_pa REAL,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
@@ -53,9 +67,12 @@ class ResultsDatabase(_SqliteStore):
     _SCHEMA = _SCHEMA
 
     def _migrate(self) -> None:
-        # peak_pa and the linear-magnitude / new-metric columns were added after
-        # the results table first shipped; back-fill them on older databases.
-        for column in _METRIC_COLUMNS:
+        # peak_pa, the linear-magnitude / new-metric columns and the diagnostic
+        # columns were each added after the results table first shipped;
+        # back-fill them on older databases. Rows written before a column
+        # existed keep NULL there — for a diagnostic that correctly reads as
+        # "not measured", and re-processing the source file fills it in.
+        for column in _STORED_COLUMNS:
             self._add_column_if_missing("results", column, "REAL")
 
         if self._schema_version() < 1:
@@ -84,8 +101,8 @@ class ResultsDatabase(_SqliteStore):
 
     def add_result(self, result: MetricResult) -> int:
         row = result.as_row()
-        metric_cols = ", ".join(_METRIC_COLUMNS)
-        metric_vals = ", ".join(f":{c}" for c in _METRIC_COLUMNS)
+        metric_cols = ", ".join(_STORED_COLUMNS)
+        metric_vals = ", ".join(f":{c}" for c in _STORED_COLUMNS)
         cur = self._conn.execute(
             f"""
             INSERT INTO results
