@@ -21,11 +21,15 @@ _METRIC_KEYS_ALL = (
 _CURRENT_VERSION = 5
 
 
-def _metric(pa: float, channel: str = "AI 1") -> MetricResult:
+def _metric(
+    pa: float, channel: str = "AI 1", floor_pa: float = 0.0
+) -> MetricResult:
     """A MetricResult whose every linear magnitude equals ``pa`` (easy to average).
 
     dB fields are the matching ``pa_to_db(pa)``, so a slot's linear-then-dB
     average of identical shots is ``pa`` (linear) and ``pa_to_db(pa)`` (dB).
+    ``floor_pa`` is the pre-trigger diagnostic, defaulted to an undisplaced
+    baseline and set explicitly only by the tests that assert on it.
     """
     db = pa_to_db(pa)
     return MetricResult(
@@ -34,6 +38,7 @@ def _metric(pa: float, channel: str = "AI 1") -> MetricResult:
         impulse_pa_ms=pa, peak_impulse_db=db,
         leq10ms_pa=pa, leq10ms_db=db,
         liaeq_pa=pa, liaeq_100ms_db=db,
+        pretrigger_floor_pa=floor_pa,
         source_file="f.dxd",
         channel=channel,
         sample_rate=200_000.0,
@@ -806,6 +811,40 @@ def test_shot_metrics_for_batch_drills_into_the_same_slots(repo, batch):
     everything = repo.shot_metrics_for_batch(batch_id, included_only=False)
     regulars = everything[(MicPosition.SE, ShotRole.REGULAR)]
     assert [r["included"] for r in regulars] == [True, False]
+
+
+def test_pretrigger_floor_round_trips_per_shot_but_is_never_averaged(repo, batch):
+    # The diagnostic reaches the shot rows the operator scans, keeping its sign
+    # and its per-capture value. It must *not* reach the slot average: averaging
+    # three good baselines with one bad one would hide exactly the shot the
+    # column exists to expose.
+    _combination_id, batch_id, cluster_id = batch
+    floors = {1: 0.6, 2: -0.2}
+    for order, floor in floors.items():
+        shot_id = _placed_shot(repo, cluster_id, order=order)
+        repo.set_shot_included(shot_id, True)
+        repo.save_channel_metric(shot_id, MicPosition.SE, _metric(160.0, floor_pa=floor))
+
+    rows = repo.shot_metrics_for_batch(batch_id)[(MicPosition.SE, ShotRole.REGULAR)]
+    assert [r["pretrigger_floor_pa"] for r in rows] == [0.6, -0.2]
+
+    average = repo.batch_averages(batch_id)[(MicPosition.SE, ShotRole.REGULAR)]
+    assert "pretrigger_floor_pa" not in average
+
+
+def test_save_channel_metric_upsert_overwrites_the_pretrigger_floor(repo):
+    # Re-processing a capture must replace the diagnostic, not leave the first
+    # run's value behind — the upsert's SET list has to cover it like any other
+    # stored column.
+    shot_id = repo.add_unmarked_shot("SUP-1_AR15_01_001.dxd", "SUP-1", "AR15", 1, 1)
+    repo.save_channel_metric(shot_id, MicPosition.SE, _metric(160.0, floor_pa=0.6))
+    repo.save_channel_metric(shot_id, MicPosition.SE, _metric(160.0, floor_pa=-0.1))
+
+    with repo._conn as conn:
+        stored = conn.execute(
+            "SELECT pretrigger_floor_pa FROM channel_metrics WHERE shot_id = ?", (shot_id,)
+        ).fetchone()[0]
+    assert stored == pytest.approx(-0.1)
 
 
 def test_save_channel_metric_returns_updated_row_id_on_upsert(repo):

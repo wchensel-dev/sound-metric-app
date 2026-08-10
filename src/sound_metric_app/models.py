@@ -262,6 +262,12 @@ class MetricResult:
     sample_rate: float
     n_samples: int
     timestamp: datetime | None = None
+    #: Pre-trigger baseline diagnostic (signed mean Pa over the capture's first
+    #: PRETRIGGER_FLOOR_SAMPLES), not an acoustic metric: it has no dB companion,
+    #: is never batch-averaged, and corrects nothing. Defaulted so a MetricResult
+    #: built without it (a hand-built test fixture, a caller predating the
+    #: column) still constructs, reading as "baseline not displaced".
+    pretrigger_floor_pa: float = 0.0
 
     def as_row(self) -> dict:
         """Flat dict suitable for storage / CSV export."""
@@ -281,6 +287,7 @@ class MetricResult:
             "leq10ms_db": self.leq10ms_db,
             "liaeq_pa": self.liaeq_pa,
             "liaeq_100ms_db": self.liaeq_100ms_db,
+            "pretrigger_floor_pa": self.pretrigger_floor_pa,
         }
 
 

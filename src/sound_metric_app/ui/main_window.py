@@ -96,6 +96,24 @@ _REPORT_METRICS = (
     ("LIAeq,100ms dBA", "liaeq_100ms_db"),
 )
 
+#: Header for the pre-trigger floor wherever it is shown. Named once because two
+#: trees carry the column with different bodies — Batch average one mic per row,
+#: the data bank both mics in one cell — and a label that drifted between them
+#: would read as two different diagnostics.
+_PRETRIGGER_FLOOR_LABEL = "Pre-trig floor Pa"
+
+#: Per-shot diagnostic columns: (header label, stored key). Deliberately *not*
+#: part of :data:`_REPORT_METRICS` — every key there must be one
+#: :func:`~sound_metric_app.dsp.build_metric_trace` accepts (the Compare picker
+#: and the click-to-graph handler both assume it), and these have no curve. They
+#: are QC readouts on the capture, not measurements of the shot, so they trail
+#: the metrics and only shot rows carry them. Named for the report the way
+#: :data:`_REPORT_METRICS` is, distinct from the storage layer's
+#: ``_DIAGNOSTIC_COLUMNS``, which lists database column names.
+_REPORT_DIAGNOSTICS = (
+    (_PRETRIGGER_FLOOR_LABEL, "pretrigger_floor_pa"),
+)
+
 #: Mid-grey for a Compare row that is not on the graph: the text of a hidden
 #: one (set aside, but still pinned) and the outline of the empty swatch an
 #: unloadable one gets. A *hidden* row keeps its colour swatch at full strength
@@ -1236,8 +1254,15 @@ class DataBankView(_View):
         "Detail",
         "Role",
         "Timestamp",
+        _PRETRIGGER_FLOOR_LABEL,
         "Compare",
     ]
+    #: The pre-trigger floor diagnostic, filled on shot rows only (a cluster has
+    #: no single baseline). Both mics share the cell — a shot row stands for the
+    #: capture, not for one channel — in the same "ML … SE …" shape the Detail
+    #: column already uses for the channel tags. Located rather than hard-coded,
+    #: so inserting a column ahead of it cannot silently write into its neighbour.
+    _FLOOR_COL = _COLUMNS.index(_PRETRIGGER_FLOOR_LABEL)
     #: The Compare column trails the rest; only shot rows fill it, with one
     #: button per marked mic (ML, SE, or both).
     _COMPARE_COL = len(_COLUMNS) - 1
@@ -1393,7 +1418,7 @@ class DataBankView(_View):
         )
         item.setData(0, QtCore.Qt.UserRole, ("cluster", cluster, batch, combo))
         for shot in node.shots:
-            shot_item = self._shot_item(shot, cluster, batch, combo)
+            shot_item = self._shot_item(shot, cluster, batch, combo, node.floors.get(shot.id))
             item.addChild(shot_item)
             # setItemWidget needs the row parented first, same reason as the
             # Batch average tab's Compare column (see BatchAverageView._load_report).
@@ -1402,7 +1427,9 @@ class DataBankView(_View):
             )
         return item
 
-    def _shot_item(self, shot, cluster, batch, combo) -> QtWidgets.QTreeWidgetItem:
+    def _shot_item(
+        self, shot, cluster, batch, combo, floors: dict[MicPosition, float] | None = None
+    ) -> QtWidgets.QTreeWidgetItem:
         tags = f"ML:{shot.ml_channel or _EMPTY}  SE:{shot.se_channel or _EMPTY}"
         if shot.exclusion_reason:
             tags = f"{tags}  — {shot.exclusion_reason}"
@@ -1414,6 +1441,7 @@ class DataBankView(_View):
                 tags,
                 role.label if role else _EMPTY,
                 _format_captured_at(shot.captured_at),
+                _format_floor_pair(floors),
             ]
         )
         # The checkbox *is* the inclusion flag: the data bank's whole job is
@@ -2319,19 +2347,23 @@ class BatchAverageView(_View):
     """
 
     _METRIC_KEYS = tuple(key for _label, key in _REPORT_METRICS)
+    _DIAGNOSTIC_KEYS = tuple(key for _label, key in _REPORT_DIAGNOSTICS)
     _COLUMNS = [
         "Slot / Shot", "n",
         *(label for label, _key in _REPORT_METRICS),
+        *(label for label, _key in _REPORT_DIAGNOSTICS),
         "Compare", "Scout paste",
     ]
     #: Metric columns begin here; columns 0-1 are label / n.
     _FIRST_METRIC_COL = 2
     #: One past the last metric column — where a click stops being a graph request.
+    #: The diagnostic columns sit past this bound precisely so a click on one is
+    #: not read as a graph request: they have no trace to draw.
     _END_METRIC_COL = _FIRST_METRIC_COL + len(_METRIC_KEYS)
     #: The two trailing button columns, in the order the operator meets them:
     #: Compare (shot rows, see :meth:`_compare_button`) then Scout paste
     #: (averaged rows, see :meth:`_paste_button`).
-    _COMPARE_COL = _END_METRIC_COL
+    _COMPARE_COL = _END_METRIC_COL + len(_DIAGNOSTIC_KEYS)
     _PASTE_COL = _COMPARE_COL + 1
     #: Fixed width for both — Qt sizes a column to its item *text*, and these
     #: cells are empty text behind a button widget, so contents-sizing would
@@ -2468,6 +2500,11 @@ class BatchAverageView(_View):
                     slot_label,
                     str(avg["n"]),
                     *(_format_metric(avg[k]) for k in self._METRIC_KEYS),
+                    # Diagnostics are per-capture, not aggregated: averaging the
+                    # baselines of the shots in a slot would hide the one bad
+                    # capture the column exists to expose, so a slot row leaves
+                    # them blank and the shot rows beneath carry the numbers.
+                    *("" for _ in self._DIAGNOSTIC_KEYS),
                     "",  # Compare column: an average has no single curve to pin
                     "",  # the paste column holds a button, not text
                 ]
@@ -2515,7 +2552,12 @@ class BatchAverageView(_View):
         # Trailing pair: the Compare column (filled with a button once the row is
         # parented) and the paste column (empty on a shot row).
         item = QtWidgets.QTreeWidgetItem(
-            [label, "", *(_format_metric(shot[k]) for k in self._METRIC_KEYS), "", ""]
+            [
+                label, "",
+                *(_format_metric(shot[k]) for k in self._METRIC_KEYS),
+                *(_format_floor(shot.get(k)) for k in self._DIAGNOSTIC_KEYS),
+                "", "",
+            ]
         )
         # Carry the identity a graph request needs: the shot to re-read and which
         # mic's channel to pull. Only shot rows get this tag, so a click on an
@@ -3258,6 +3300,39 @@ def _format_metric(value) -> str:
     raise and abort the whole report render.
     """
     return "—" if value is None else f"{value:.2f}"
+
+
+def _format_floor(value) -> str:
+    """Render a pre-trigger floor for a report cell (``None`` -> "—").
+
+    Signed and to three decimals, unlike :func:`_format_metric`: the sign says
+    which way the baseline is displaced, and these values live in the tenths of
+    a Pascal, where two decimals would round the differences between captures
+    down to a couple of digits. ``None`` is a row stored before the column
+    existed — re-marking the shot re-processes the capture and fills it in.
+    """
+    return "—" if value is None else f"{value:+.3f}"
+
+
+def _format_floor_pair(floors) -> str:
+    """Both mics' pre-trigger floors for one data-bank shot row.
+
+    A shot row stands for the capture, not for a channel, so it shows ML and SE
+    together — the same shape the Detail column uses for the channel tags, which
+    keeps the two readable down the same row. A mic with no stored floor (never
+    tagged, or a row predating the column) shows an em-dash in its half rather
+    than dropping out, so the two positions stay in fixed places and a column of
+    rows can be scanned straight down.
+
+    ``None`` (no channel row at all for this shot) collapses to a single dash
+    instead of a pair of them: there is nothing measured to line up.
+    """
+    if not floors:
+        return _EMPTY
+    return "  ".join(
+        f"{position.value}:{_format_floor(floors.get(position))}"
+        for position in (MicPosition.ML, MicPosition.SE)
+    )
 
 
 def _format_captured_at(captured_at: str | None) -> str:

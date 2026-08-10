@@ -90,12 +90,18 @@ def test_report_column_indices_stay_in_step_with_the_metric_set():
     # which raises. Pin the layout instead.
     from sound_metric_app.ui.main_window import BatchAverageView as bv
 
-    # Label, n, every metric, then exactly the two trailing button columns.
-    assert len(bv._COLUMNS) == bv._FIRST_METRIC_COL + len(bv._METRIC_KEYS) + 2
-    # Compare is the first column past the metrics -> the guard's upper bound and
-    # the button's column are the same index, not two that drifted; paste follows
-    # it, so "Compare sits before Copy" is a property of the constants.
-    assert bv._COMPARE_COL == bv._END_METRIC_COL
+    # Label, n, every metric, every diagnostic, then exactly the two trailing
+    # button columns.
+    assert len(bv._COLUMNS) == (
+        bv._FIRST_METRIC_COL + len(bv._METRIC_KEYS) + len(bv._DIAGNOSTIC_KEYS) + 2
+    )
+    # The diagnostics sit *past* _END_METRIC_COL, which is the guard's upper
+    # bound in _on_cell_clicked: that is what stops a click on one being read as
+    # a request to graph a metric it has no trace for. Compare then follows the
+    # diagnostics, and paste follows Compare, so "Compare sits before Copy" and
+    # "diagnostics are not graphable" are both properties of the constants.
+    assert bv._END_METRIC_COL == bv._FIRST_METRIC_COL + len(bv._METRIC_KEYS)
+    assert bv._COMPARE_COL == bv._END_METRIC_COL + len(bv._DIAGNOSTIC_KEYS)
     assert bv._PASTE_COL == bv._COMPARE_COL + 1
     assert bv._COLUMNS[bv._COMPARE_COL] == "Compare"
     assert bv._COLUMNS[bv._PASTE_COL] == "Scout paste"
@@ -111,6 +117,31 @@ def test_report_columns_and_compare_metrics_come_from_one_list():
     assert bv._METRIC_KEYS == tuple(key for _label, key in _REPORT_METRICS)
     assert bv._COLUMNS[bv._FIRST_METRIC_COL : bv._END_METRIC_COL] == [
         label for label, _key in _REPORT_METRICS
+    ]
+
+
+def test_diagnostic_columns_are_not_graphable_metrics():
+    # The diagnostics are a separate list precisely because every _REPORT_METRICS
+    # key must be one build_metric_trace accepts — the Compare picker and the
+    # click-to-graph handler both assume it. Moving a diagnostic into that list
+    # would raise ValueError on the first click, so keep the two disjoint and
+    # keep the diagnostics out of the graphable range.
+    from sound_metric_app.dsp import build_metric_trace
+    from sound_metric_app.ui.main_window import _REPORT_DIAGNOSTICS, _REPORT_METRICS
+    from sound_metric_app.ui.main_window import BatchAverageView as bv
+
+    metric_keys = {key for _label, key in _REPORT_METRICS}
+    diagnostic_keys = {key for _label, key in _REPORT_DIAGNOSTICS}
+    assert metric_keys.isdisjoint(diagnostic_keys)
+
+    frame = Frame(samples=np.zeros(64), sample_rate=1000.0, source_file="f", channel="c")
+    for key in diagnostic_keys:
+        with pytest.raises(ValueError):
+            build_metric_trace(frame, key)
+
+    # ...and they render past the graph guard's upper bound.
+    assert bv._COLUMNS[bv._END_METRIC_COL : bv._COMPARE_COL] == [
+        label for label, _key in _REPORT_DIAGNOSTICS
     ]
 
 
@@ -1573,6 +1604,66 @@ def test_data_bank_compare_buttons_pin_an_idle_shots_ml_and_se(window, qtbot):
     assert {s.shot_id for s in cv._series} == {shot.id}
     # The idle status is surfaced in the tooltip/detail rather than hidden.
     assert all("idle" in s.detail for s in cv._series)
+
+
+def test_data_bank_shot_row_shows_both_mics_pretrigger_floors(window, qtbot):
+    # The diagnostic has to be readable from the data bank, which is where an
+    # operator scans the whole archive — including the idle shots the Batch
+    # average tab never shows. A shot row stands for the capture, so it carries
+    # both mics in the one cell.
+    _mark_all_shots(window, qtbot)
+
+    bv = window.bank_view
+    bv.refresh()
+    _, _, cluster_item, shot_item = _tree_nodes(bv)
+    _kind, shot, *_rest = shot_item.data(0, QtCore.Qt.UserRole)
+
+    with window.controller._repo() as repo:
+        repo._conn.execute(
+            "UPDATE channel_metrics SET pretrigger_floor_pa = ? "
+            "WHERE shot_id = ? AND mic_position = 'ML'",
+            (0.612, shot.id),
+        )
+        repo._conn.execute(
+            "UPDATE channel_metrics SET pretrigger_floor_pa = ? "
+            "WHERE shot_id = ? AND mic_position = 'SE'",
+            (-0.25, shot.id),
+        )
+        repo._conn.commit()
+    bv.refresh()
+    _, _, cluster_item, shot_item = _tree_nodes(bv)
+
+    # Signed, three decimals, both positions in fixed order so a column of rows
+    # can be scanned straight down.
+    assert shot_item.text(bv._FLOOR_COL) == "ML:+0.612  SE:-0.250"
+    # Container rows have no single baseline, so they stay blank rather than
+    # showing an aggregate that would hide the one bad capture.
+    assert cluster_item.text(bv._FLOOR_COL) == ""
+
+
+def test_data_bank_shot_row_marks_an_unmeasured_floor_rather_than_showing_zero(
+    window, qtbot
+):
+    # A row written before the column existed holds NULL. It must read as "not
+    # measured", never as a healthy 0.000 baseline — that distinction is the
+    # whole reason the repository omits NULLs instead of defaulting them.
+    _mark_all_shots(window, qtbot)
+
+    bv = window.bank_view
+    bv.refresh()
+    _, _, _cluster_item, shot_item = _tree_nodes(bv)
+    _kind, shot, *_rest = shot_item.data(0, QtCore.Qt.UserRole)
+
+    with window.controller._repo() as repo:
+        repo._conn.execute(
+            "UPDATE channel_metrics SET pretrigger_floor_pa = NULL WHERE shot_id = ?",
+            (shot.id,),
+        )
+        repo._conn.commit()
+    bv.refresh()
+    _, _, _cluster_item, shot_item = _tree_nodes(bv)
+
+    assert shot_item.text(bv._FLOOR_COL) == "—"
 
 
 def test_data_bank_compare_button_only_appears_for_a_marked_channel(window, qtbot):

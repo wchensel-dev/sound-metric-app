@@ -22,7 +22,7 @@ without a real ``.dxd`` file, matching ``workflow_cli``'s module-level readers.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
@@ -63,6 +63,14 @@ class ClusterNode:
 
     cluster: Cluster
     shots: list[Shot]
+    #: Pre-trigger floor diagnostic per shot, ``{shot_id: {position: floor_pa}}``,
+    #: narrowed to this cluster's shots. Carried on the node rather than looked
+    #: up per row because it comes from one archive-wide read (see
+    #: :meth:`~sound_metric_app.storage.repository.WorkflowRepository.pretrigger_floors_by_shot`).
+    #: A shot missing from it, or a position missing from its entry, has no
+    #: stored floor — not a floor of zero. Defaulted so a hand-built node (tests,
+    #: callers that do not care) still constructs.
+    floors: dict[int, dict[MicPosition, float]] = field(default_factory=dict)
 
     @property
     def n_included(self) -> int:
@@ -367,6 +375,10 @@ class WorkflowController:
         skipping non-matching combinations *before* their nodes are built.
         """
         inclusion = InclusionService(repo)
+        # One archive-wide read of the pre-trigger floors, sliced per cluster
+        # below. Fetched here rather than inside the comprehension so a tree with
+        # hundreds of clusters still costs exactly one query for the diagnostic.
+        floors = repo.pretrigger_floors_by_shot()
         return [
             CombinationNode(
                 combination=combination,
@@ -374,7 +386,7 @@ class WorkflowController:
                     BatchNode(
                         batch=batch,
                         clusters=[
-                            ClusterNode(cluster=cluster, shots=repo.shots_by_cluster(cluster.id))
+                            self._cluster_node(repo, cluster, floors)
                             for cluster in repo.clusters_for_batch(batch.id)
                         ],
                         status=inclusion.status(batch.id),
@@ -385,6 +397,25 @@ class WorkflowController:
             for combination in combinations
             if sku is None or combination.sku == sku
         ]
+
+    @staticmethod
+    def _cluster_node(
+        repo: WorkflowRepository,
+        cluster: Cluster,
+        floors: dict[int, dict[MicPosition, float]],
+    ) -> ClusterNode:
+        """One cluster's node, carrying only its own shots' pre-trigger floors.
+
+        The floor map arrives archive-wide; narrowing it here keeps each node
+        self-contained, so a view rendering a cluster never has to reach past the
+        node it was handed to explain one of its rows.
+        """
+        shots = repo.shots_by_cluster(cluster.id)
+        return ClusterNode(
+            cluster=cluster,
+            shots=shots,
+            floors={s.id: floors[s.id] for s in shots if s.id in floors},
+        )
 
     # ---- inclusion ------------------------------------------------------ #
 
