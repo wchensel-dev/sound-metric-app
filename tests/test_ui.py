@@ -1303,6 +1303,36 @@ def test_axis_bounds_dialog_validates_each_axis_as_a_pair(qtbot, monkeypatch):
     assert d.values() == ((2.0, 6.0), None)
 
 
+def test_axis_bounds_dialog_prefill_survives_a_deep_zoom(qtbot):
+    # The prefill is rounded for typeability, but never so far that it stops
+    # describing the view: at a fixed 4 significant digits both ends of a
+    # zoomed-in axis print the same string, and Apply on an untouched form
+    # then trips the dialog's own low < high check.
+    from PySide6 import QtWidgets
+
+    from sound_metric_app.ui.graph.axis_bounds import AxisBoundsDialog
+
+    d = AxisBoundsDialog(x_range=(10.52, 10.524), y_range=(163.451, 163.459))
+    qtbot.addWidget(d)
+    d._on_accept()
+    assert d.result() == QtWidgets.QDialog.Accepted
+    x_range, y_range = d.values()
+    assert x_range == pytest.approx((10.52, 10.524))
+    assert y_range == pytest.approx((163.451, 163.459))
+
+    # …and re-framing on the prefilled numbers keeps the view where it was,
+    # rather than nudging its edges to the nearest round value.
+    d = AxisBoundsDialog(x_range=(10.4999, 15.5001), y_range=(0.0, 8.0))
+    qtbot.addWidget(d)
+    d._on_accept()
+    assert d.values()[0] == (10.4999, 15.5001)
+
+    # Float noise still collapses: that is what the rounding is for.
+    d = AxisBoundsDialog(x_range=(0.0, 2.9999999999996), y_range=(0.0, 8.0))
+    qtbot.addWidget(d)
+    assert d.x_max_edit.text() == "3"
+
+
 def test_window_marker_labels_run_vertically_from_the_top(qtbot):
     # The labels are rotated parallel to their line and top-aligned. Guards the
     # anchor choice: pyqtgraph's default anchors for rotated text centre the

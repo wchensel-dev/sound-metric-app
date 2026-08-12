@@ -88,15 +88,13 @@ class AxisBoundsDialog(QtWidgets.QDialog):
             )
         )
         form = QtWidgets.QFormLayout()
-        self.x_min_edit = _bounds_edit(x_range[0])
-        self.x_max_edit = _bounds_edit(x_range[1])
+        self.x_min_edit, self.x_max_edit = _bounds_edits(x_range)
         form.addRow("X min (ms):", self.x_min_edit)
         form.addRow("X max (ms):", self.x_max_edit)
         # The Y axis carries whatever unit the drawn metric is in (dB, Pa·ms,
         # …), so its rows are labelled from the plot rather than hard-coded.
         y_unit = f" ({y_label})" if y_label else ""
-        self.y_min_edit = _bounds_edit(y_range[0])
-        self.y_max_edit = _bounds_edit(y_range[1])
+        self.y_min_edit, self.y_max_edit = _bounds_edits(y_range)
         form.addRow(f"Y min{y_unit}:", self.y_min_edit)
         form.addRow(f"Y max{y_unit}:", self.y_max_edit)
         layout.addLayout(form)
@@ -169,12 +167,37 @@ class AxisBoundsDialog(QtWidgets.QDialog):
         return self._values
 
 
-def _bounds_edit(value: float) -> QtWidgets.QLineEdit:
-    """A bounds box prefilled with ``value``, rounded to something typeable.
+def _bounds_edits(rng: tuple[float, float]) -> tuple[QtWidgets.QLineEdit, ...]:
+    """The pair of bounds boxes for one axis, prefilled from ``rng``.
+
+    Built as a pair because the rounding below is a property of the *range*,
+    not of either end on its own.
+    """
+    edits = []
+    for value in rng:
+        edit = QtWidgets.QLineEdit(_bounds_text(value, rng[1] - rng[0]))
+        edit.setPlaceholderText("auto")
+        edits.append(edit)
+    return tuple(edits)
+
+
+def _bounds_text(value: float, span: float) -> str:
+    """``value`` at the shortest precision that still reproduces the view.
 
     A view range is a float with a long tail (``2.9999999999996``); echoing that
-    back as the starting point would make every edit start with a cleanup.
+    back as the starting point would make every edit start with a cleanup. But
+    rounding to a fixed number of digits is not free either: zoomed in far
+    enough, ``%.4g`` prints both ends of an axis as the same string, and the
+    form then refuses its own untouched contents at the ``low < high`` check.
+
+    So the precision comes from the span rather than a constant: keep adding
+    digits until the error is under a millionth of what is on screen — far
+    finer than a pixel, so re-applying the prefilled form is the no-op it looks
+    like, while float noise still collapses to the short number it means.
     """
-    edit = QtWidgets.QLineEdit(f"{value:.4g}")
-    edit.setPlaceholderText("auto")
-    return edit
+    tolerance = abs(span) * 1e-6
+    for precision in range(4, 18):
+        text = f"{value:.{precision}g}"
+        if abs(float(text) - value) <= tolerance:
+            return text
+    return repr(value)  # non-finite; %.17g round-trips every finite float
