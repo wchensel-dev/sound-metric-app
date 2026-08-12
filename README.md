@@ -343,9 +343,12 @@ removing a shot — so an overlay can be built up and pared down without the fra
 springing back on every toggle. A typed Y also survives the framing buttons,
 which keep framing against it rather than the curve's own extent, so two shots
 can be held to one scale while you zoom around in time; a framing click does
-replace a typed X, since that is what those buttons are for. Switching to a
-different metric drops both, since a scale chosen for one quantity's numbers
-says nothing about the next one's.
+replace a typed X, since that is what those buttons are for. Changing the
+quantity on the Y axis drops both, since a scale chosen for one quantity's
+numbers says nothing about the next one's — but a metric switch that leaves that
+quantity alone keeps them, because it redraws the same curve: **Peak dBA** and
+**LIAeq,100ms dBA** are both SPL (dBA), and **Impulse Pa·ms** and **Impulse
+dB·ms** are both the one ∫p·dt curve.
 
 #### Scout paste strings (`SSR1`)
 
