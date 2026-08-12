@@ -74,7 +74,7 @@ def test_format_metric_blanks_null_instead_of_raising():
     # channel_metrics columns are nullable REAL (the schema-v1 migration blanks
     # peak_impulse_db), so a metric can be None. It must render as an em-dash,
     # not raise TypeError from f"{None:.2f}" and abort the whole report render.
-    from sound_metric_app.ui.main_window import _format_metric
+    from sound_metric_app.ui.format import _format_metric
 
     assert _format_metric(None) == "—"
     assert _format_metric(163.4) == "163.40"
@@ -88,7 +88,7 @@ def test_report_column_indices_stay_in_step_with_the_metric_set():
     # trailing button ones) would silently either push a real metric past the
     # _on_cell_clicked guard or aim _METRIC_KEYS at the wrong column — neither of
     # which raises. Pin the layout instead.
-    from sound_metric_app.ui.main_window import BatchAverageView as bv
+    from sound_metric_app.ui.views.batch_average import BatchAverageView as bv
 
     # Label, n, every metric, every diagnostic, then exactly the two trailing
     # button columns.
@@ -111,8 +111,8 @@ def test_report_columns_and_compare_metrics_come_from_one_list():
     # The Batch average tree's metric columns and the Compare tab's metric picker
     # are the same set spent two ways. Deriving both from _REPORT_METRICS is what
     # stops a metric added to one from going missing on the other.
-    from sound_metric_app.ui.main_window import _REPORT_METRICS
-    from sound_metric_app.ui.main_window import BatchAverageView as bv
+    from sound_metric_app.ui.metric_columns import _REPORT_METRICS
+    from sound_metric_app.ui.views.batch_average import BatchAverageView as bv
 
     assert bv._METRIC_KEYS == tuple(key for _label, key in _REPORT_METRICS)
     assert bv._COLUMNS[bv._FIRST_METRIC_COL : bv._END_METRIC_COL] == [
@@ -127,8 +127,8 @@ def test_diagnostic_columns_are_not_graphable_metrics():
     # would raise ValueError on the first click, so keep the two disjoint and
     # keep the diagnostics out of the graphable range.
     from sound_metric_app.dsp import build_metric_trace
-    from sound_metric_app.ui.main_window import _REPORT_DIAGNOSTICS, _REPORT_METRICS
-    from sound_metric_app.ui.main_window import BatchAverageView as bv
+    from sound_metric_app.ui.metric_columns import _REPORT_DIAGNOSTICS, _REPORT_METRICS
+    from sound_metric_app.ui.views.batch_average import BatchAverageView as bv
 
     metric_keys = {key for _label, key in _REPORT_METRICS}
     diagnostic_keys = {key for _label, key in _REPORT_DIAGNOSTICS}
@@ -193,7 +193,7 @@ def test_report_slot_rows_render_an_amber_wash(window, qtbot):
     # not on the item's brush: the tree's stylesheet paints the row background
     # itself and discards a QTreeWidgetItem brush, so a brush-level assertion
     # passes while the app still shows plain grey/white.
-    from sound_metric_app.ui.main_window import _AVERAGE_ROW_TINT
+    from sound_metric_app.ui.qtwidgets import _AVERAGE_ROW_TINT
 
     assert _AVERAGE_ROW_TINT.alpha() < 255  # translucent -> composites over base
 
@@ -283,7 +283,7 @@ def test_repopulate_sku_filter_preserves_selection_and_falls_back(qtbot):
     # the "All SKUs" sentinel rather than silently landing on the wrong SKU.
     from PySide6 import QtWidgets
 
-    from sound_metric_app.ui.main_window import _repopulate_sku_filter
+    from sound_metric_app.ui.qtwidgets import _repopulate_sku_filter
 
     combo = QtWidgets.QComboBox()
     qtbot.addWidget(combo)
@@ -310,7 +310,7 @@ def test_repopulate_sku_filter_blocks_signals_over_the_rebuild(qtbot):
     # (or refresh mid-rebuild against a half-filled combo).
     from PySide6 import QtWidgets
 
-    from sound_metric_app.ui.main_window import _repopulate_sku_filter
+    from sound_metric_app.ui.qtwidgets import _repopulate_sku_filter
 
     combo = QtWidgets.QComboBox()
     qtbot.addWidget(combo)
@@ -539,7 +539,7 @@ def test_clicking_metric_cell_graphs_that_shot(window, qtbot):
 
     # Auto Frame becomes usable once a trace is drawn, and snaps X to the shot
     # window's full width (first/last sample), which the yellow bounds mark.
-    assert rv.graph._auto_frame_btn.isEnabled()
+    assert rv.graph._framing._auto_frame_btn.isEnabled()
     assert rv.graph._x_bounds is not None
     x0, x1 = rv.graph._x_bounds
     rv.graph.auto_frame()
@@ -551,7 +551,7 @@ def test_clicking_metric_cell_graphs_that_shot(window, qtbot):
     # goes back to disabled with no bounds.
     rv._on_cell_clicked(shot_item, 0)
     assert len(rv.graph._plot.listDataItems()) == 0
-    assert not rv.graph._auto_frame_btn.isEnabled()
+    assert not rv.graph._framing._auto_frame_btn.isEnabled()
     assert rv.graph._x_bounds is None
 
     # Same for the trailing Scout-paste column, which sits *past* the metrics:
@@ -566,7 +566,7 @@ def test_scout_paste_button_copies_the_row_it_sits_on(window, qtbot):
     # on the clipboard for the SilencerScout report editor. The string is only
     # trustworthy if it carries the numbers of the row it sits on -- their end
     # cannot tell a mispasted string from a good one.
-    from sound_metric_app.ui.main_window import _COPIED_LABEL, _COPY_LABEL
+    from sound_metric_app.ui.views.batch_average import _COPIED_LABEL, _COPY_LABEL
 
     _mark_all_shots(window, qtbot)
     _include_everything(window)
@@ -657,7 +657,7 @@ def test_compare_button_pins_a_shot_row_to_the_compare_tab(window, qtbot):
     # string. Which mic it pins is the slot the row sits under, so pinning the
     # same shot from both FRP slots overlays its ML and SE curves.
     from sound_metric_app.models import MicPosition
-    from sound_metric_app.ui.main_window import (
+    from sound_metric_app.ui.compare_series import (
         _COMPARE_ADDED_LABEL,
         _COMPARE_ALREADY_LABEL,
         _COMPARE_LABEL,
@@ -813,7 +813,7 @@ def test_compare_keeps_its_framing_across_a_tab_switch(window, qtbot):
     qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 1, timeout=5000)
 
     window.tabs.setCurrentWidget(cv)
-    cv.graph._frame_onset_btns[0].click()
+    cv.graph._framing._frame_onset_btns[0].click()
     framed = cv.graph._plot.getViewBox().viewRange()[0]
 
     window.tabs.setCurrentWidget(rv)
@@ -884,7 +884,7 @@ def test_auto_frame_bounds_track_finite_curve_extent(qtbot):
     # must frame to where the curve actually exists, not the full sample axis --
     # otherwise Auto Frame stretches X across a sea of empty samples.
     from sound_metric_app.dsp.graphing import MetricTrace
-    from sound_metric_app.ui.main_window import MetricGraph
+    from sound_metric_app.ui.graph import MetricGraph
 
     graph = MetricGraph()
     qtbot.addWidget(graph)
@@ -911,7 +911,7 @@ def test_graph_draws_calculation_window_markers(qtbot):
     import pyqtgraph as pg
 
     from sound_metric_app.dsp.graphing import MetricTrace
-    from sound_metric_app.ui.main_window import MetricGraph
+    from sound_metric_app.ui.graph import MetricGraph
 
     graph = MetricGraph()
     qtbot.addWidget(graph)
@@ -953,7 +953,7 @@ def test_window_start_label_says_when_no_onset_was_detected(qtbot):
     import pyqtgraph as pg
 
     from sound_metric_app.dsp.graphing import MetricTrace
-    from sound_metric_app.ui.main_window import MetricGraph
+    from sound_metric_app.ui.graph import MetricGraph
 
     graph = MetricGraph()
     qtbot.addWidget(graph)
@@ -987,7 +987,7 @@ def test_frame_calc_window_zooms_to_the_window_edges(qtbot):
     # two dashed window lines rather than the curve's full extent, and needs both
     # edges to have something to frame.
     from sound_metric_app.dsp.graphing import MetricTrace
-    from sound_metric_app.ui.main_window import MetricGraph
+    from sound_metric_app.ui.graph import MetricGraph
 
     graph = MetricGraph()
     qtbot.addWidget(graph)
@@ -1001,7 +1001,7 @@ def test_frame_calc_window_zooms_to_the_window_edges(qtbot):
         window_end_index=3,
     )
     graph.show_trace(trace)
-    assert graph._frame_window_btn.isEnabled()
+    assert graph._framing._frame_window_btn.isEnabled()
     assert graph._window_x_bounds == (1.0, 3.0)
     graph.frame_calc_window()
     view_x0, view_x1 = graph._plot.getViewBox().viewRange()[0]
@@ -1018,11 +1018,11 @@ def test_frame_calc_window_zooms_to_the_window_edges(qtbot):
     # frame, so the button goes back to disabled.
     trace.window_end_index = None
     graph.show_trace(trace)
-    assert not graph._frame_window_btn.isEnabled()
+    assert not graph._framing._frame_window_btn.isEnabled()
     assert graph._window_x_bounds is None
 
     graph.show_message("nothing graphed")
-    assert not graph._frame_window_btn.isEnabled()
+    assert not graph._framing._frame_window_btn.isEnabled()
 
 
 def test_frame_calc_window_autoranges_y_on_an_all_nan_curve(qtbot):
@@ -1031,7 +1031,7 @@ def test_frame_calc_window_autoranges_y_on_an_all_nan_curve(qtbot):
     # Window enabled with no Y extent to pin to. Framing must fall back to
     # autoranging Y rather than unpacking a None _y_bounds.
     from sound_metric_app.dsp.graphing import MetricTrace
-    from sound_metric_app.ui.main_window import MetricGraph
+    from sound_metric_app.ui.graph import MetricGraph
 
     graph = MetricGraph()
     qtbot.addWidget(graph)
@@ -1047,8 +1047,8 @@ def test_frame_calc_window_autoranges_y_on_an_all_nan_curve(qtbot):
     graph.show_trace(trace)
     assert graph._y_bounds is None
     assert graph._window_x_bounds == (1.0, 3.0)
-    assert graph._frame_window_btn.isEnabled()
-    assert not graph._auto_frame_btn.isEnabled()
+    assert graph._framing._frame_window_btn.isEnabled()
+    assert not graph._framing._auto_frame_btn.isEnabled()
 
     graph.frame_calc_window()  # must not raise
     view_x0, view_x1 = graph._plot.getViewBox().viewRange()[0]
@@ -1061,7 +1061,7 @@ def test_y_bounds_ignore_a_non_finite_level_line(qtbot):
     # min/max, so a NaN level compares False against the running accumulator and
     # drops out of min()/max() instead of poisoning the Y range.
     from sound_metric_app.dsp.graphing import MetricTrace
-    from sound_metric_app.ui.main_window import MetricGraph
+    from sound_metric_app.ui.graph import MetricGraph
 
     graph = MetricGraph()
     qtbot.addWidget(graph)
@@ -1082,7 +1082,7 @@ def test_onset_zoom_frames_fixed_times_off_the_capture_axis(qtbot):
     # the same slice of every shot frames identically and close-ups compare shot
     # to shot. Nothing about the trace's own window moves them.
     from sound_metric_app.dsp.graphing import MetricTrace
-    from sound_metric_app.ui.main_window import MetricGraph
+    from sound_metric_app.ui.graph import MetricGraph
 
     graph = MetricGraph()
     qtbot.addWidget(graph)
@@ -1098,16 +1098,16 @@ def test_onset_zoom_frames_fixed_times_off_the_capture_axis(qtbot):
     graph.show_trace(trace)
     # No end line, so Frame Calc Window is out -- but the close-ups need no
     # calculation window at all, only a drawn curve.
-    assert not graph._frame_window_btn.isEnabled()
-    assert all(btn.isEnabled() for btn in graph._frame_onset_btns)
+    assert not graph._framing._frame_window_btn.isEnabled()
+    assert all(btn.isEnabled() for btn in graph._framing._frame_onset_btns)
 
     # One button per configured span, each labelled with and framing its own --
     # driven through the button, so a mis-bound click handler shows up here.
-    assert [btn.text() for btn in graph._frame_onset_btns] == [
+    assert [btn.text() for btn in graph._framing._frame_onset_btns] == [
         f"+{ms:g} ms" for ms in MetricGraph._ONSET_ZOOM_MS
     ]
     start = MetricGraph._ONSET_ZOOM_START_MS
-    for btn, span in zip(graph._frame_onset_btns, MetricGraph._ONSET_ZOOM_MS):
+    for btn, span in zip(graph._framing._frame_onset_btns, MetricGraph._ONSET_ZOOM_MS):
         btn.click()
         view_x0, view_x1 = graph._plot.getViewBox().viewRange()[0]
         # Anchored at the fixed start -- not the window start line at 20 ms --
@@ -1121,16 +1121,216 @@ def test_onset_zoom_frames_fixed_times_off_the_capture_axis(qtbot):
     # so the zoom levels could not be compared by eye.
     graph.auto_frame()
     auto_y = graph._plot.getViewBox().viewRange()[1]
-    graph._frame_onset_btns[0].click()
+    graph._framing._frame_onset_btns[0].click()
     assert graph._plot.getViewBox().viewRange()[1] == pytest.approx(auto_y)
 
     # A trace with no window at all still frames -- the times are the trace's,
     # not the window's -- but no curve at all leaves nothing to frame.
     trace.window_start_index = None
     graph.show_trace(trace)
-    assert all(btn.isEnabled() for btn in graph._frame_onset_btns)
+    assert all(btn.isEnabled() for btn in graph._framing._frame_onset_btns)
     graph.show_message("nothing graphed")
-    assert not any(btn.isEnabled() for btn in graph._frame_onset_btns)
+    assert not any(btn.isEnabled() for btn in graph._framing._frame_onset_btns)
+
+
+def _plain_trace(y_label: str = "SPL (dB)"):
+    """A plain 0-4 ms / 1-3 dB trace, for the axis-bounds tests."""
+    from sound_metric_app.dsp.graphing import MetricTrace
+
+    return MetricTrace(
+        t_ms=np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+        values=np.array([1.0, 2.0, 3.0, 2.0, 1.0]),
+        y_label=y_label,
+        title="Peak dB",
+    )
+
+
+def _graph_with_a_curve(qtbot):
+    """A graph showing one :func:`_plain_trace`."""
+    from sound_metric_app.ui.graph import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+    graph.show_trace(_plain_trace())
+    return graph
+
+
+def test_manual_axis_bounds_frame_exactly_and_outlive_the_framing_buttons(qtbot):
+    # Typed bounds are the escape hatch from the framing buttons, so they must
+    # land exactly where they were asked to -- no padding -- and a hand-set Y
+    # must survive a later frame, which otherwise pins Y to the curve's extent.
+    graph = _graph_with_a_curve(qtbot)
+    assert graph._axis_bounds._button.isEnabled()
+
+    graph.set_axis_bounds((1.5, 2.5), (0.0, 10.0))
+    view_x, view_y = graph._plot.getViewBox().viewRange()
+    assert view_x == pytest.approx([1.5, 2.5])
+    assert view_y == pytest.approx([0.0, 10.0])
+
+    # Framing stays a horizontal move -- but against the typed scale now, not
+    # the curve's 1-3 dB extent.
+    graph.auto_frame()
+    view_x, view_y = graph._plot.getViewBox().viewRange()
+    assert view_x == pytest.approx([0.0, 4.0])
+    assert view_y == pytest.approx([0.0, 10.0])
+
+    # A None range hands that axis back to autorange, and drops the override.
+    graph.set_axis_bounds((1.5, 2.5), None)
+    assert graph._manual_y_bounds is None
+    graph.auto_frame()
+    # Back to the curve's own extent (pyqtgraph pads it a little), not 0-10.
+    y0, y1 = graph._plot.getViewBox().viewRange()[1]
+    assert y0 < graph._y_bounds[0] and y1 > graph._y_bounds[1]
+    assert y1 < 10.0
+
+    # A framing click is a fresh X decision and drops the typed X (only X --
+    # the button would otherwise appear to do nothing on the next redraw).
+    graph.set_axis_bounds((1.5, 2.5), (0.0, 10.0))
+    graph.auto_frame()
+    assert graph._manual_x_bounds is None
+    assert graph._manual_y_bounds == (0.0, 10.0)
+
+
+def test_manual_axis_bounds_survive_a_redraw_of_the_same_metric(qtbot):
+    # Hiding a curve, or adding a shot to an overlay, re-renders the same
+    # metric -- and used to spring the frame back to autorange on every toggle.
+    # A different quantity on the axes is a real reset: its numbers say nothing
+    # about the scale that was chosen for this one.
+    graph = _graph_with_a_curve(qtbot)
+    graph.set_axis_bounds((1.5, 2.5), (0.0, 10.0))
+
+    # Both views put "Loading…" up mid-redraw, so that must not undo them either.
+    graph.show_message("Loading…")
+    graph.show_trace(_plain_trace())
+    view_x, view_y = graph._plot.getViewBox().viewRange()
+    assert view_x == pytest.approx([1.5, 2.5])
+    assert view_y == pytest.approx([0.0, 10.0])
+
+    # An axis left automatic still refits to whatever was drawn. (pyqtgraph
+    # defers an enabled autorange to the next paint, which never comes for an
+    # unshown widget, so ask for it here.)
+    graph.set_axis_bounds(None, (0.0, 10.0))
+    graph.show_trace(_plain_trace())
+    graph._plot.getViewBox().updateAutoRange()
+    view_x, view_y = graph._plot.getViewBox().viewRange()
+    assert view_x[0] < 0.0 and view_x[1] > 4.0
+    assert view_y == pytest.approx([0.0, 10.0])
+
+    # Switching metric drops them, and the plot goes back to autorange.
+    graph.show_trace(_plain_trace(y_label="Impulse ∫p·dt (Pa·ms)"))
+    assert graph._manual_y_bounds is None and graph._manual_x_bounds is None
+    graph._plot.getViewBox().updateAutoRange()
+    # Fitted to the curve's own 1-3 extent (padded a little), not the old 0-10.
+    y0, y1 = graph._plot.getViewBox().viewRange()[1]
+    assert y0 < 1.0 and 3.0 < y1 < 10.0
+
+
+def test_axis_bounds_dialog_opens_on_the_current_view(qtbot, monkeypatch):
+    # The form starts from what the operator is looking at (which is not the
+    # trace's extent once they have panned), and applying it frames the plot.
+    from PySide6 import QtWidgets
+
+    from sound_metric_app.ui.graph.axis_bounds import AxisBoundsDialog
+
+    graph = _graph_with_a_curve(qtbot)
+    graph.set_axis_bounds((1.0, 3.0), (0.0, 8.0))
+
+    opened: list = []
+
+    def fake_exec(self):
+        opened.append(
+            [e.text() for e in (self.x_min_edit, self.x_max_edit,
+                                self.y_min_edit, self.y_max_edit)]
+        )
+        self.y_max_edit.setText("9")
+        self._on_accept()
+        return QtWidgets.QDialog.Accepted
+
+    monkeypatch.setattr(AxisBoundsDialog, "exec", fake_exec)
+    graph.edit_axis_bounds()
+
+    assert opened == [["1", "3", "0", "8"]]
+    assert graph._plot.getViewBox().viewRange()[1] == pytest.approx([0.0, 9.0])
+
+    # Nothing drawn: no view to edit, so the form never opens.
+    graph.show_message("nothing graphed")
+    graph.edit_axis_bounds()
+    assert len(opened) == 1
+
+
+def test_axis_bounds_dialog_validates_each_axis_as_a_pair(qtbot, monkeypatch):
+    # Half a pair is ambiguous (pin or release?) and an inverted pair is not a
+    # range; both are refused rather than guessed at. Clearing *both* boxes of
+    # an axis is the one way to release it.
+    from PySide6 import QtWidgets
+
+    from sound_metric_app.ui.graph.axis_bounds import AxisBoundsDialog
+
+    warned: list = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "warning", lambda *a, **k: warned.append(a[2])
+    )
+
+    def dialog():
+        d = AxisBoundsDialog(x_range=(0.0, 4.0), y_range=(1.0, 3.0), y_label="dB")
+        qtbot.addWidget(d)
+        return d
+
+    d = dialog()
+    d.x_max_edit.clear()
+    d._on_accept()
+    assert warned and "both a min and a max for X" in warned[-1]
+    assert d.result() != QtWidgets.QDialog.Accepted
+
+    d = dialog()
+    d.y_min_edit.setText("50")
+    d._on_accept()
+    assert "Y min must be below Y max" in warned[-1]
+
+    d = dialog()
+    d.x_min_edit.setText("not a number")
+    d._on_accept()
+    assert "is not a number" in warned[-1]
+
+    # Reset empties every box but stays in the form, so releasing one axis and
+    # retyping the other is a single trip through the dialog.
+    d = dialog()
+    d._on_reset()
+    d.x_min_edit.setText("2")
+    d.x_max_edit.setText("6")
+    d._on_accept()
+    assert d.result() == QtWidgets.QDialog.Accepted
+    assert d.values() == ((2.0, 6.0), None)
+
+
+def test_axis_bounds_dialog_prefill_survives_a_deep_zoom(qtbot):
+    # The prefill is rounded for typeability, but never so far that it stops
+    # describing the view: at a fixed 4 significant digits both ends of a
+    # zoomed-in axis print the same string, and Apply on an untouched form
+    # then trips the dialog's own low < high check.
+    from PySide6 import QtWidgets
+
+    from sound_metric_app.ui.graph.axis_bounds import AxisBoundsDialog
+
+    d = AxisBoundsDialog(x_range=(10.52, 10.524), y_range=(163.451, 163.459))
+    qtbot.addWidget(d)
+    d._on_accept()
+    assert d.result() == QtWidgets.QDialog.Accepted
+    x_range, y_range = d.values()
+    assert x_range == pytest.approx((10.52, 10.524))
+    assert y_range == pytest.approx((163.451, 163.459))
+
+    # …and re-framing on the prefilled numbers keeps the view where it was,
+    # rather than nudging its edges to the nearest round value.
+    d = AxisBoundsDialog(x_range=(10.4999, 15.5001), y_range=(0.0, 8.0))
+    qtbot.addWidget(d)
+    d._on_accept()
+    assert d.values()[0] == (10.4999, 15.5001)
+
+    # Float noise still collapses: that is what the rounding is for.
+    d = AxisBoundsDialog(x_range=(0.0, 2.9999999999996), y_range=(0.0, 8.0))
+    qtbot.addWidget(d)
+    assert d.x_max_edit.text() == "3"
 
 
 def test_window_marker_labels_run_vertically_from_the_top(qtbot):
@@ -1141,7 +1341,7 @@ def test_window_marker_labels_run_vertically_from_the_top(qtbot):
     import pyqtgraph as pg
 
     from sound_metric_app.dsp.graphing import MetricTrace
-    from sound_metric_app.ui.main_window import MetricGraph
+    from sound_metric_app.ui.graph import MetricGraph
 
     graph = MetricGraph()
     qtbot.addWidget(graph)
@@ -1179,7 +1379,8 @@ def test_window_marker_labels_run_vertically_from_the_top(qtbot):
 
 def test_graph_point_readout_shows_value_and_clears(qtbot):
     from sound_metric_app.dsp.graphing import MetricTrace
-    from sound_metric_app.ui.main_window import MetricGraph, _unit_of
+    from sound_metric_app.ui.format import _unit_of
+    from sound_metric_app.ui.graph import MetricGraph
 
     assert _unit_of("SPL (dBA)") == "dBA"
     assert _unit_of("Pressure (Pa)") == "Pa"
@@ -1197,25 +1398,25 @@ def test_graph_point_readout_shows_value_and_clears(qtbot):
     )
     graph.show_trace(trace)
     # Nothing picked yet: the readout box is hidden.
-    assert not graph._readout_label.isVisible()
-    assert graph._pick_marker is None
+    assert not graph._readout._readout_label.isVisible()
+    assert graph._readout._pick_marker is None
 
     # Picking a sample fills the box with its value + unit + time and marks it.
     graph._show_readout(1, 142.5)
-    assert graph._pick_marker is not None
-    text = graph._readout_label.text()
+    assert graph._readout._pick_marker is not None
+    text = graph._readout._readout_label.text()
     assert "142.500" in text and "dBA" in text and "1.00 ms" in text
 
     # Clear removes the marker and hides the box.
     graph.clear_readout()
-    assert graph._pick_marker is None
-    assert not graph._readout_label.isVisible()
+    assert graph._readout._pick_marker is None
+    assert not graph._readout._readout_label.isVisible()
 
     # Drawing a fresh trace also drops any prior pick.
     graph._show_readout(0, 100.0)
     graph.show_trace(trace)
-    assert graph._pick_marker is None
-    assert not graph._readout_label.isVisible()
+    assert graph._readout._pick_marker is None
+    assert not graph._readout._readout_label.isVisible()
 
 
 #: Two palette entries, named so the overlay tests read as "these two colours".
@@ -1260,7 +1461,7 @@ def test_overlaid_series_draw_with_a_legend_and_union_bounds(qtbot):
     # gets its own colour and legend row, and every bound the framing buttons
     # use widens to cover all of them -- a bound fitted to whichever curve was
     # drawn first would frame away the others.
-    from sound_metric_app.ui.main_window import MetricGraph
+    from sound_metric_app.ui.graph import MetricGraph
 
     graph = MetricGraph()
     qtbot.addWidget(graph)
@@ -1274,8 +1475,8 @@ def test_overlaid_series_draw_with_a_legend_and_union_bounds(qtbot):
     assert graph._x_bounds == (0.0, 4.0)
     assert graph._y_bounds == (1.0, 9.0)
     assert graph._window_x_bounds == (0.0, 4.0)
-    assert graph._frame_window_btn.isEnabled()
-    assert graph._auto_frame_btn.isEnabled()
+    assert graph._framing._frame_window_btn.isEnabled()
+    assert graph._framing._auto_frame_btn.isEnabled()
 
     # Framing still lands on those unions, so both curves stay in view.
     graph.auto_frame()
@@ -1295,7 +1496,7 @@ def test_overlaid_series_draw_with_a_legend_and_union_bounds(qtbot):
 def test_single_trace_keeps_the_plain_legend_free_graph(qtbot):
     # The Batch average tab draws one curve through the same code path. It must
     # come out exactly as before: no legend, and the bounds of that one trace.
-    from sound_metric_app.ui.main_window import MetricGraph
+    from sound_metric_app.ui.graph import MetricGraph
 
     graph = MetricGraph()
     qtbot.addWidget(graph)
@@ -1316,7 +1517,7 @@ def test_single_trace_keeps_the_plain_legend_free_graph(qtbot):
 def test_readout_names_which_overlaid_curve_was_picked(qtbot):
     # With one curve the number speaks for itself; with several it does not say
     # which shot it came from, so the series' label leads the readout.
-    from sound_metric_app.ui.main_window import MetricGraph
+    from sound_metric_app.ui.graph import MetricGraph
 
     graph = MetricGraph()
     qtbot.addWidget(graph)
@@ -1324,11 +1525,11 @@ def test_readout_names_which_overlaid_curve_was_picked(qtbot):
 
     graph.show_trace(a)
     graph._show_readout(1, 5.0)
-    assert graph._readout_label.text().startswith("5.000")
+    assert graph._readout._readout_label.text().startswith("5.000")
 
     graph.show_traces([("first", a, BLUE), ("second", b, RED)], "two shots")
     graph._show_readout(3, 9.0, series_index=1)
-    assert graph._readout_label.text().startswith("second:  9.000")
+    assert graph._readout._readout_label.text().startswith("second:  9.000")
 
 
 def test_full_workflow_through_widgets(window, qtbot):
@@ -1581,7 +1782,7 @@ def test_data_bank_compare_buttons_pin_an_idle_shots_ml_and_se(window, qtbot):
     # brought forward -- that idle reach is the whole point of pinning from
     # here rather than only from Batch average.
     from sound_metric_app.models import MicPosition
-    from sound_metric_app.ui.main_window import _COMPARE_ADDED_LABEL
+    from sound_metric_app.ui.compare_series import _COMPARE_ADDED_LABEL
 
     _mark_all_shots(window, qtbot)
 
@@ -1692,7 +1893,10 @@ def test_pinning_the_same_shot_from_data_bank_and_batch_average_is_a_no_op(windo
     # not draw it twice. CompareSeries keys on (shot_id, position) regardless
     # of which tab built it, so the second pin -- from whichever tab it comes
     # from -- has to be refused exactly like a same-tab repeat.
-    from sound_metric_app.ui.main_window import _COMPARE_ADDED_LABEL, _COMPARE_ALREADY_LABEL
+    from sound_metric_app.ui.compare_series import (
+        _COMPARE_ADDED_LABEL,
+        _COMPARE_ALREADY_LABEL,
+    )
 
     rv = _loaded_report(window, qtbot)  # marks + includes every shot
     bv = window.bank_view
@@ -1743,7 +1947,7 @@ def test_edit_batch_session_metadata_via_tree(window, qtbot, monkeypatch):
 
     from PySide6 import QtWidgets
 
-    from sound_metric_app.ui.main_window import BatchEditDialog
+    from sound_metric_app.ui.dialogs import BatchEditDialog
 
     # Stand in for the modal: fill the session form and accept it.
     def fake_exec(self):
@@ -1768,7 +1972,7 @@ def test_batch_edit_dialog_rejects_a_malformed_date(window, monkeypatch):
     from PySide6 import QtWidgets
 
     from sound_metric_app.models import Batch
-    from sound_metric_app.ui.main_window import BatchEditDialog
+    from sound_metric_app.ui.dialogs import BatchEditDialog
 
     warned: list = []
     monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
@@ -1827,7 +2031,7 @@ def test_edit_shot_re_marks_with_corrected_ammo(window, qtbot):
 
     # Open the pre-filled dialog directly (bypassing the async channel load),
     # correct the ammo, and accept it as the user would.
-    from sound_metric_app.ui.main_window import ShotEditDialog
+    from sound_metric_app.ui.dialogs import ShotEditDialog
 
     dialog = ShotEditDialog(
         shot,
@@ -1867,7 +2071,7 @@ def test_shot_edit_dialog_requires_a_cluster(window, monkeypatch):
     from PySide6 import QtWidgets
 
     from sound_metric_app.models import Shot
-    from sound_metric_app.ui.main_window import ShotEditDialog
+    from sound_metric_app.ui.dialogs import ShotEditDialog
 
     warned: list = []
     monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
@@ -1930,7 +2134,7 @@ def test_shot_edit_dialog_rejects_a_bad_mic_tagging(window, monkeypatch):
     from PySide6 import QtWidgets
 
     from sound_metric_app.models import Shot
-    from sound_metric_app.ui.main_window import ShotEditDialog
+    from sound_metric_app.ui.dialogs import ShotEditDialog
 
     warned: list = []
     monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: warned.append(a[1]))
@@ -1999,7 +2203,7 @@ def test_malformed_ammo_config_does_not_crash_launch(tmp_path, monkeypatch, qtbo
 
 
 def test_ammo_definitions_dialog_add_and_remove(window):
-    from sound_metric_app.ui.main_window import AmmoDefinitionsDialog
+    from sound_metric_app.ui.dialogs import AmmoDefinitionsDialog
 
     dialog = AmmoDefinitionsDialog(["LC M193 (5.56)"], parent=window)
     # Add a new type; a duplicate of an existing one is ignored.

@@ -223,6 +223,38 @@ src/sound_metric_app/
 tests/         unit + real-file validation
 ```
 
+The desktop app is a package rather than one module, split along the seams the
+window already has — the tabs, the graph they share, and the value-level helpers
+underneath both:
+
+```
+ui/
+  controller.py     WorkflowController: the service calls, with no Qt dependency
+  main_window.py    MainWindow: the five tabs and the actions that cross them
+  launcher.py       sma-gui entry point (defers the PySide6 import)
+
+  format.py         display formatting + input parsing (no view knows the rules twice)
+  qtwidgets.py      Qt-generic helpers: tree styling, expansion snapshot, SKU filter
+  metric_columns.py the metric/diagnostic columns the report views share
+  compare_series.py CompareSeries + the two tabs' way of pinning one
+  dialogs.py        ShotEdit / BatchEdit / AmmoDefinitions forms
+
+  graph/            the metric graph both graphing tabs draw into
+    metric_graph.py   MetricGraph: curves, annotations, bounds, theming
+    framing.py        the framing buttons (Auto Frame, Calc Window, onset close-ups)
+    axis_bounds.py    Set Axis Bounds: the button and form for typed X/Y bounds
+    readout.py        the click-to-read box and its pick marker
+    palette.py        the colour cycle the graph and Compare's swatches share
+
+  views/            one module per tab
+    base.py           _View + the off-UI-thread task runner every tab uses
+    ingest.py  marking.py  data_bank.py  batch_average.py  compare.py
+```
+
+Dependency direction runs strictly downward: `views/` uses `graph/`, `dialogs`,
+`qtwidgets`, `format`, `metric_columns` and `compare_series`; none of those
+imports a view or `main_window`.
+
 ## Setup
 
 ```powershell
@@ -294,13 +326,29 @@ cross-batch Compare view:
   **Clear all** empties the tab.
 
 Both graphs are the same widget: Auto Frame, Frame Calc Window, the +5/+10 ms
-onset close-ups, the Instantaneous/Fast/Slow **Level** dropdown, and the
+onset close-ups, **Set Axis Bounds…**, the Instantaneous/Fast/Slow **Level** dropdown, and the
 click-to-read-a-point box behave identically on the two tabs because they *are*
 the one implementation, used twice. Where a single curve draws one bracket, an
 overlay draws the union of its curves' — so the framing buttons still land
 somewhere that contains every curve. The onset close-ups frame fixed times off
 the capture's own axis, which is what makes the same slice of two shots
 comparable side by side.
+
+**Set Axis Bounds…** is the escape hatch from those snaps: it opens a small form
+— prefilled with the range currently in view — for typing exact upper/lower
+bounds on X and on Y. Clearing both boxes of an axis hands that axis back to
+automatic scaling; **Reset to Auto** empties all four. Typed bounds then stick:
+they survive a redraw of the same metric — hiding or unhiding a curve, adding or
+removing a shot — so an overlay can be built up and pared down without the frame
+springing back on every toggle. A typed Y also survives the framing buttons,
+which keep framing against it rather than the curve's own extent, so two shots
+can be held to one scale while you zoom around in time; a framing click does
+replace a typed X, since that is what those buttons are for. Changing the
+quantity on the Y axis drops both, since a scale chosen for one quantity's
+numbers says nothing about the next one's — but a metric switch that leaves that
+quantity alone keeps them, because it redraws the same curve: **Peak dBA** and
+**LIAeq,100ms dBA** are both SPL (dBA), and **Impulse Pa·ms** and **Impulse
+dB·ms** are both the one ∫p·dt curve.
 
 #### Scout paste strings (`SSR1`)
 
