@@ -357,12 +357,13 @@ one string per shot type. The Copy button on an averaged row emits that row's
 string —
 
 ```
-SSR1|frp|SE=137.90,172.60,156.40,4.88
+SSR1|frp|SE=137.9,172.6,156.4,4.9
 ```
 
 — the format tag, the shot type (`frp` for our FRP slot, `sub` for our regular
 one), and the mic position followed by four positional values: **LIAeq,100ms
-(dB), Peak (dB), Peak (dBA), Impulse (Pa·ms)**. An unavailable metric is emitted
+(dB), Peak (dB), Peak (dBA), Impulse (Pa·ms)**, each rounded to the nearest
+tenth. An unavailable metric is emitted
 as an empty slot, which the receiving end reads as *not measured* and leaves
 alone. A slot's line carries one mic, which is valid on its own; the four rows
 copy independently and write to different cells.

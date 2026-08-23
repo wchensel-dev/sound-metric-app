@@ -103,7 +103,13 @@ AMMO_DEFINITIONS_KEY: str = "ammo_definitions"
 DEFAULT_AMMO_DEFINITIONS: tuple[str, ...] = (
     "LC M193 (5.56)",
     "LC M855 (5.56)",
+    "PMC Bronze (5.56)",
     "Black Hills 77gr OTM (5.56)",
+    "Winchester 147gr T&P (308)",
+    "LC M118LR (308)",
+    "Syntech TM 147gr (9mm)",
+    "Federal 115gr Champion FMJ RN (9mm)",
+    "Hornady Black 208gr (300 BLK)",
 )
 
 

@@ -328,11 +328,9 @@ def test_update_unknown_batch_raises(controller):
 def test_ammo_definitions_default_to_builtins(controller):
     # A fresh settings file yields the built-in presets so the mark form is never
     # empty out of the box.
-    assert controller.ammo_definitions() == [
-        "LC M193 (5.56)",
-        "LC M855 (5.56)",
-        "Black Hills 77gr OTM (5.56)",
-    ]
+    from sound_metric_app import config
+
+    assert controller.ammo_definitions() == list(config.DEFAULT_AMMO_DEFINITIONS)
 
 
 def test_set_ammo_definitions_persists_and_normalizes(controller):
