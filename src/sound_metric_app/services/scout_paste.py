@@ -11,7 +11,7 @@ The format is::
     SSR1|<shot type>|<MIC>=<LIAeq100ms dB>,<Peak dB>,<Peak dBA>,<Impulse Pa·ms>
 
 Four values, positional and comma-separated, and a labelled mic position. A
-value may be left empty (``132.40,,151.00,3.42``) to mean "not measured"; their
+value may be left empty (``132.4,,151.0,3.4``) to mean "not measured"; their
 end leaves that cell as it was rather than clearing it.
 
 Three things our hierarchy carries do **not** travel in the string:
@@ -55,10 +55,10 @@ SCOUT_SHOT_TYPES = {ShotRole.FRP: "frp", ShotRole.REGULAR: "sub"}
 #: contract — reordering it would need an ``SSR2``.
 SCOUT_METRIC_KEYS = ("liaeq_100ms_db", "peak_db", "peak_dba", "impulse_pa_ms")
 
-#: Decimals emitted per value. Matches the report tree, so a copied string reads
-#: back as the row it came from. Their end neither rounds nor requires a fixed
-#: number of decimal places.
-_DECIMALS = 2
+#: Decimals emitted per value: every value is rounded to the nearest tenth
+#: (122.57 -> "122.6"). Their end neither rounds nor requires a fixed number of
+#: decimal places, so the rounding is ours to apply here.
+_DECIMALS = 1
 
 
 def format_value(value: float | None) -> str:
@@ -71,8 +71,8 @@ def format_value(value: float | None) -> str:
     three landing. Fixed-point formatting also rules out the scientific notation
     a very small magnitude would otherwise print as, which they likewise reject.
 
-    >>> format_value(132.4)
-    '132.40'
+    >>> format_value(132.44)
+    '132.4'
     >>> format_value(None)
     ''
     """
@@ -96,7 +96,7 @@ def slot_line(position: MicPosition, role: ShotRole, average: Mapping) -> str:
     ...     "liaeq_100ms_db": 137.9, "peak_db": 172.6,
     ...     "peak_dba": 156.4, "impulse_pa_ms": 4.88,
     ... })
-    'SSR1|frp|SE=137.90,172.60,156.40,4.88'
+    'SSR1|frp|SE=137.9,172.6,156.4,4.9'
     """
     values = ",".join(format_value(average.get(key)) for key in SCOUT_METRIC_KEYS)
     return f"{SCOUT_FORMAT_TAG}|{SCOUT_SHOT_TYPES[role]}|{position.value}={values}"

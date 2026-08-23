@@ -1006,7 +1006,7 @@ def test_slot_line_renders_the_four_values_in_contract_order():
             "n": 3,
         },
     )
-    assert line == "SSR1|frp|SE=137.90,172.60,156.40,4.88"
+    assert line == "SSR1|frp|SE=137.9,172.6,156.4,4.9"
 
 
 def test_slot_line_maps_the_regular_role_to_the_sub_shot_type():
@@ -1028,12 +1028,27 @@ def test_slot_line_leaves_unusable_values_empty_rather_than_failing_the_line():
             # missing "impulse_pa_ms" entirely
         },
     )
-    assert line == "SSR1|sub|ML=140.10,,,"
+    assert line == "SSR1|sub|ML=140.1,,,"
 
 
 def test_slot_line_never_emits_scientific_notation():
     # A tiny impulse would print as "1e-07" under str()/repr(), which their
     # parser rejects; fixed-point keeps it a plain decimal.
     line = slot_line(MicPosition.SE, ShotRole.FRP, {"impulse_pa_ms": 0.0000001})
-    assert line.endswith(",0.00")
+    assert line.endswith(",0.0")
     assert "e" not in line.split("=")[1]
+
+
+def test_slot_line_rounds_each_value_to_the_nearest_tenth():
+    # Every value is rounded to one decimal place: 122.57 -> "122.6".
+    line = slot_line(
+        MicPosition.SE,
+        ShotRole.FRP,
+        {
+            "liaeq_100ms_db": 122.57,
+            "peak_db": 172.64,
+            "peak_dba": 156.48,
+            "impulse_pa_ms": 4.849,
+        },
+    )
+    assert line == "SSR1|frp|SE=122.6,172.6,156.5,4.8"
