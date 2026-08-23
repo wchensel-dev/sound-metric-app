@@ -73,6 +73,8 @@ def format_value(value: float | None) -> str:
 
     >>> format_value(132.44)
     '132.4'
+    >>> format_value(-0.04)
+    '0.0'
     >>> format_value(None)
     ''
     """
@@ -81,7 +83,12 @@ def format_value(value: float | None) -> str:
     number = float(value)
     if not math.isfinite(number):
         return ""
-    return f"{number:.{_DECIMALS}f}"
+    formatted = f"{number:.{_DECIMALS}f}"
+    # A small negative magnitude rounds to the signed-zero token "-0.0", a new
+    # output their parser has no reason to expect; collapse it to plain "0.0".
+    if formatted.startswith("-") and float(formatted) == 0.0:
+        formatted = formatted[1:]
+    return formatted
 
 
 def slot_line(position: MicPosition, role: ShotRole, average: Mapping) -> str:

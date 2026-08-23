@@ -1039,6 +1039,13 @@ def test_slot_line_never_emits_scientific_notation():
     assert "e" not in line.split("=")[1]
 
 
+def test_slot_line_collapses_a_rounded_signed_zero_to_plain_zero():
+    # A small negative magnitude rounds to the signed-zero token "-0.0", which
+    # their parser has no reason to expect; it must land as a plain "0.0".
+    line = slot_line(MicPosition.SE, ShotRole.FRP, {"impulse_pa_ms": -0.04})
+    assert line == "SSR1|frp|SE=,,,0.0"
+
+
 def test_slot_line_rounds_each_value_to_the_nearest_tenth():
     # Every value is rounded to one decimal place: 122.57 -> "122.6".
     line = slot_line(
