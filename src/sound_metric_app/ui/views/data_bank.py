@@ -401,16 +401,24 @@ class DataBankView(_View):
         )
 
     def _open_shot_dialog(self, shot, cluster, combo, channels) -> None:
-        dialog = ShotEditDialog(
-            shot,
-            sku=combo.sku,
-            platform=combo.platform,
-            ammo=combo.ammo,
-            cluster_index=cluster.cluster_index,
-            channel_names=[c.name for c in channels],
-            ammo_definitions=self.controller.ammo_definitions(),
-            parent=self,
-        )
+        # Runs as the _run_async success callback, which is outside that helper's
+        # failure guard. Building the dialog reads config (e.g. the default onset
+        # trigger for a legacy shot), which can raise on a corrupt setting, so
+        # surface it as a dialog rather than letting it crash the callback.
+        try:
+            dialog = ShotEditDialog(
+                shot,
+                sku=combo.sku,
+                platform=combo.platform,
+                ammo=combo.ammo,
+                cluster_index=cluster.cluster_index,
+                channel_names=[c.name for c in channels],
+                ammo_definitions=self.controller.ammo_definitions(),
+                parent=self,
+            )
+        except Exception as exc:  # noqa: BLE001 — surface to the user as a dialog
+            QtWidgets.QMessageBox.critical(self, "Error", str(exc))
+            return
         if dialog.exec() != QtWidgets.QDialog.Accepted:
             return
         values = dialog.values()

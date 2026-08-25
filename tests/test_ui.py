@@ -2091,6 +2091,35 @@ def test_edit_shot_re_marks_with_corrected_ammo(window, qtbot):
     assert tree[0].batches[0].clusters[0].shots[0].id == shot.id
 
 
+def test_open_shot_dialog_surfaces_construction_error(window, monkeypatch):
+    from types import SimpleNamespace
+
+    from PySide6 import QtWidgets
+
+    from sound_metric_app.ui.views import data_bank as data_bank_view
+
+    bv = window.bank_view
+
+    # A corrupt default trigger makes the dialog constructor raise (e.g. a legacy
+    # shot reading get_default_trigger_pa). This runs as the _run_async success
+    # callback, outside its failure guard, so it must be surfaced here as a
+    # critical dialog rather than escaping as an unhandled crash.
+    def _boom(*_a, **_k):
+        raise ValueError("corrupt default_trigger_pa")
+
+    monkeypatch.setattr(data_bank_view, "ShotEditDialog", _boom)
+    errors: list = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "critical", lambda *a, **k: errors.append(a[2])
+    )
+
+    combo = SimpleNamespace(sku="SUP-1", platform="AR15", ammo="M855")
+    cluster = SimpleNamespace(cluster_index=1)
+    # Must not raise; the error is shown to the user instead.
+    bv._open_shot_dialog(shot=None, cluster=cluster, combo=combo, channels=[])
+    assert errors == ["corrupt default_trigger_pa"]
+
+
 def test_shot_edit_dialog_prefills_and_returns_the_trigger(window):
     from sound_metric_app import config
     from sound_metric_app.models import Shot
