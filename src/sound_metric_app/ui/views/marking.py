@@ -107,7 +107,18 @@ class MarkingView(_View):
 
     def _seed_trigger_default(self) -> None:
         """Pre-fill the trigger field with the configured default (Pa)."""
-        self.trigger_edit.setText(f"{config.get_default_trigger_pa():g}")
+        # Runs at construction (from __init__) and after each mark, so a corrupt
+        # default_trigger_pa setting — which get_default_trigger_pa() now rejects
+        # rather than silently accepts — must surface as a dialog rather than
+        # escaping as an unhandled crash that stops launch, the same treatment
+        # the malformed-ammo path gets in _populate_ammo.
+        try:
+            default_pa = config.get_default_trigger_pa()
+        except ValueError as exc:
+            QtWidgets.QMessageBox.critical(self, "Error", str(exc))
+            self.trigger_edit.clear()
+            return
+        self.trigger_edit.setText(f"{default_pa:g}")
 
     # ---- population ----------------------------------------------------- #
 

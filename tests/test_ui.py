@@ -2253,6 +2253,32 @@ def test_malformed_ammo_config_does_not_crash_launch(tmp_path, monkeypatch, qtbo
     assert mv.ammo_combo.count() == 0
 
 
+def test_malformed_trigger_config_does_not_crash_launch(tmp_path, monkeypatch, qtbot):
+    from PySide6 import QtWidgets
+
+    from sound_metric_app.ui import main_window as mw
+
+    # A hand-edited config with a non-positive default_trigger_pa makes
+    # config.get_default_trigger_pa raise ValueError. That read happens during
+    # MarkingView.__init__ (-> _seed_trigger_default), before the ammo path runs,
+    # so it must surface as a dialog, not an unhandled traceback that stops launch.
+    config = tmp_path / "sma_config.json"
+    config.write_text('{"default_trigger_pa": 0}', encoding="utf-8")
+    monkeypatch.setenv("SMA_CONFIG", str(config))
+
+    shown: list[str] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "critical", lambda *a, **k: shown.append(a[2])
+    )
+
+    controller = WorkflowController(tmp_path / "wf.db")
+    win = mw.MainWindow(controller)  # must not raise
+    qtbot.addWidget(win)
+
+    assert shown and "default_trigger_pa" in shown[0]
+    assert win.marking_view.trigger_edit.text() == ""
+
+
 def test_ammo_definitions_dialog_add_and_remove(window):
     from sound_metric_app.ui.dialogs import AmmoDefinitionsDialog
 
