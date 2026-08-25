@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS shots (
     wind_speed        REAL,      -- this shot's specific weather, mph
     temp              REAL,      -- degrees Fahrenheit
     relative_humidity REAL,      -- percent
+    trigger_pa        REAL,      -- onset trigger used to analyse it (Pa); NULL = legacy 1 Pa fallback
     se_channel        TEXT,      -- raw channel name tagged SE
     ml_channel        TEXT,      -- raw channel name tagged ML
     marked            INTEGER NOT NULL DEFAULT 0,
@@ -164,6 +165,13 @@ class WorkflowRepository(_SqliteStore):
         # captured_at was added after the shots table shipped; back-fill the
         # column on databases created before it existed.
         self._add_column_if_missing("shots", "captured_at", "TEXT")
+
+        # trigger_pa (the per-shot onset trigger) was added later still. Old rows
+        # keep NULL, which the DSP reads as the legacy 1 Pa fallback so their
+        # stored metrics stay valid; re-marking a shot records the real trigger.
+        # No blanket back-fill — inferring the historical trigger from old data is
+        # a separate future task.
+        self._add_column_if_missing("shots", "trigger_pa", "REAL")
 
         # The linear-magnitude / new-metric columns and the diagnostic columns
         # were each added after channel_metrics first shipped; back-fill them on
@@ -498,6 +506,7 @@ class WorkflowRepository(_SqliteStore):
         wind_speed: float | None = None,
         temp: float | None = None,
         relative_humidity: float | None = None,
+        trigger_pa: float | None = None,
         captured_at: str | None = None,
         replace_optional: bool = False,
     ) -> None:
@@ -512,9 +521,10 @@ class WorkflowRepository(_SqliteStore):
 
         Pass ``replace_optional=True`` for a full-form edit, where the caller
         supplies the complete intended state and an unset user field means
-        *blank it*: the four user-editable optional fields (``shot_order``,
-        ``wind_speed``, ``temp``, ``relative_humidity``) are then written exactly,
-        so passing ``None`` clears them. ``cluster_index`` mirrors the resolved
+        *blank it*: the user-editable optional fields (``shot_order``,
+        ``wind_speed``, ``temp``, ``relative_humidity``, ``trigger_pa``) are then
+        written exactly, so passing ``None`` clears them. ``cluster_index``
+        mirrors the resolved
         cluster rather than a user field and is never blanked here; the channel
         and ``captured_at`` columns are likewise unaffected — the service sets
         channels definitively via :meth:`set_shot_channels` and always
@@ -543,6 +553,7 @@ class WorkflowRepository(_SqliteStore):
                 wind_speed = {_opt("wind_speed")},
                 temp = {_opt("temp")},
                 relative_humidity = {_opt("relative_humidity")},
+                trigger_pa = {_opt("trigger_pa")},
                 captured_at = COALESCE(?, captured_at),
                 marked = 1
             WHERE id = ?
@@ -555,6 +566,7 @@ class WorkflowRepository(_SqliteStore):
                 wind_speed,
                 temp,
                 relative_humidity,
+                trigger_pa,
                 captured_at,
                 shot_id,
             ),
@@ -1105,6 +1117,7 @@ def _row_to_shot(row: sqlite3.Row) -> Shot:
         wind_speed=row["wind_speed"],
         temp=row["temp"],
         relative_humidity=row["relative_humidity"],
+        trigger_pa=row["trigger_pa"],
         se_channel=row["se_channel"],
         ml_channel=row["ml_channel"],
         marked=bool(row["marked"]),

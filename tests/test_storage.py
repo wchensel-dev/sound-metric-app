@@ -376,6 +376,42 @@ def test_full_tree_round_trip(repo, batch):
     assert [s.id for s in repo.shots_for_batch(batch_id)] == [shot_id]
 
 
+def test_mark_shot_trigger_pa_round_trip_and_preserve(repo, batch):
+    _combination_id, _batch_id, cluster_id = batch
+    shot_id = repo.add_unmarked_shot("SUP-1_AR15_01_004.dxd", "SUP-1", "AR15", 1, 4)
+
+    # A freshly ingested shot has no trigger yet — the legacy 1 Pa fallback case.
+    assert repo.get_shot(shot_id).trigger_pa is None
+
+    repo.mark_shot(shot_id, cluster_id=cluster_id, ammo="M855", trigger_pa=10.0)
+    assert repo.get_shot(shot_id).trigger_pa == 10.0
+
+    # A partial re-mark that omits the trigger preserves the stored 10 Pa.
+    repo.mark_shot(shot_id, cluster_id=cluster_id, ammo="M193")
+    assert repo.get_shot(shot_id).trigger_pa == 10.0
+
+
+def test_migrate_adds_trigger_pa_and_keeps_legacy_rows_null(tmp_path):
+    # A database whose shots table predates trigger_pa gains the column on open,
+    # and existing rows stay NULL (the DSP reads NULL as the 1 Pa fallback). No
+    # blanket back-fill: inferring the historical trigger of old data is deferred.
+    db_path = tmp_path / "no_trigger.db"
+    with WorkflowRepository(db_path) as repo:
+        combination_id = repo.upsert_combination("SUP-1", "AR15", "M855")
+        batch_id = repo.create_batch(combination_id)
+        cluster_id = repo.upsert_cluster(batch_id, 1)
+        shot_id = _placed_shot(repo, cluster_id, order=1)
+        repo._conn.execute("ALTER TABLE shots DROP COLUMN trigger_pa")
+        repo._conn.commit()
+        cols = {r["name"] for r in repo._conn.execute("PRAGMA table_info(shots)")}
+        assert "trigger_pa" not in cols
+
+    with WorkflowRepository(db_path) as repo:
+        cols = {r["name"] for r in repo._conn.execute("PRAGMA table_info(shots)")}
+        assert "trigger_pa" in cols
+        assert repo.get_shot(shot_id).trigger_pa is None
+
+
 def test_batch_session_metadata_round_trip(repo, batch):
     _combination_id, batch_id, _cluster_id = batch
     repo.update_batch(

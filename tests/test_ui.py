@@ -415,6 +415,30 @@ def test_mark_form_previews_the_derived_role(window, qtbot):
     assert mv.role_label.text() == "—"
 
 
+def test_mark_form_pre_seeds_and_persists_the_trigger(window, qtbot):
+    from sound_metric_app import config
+
+    window.ingest_view._ingest()
+    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)
+    first_id = int(window.ingest_view.table.item(0, 0).text())
+    window.open_marking_for(first_id)
+    mv = window.marking_view
+    qtbot.waitUntil(lambda: mv.ml_combo.isEnabled() and mv.ml_combo.count() >= 3, timeout=5000)
+
+    # The trigger field is pre-seeded to the configured default.
+    assert mv.trigger_edit.text() == f"{config.get_default_trigger_pa():g}"
+
+    # Overriding it to a legacy 10 Pa capture persists that value on the shot.
+    mv.ammo_combo.setCurrentText("M855")
+    mv.trigger_edit.setText("10")
+    before = window.ingest_view.table.rowCount()
+    mv._mark()
+    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() < before, timeout=5000)
+
+    batch_id = window.controller.batches()[0].id
+    assert [s.trigger_pa for s in window.controller.shots_for_batch(batch_id)] == [10.0]
+
+
 def test_ingest_table_shows_cluster_and_role(window, qtbot):
     window.ingest_view._ingest()
     qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)
@@ -2065,6 +2089,33 @@ def test_edit_shot_re_marks_with_corrected_ammo(window, qtbot):
     assert len(combinations) == 1
     tree = window.controller.data_bank()
     assert tree[0].batches[0].clusters[0].shots[0].id == shot.id
+
+
+def test_shot_edit_dialog_prefills_and_returns_the_trigger(window):
+    from sound_metric_app import config
+    from sound_metric_app.models import Shot
+    from sound_metric_app.ui.dialogs import ShotEditDialog
+
+    common = dict(
+        sku="SUP-1",
+        platform="AR15",
+        ammo="M855",
+        cluster_index=1,
+        channel_names=["AI 1", "AI 2"],
+        parent=window,
+    )
+
+    # A shot that recorded a 10 Pa trigger pre-fills that value and returns it.
+    dialog = ShotEditDialog(
+        Shot(source_file="f.dxd", shot_order=1, ml_channel="AI 1", trigger_pa=10.0), **common
+    )
+    assert dialog.trigger_edit.text() == "10.0"
+    dialog._on_accept()
+    assert dialog.values()["trigger_pa"] == 10.0
+
+    # A legacy shot with no recorded trigger pre-fills the configured default.
+    legacy = ShotEditDialog(Shot(source_file="g.dxd", shot_order=1, ml_channel="AI 1"), **common)
+    assert legacy.trigger_edit.text() == str(config.get_default_trigger_pa())
 
 
 def test_shot_edit_dialog_requires_a_cluster(window, monkeypatch):

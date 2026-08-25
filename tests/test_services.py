@@ -13,6 +13,7 @@ from datetime import datetime
 import numpy as np
 import pytest
 
+from sound_metric_app import config
 from sound_metric_app.dsp.metrics import pa_to_db
 from sound_metric_app.models import Frame, MetricResult, MicPosition, ShotRole
 from sound_metric_app.services import (
@@ -68,7 +69,8 @@ class PeakProcessor:
     store's linear-then-dB averaging is exercised faithfully.
     """
 
-    def process(self, frame: Frame) -> MetricResult:
+    def process(self, frame: Frame, *, onset_threshold_pa: float | None = None) -> MetricResult:
+        self.last_threshold = onset_threshold_pa
         v = float(np.max(np.abs(frame.samples)))
         db = pa_to_db(v)
         return MetricResult(
@@ -427,6 +429,63 @@ def test_mark_places_the_shot_and_produces_both_mic_rows(repo):
     assert repo.unmarked_shots() == []
 
 
+def _marking_service_with(repo, processor):
+    return MarkingService(
+        repo, ClusteringService(repo), reader=FakeCaptureReader(), processor=processor
+    )
+
+
+def test_mark_defaults_trigger_pa_to_the_config_default(repo, monkeypatch):
+    # A first mark records the configured default trigger and analyses the shot at
+    # that same threshold, so the persisted trigger and the metrics never diverge.
+    monkeypatch.setattr(config, "get_default_trigger_pa", lambda: 2.0)
+    processor = PeakProcessor()
+    shot_id = _unmarked(repo)
+
+    _marking_service_with(repo, processor).mark(shot_id, ammo="M855")
+
+    assert repo.get_shot(shot_id).trigger_pa == 2.0
+    assert processor.last_threshold == 2.0
+
+
+def test_mark_explicit_trigger_pa_persists_and_drives_the_dsp(repo):
+    # A capture recorded at the legacy 10 Pa trigger is analysed at 10 Pa, not the
+    # default, and that value is what gets stored.
+    processor = PeakProcessor()
+    shot_id = _unmarked(repo)
+
+    _marking_service_with(repo, processor).mark(shot_id, ammo="M855", trigger_pa=10.0)
+
+    assert repo.get_shot(shot_id).trigger_pa == 10.0
+    assert processor.last_threshold == 10.0
+
+
+def test_re_mark_preserves_trigger_pa_when_omitted(repo):
+    # A partial re-mark that does not re-supply the trigger keeps the stored value
+    # and re-analyses at it, rather than reverting to the default.
+    shot_id = _unmarked(repo)
+    _marking_service_with(repo, PeakProcessor()).mark(shot_id, ammo="M855", trigger_pa=10.0)
+
+    processor = PeakProcessor()
+    _marking_service_with(repo, processor).mark(shot_id, ammo="M855")
+
+    assert repo.get_shot(shot_id).trigger_pa == 10.0
+    assert processor.last_threshold == 10.0
+
+
+def test_mark_rejects_a_non_positive_trigger_pa(repo):
+    # A trigger at or below 0 Pa would latch onset onto the first sample and
+    # silently corrupt every metric, so marking rejects it and writes nothing.
+    processor = PeakProcessor()
+    shot_id = _unmarked(repo)
+
+    with pytest.raises(ValueError, match="must be positive"):
+        _marking_service_with(repo, processor).mark(shot_id, ammo="M855", trigger_pa=0.0)
+
+    assert not hasattr(processor, "last_threshold")  # DSP never ran
+    assert repo.get_shot(shot_id).marked is False
+
+
 def test_mark_auto_tags_the_daq_channels_when_no_map_is_given(repo):
     # AI 1 is the muzzle-left transducer and AI 2 the shooter's-ear one, so a
     # conforming capture needs no manual tagging at all.
@@ -604,11 +663,11 @@ def test_mark_rolls_back_when_processing_fails_midway(repo):
         def __init__(self):
             self.calls = 0
 
-        def process(self, frame):
+        def process(self, frame, *, onset_threshold_pa=None):
             self.calls += 1
             if self.calls == 2:
                 raise RuntimeError("DSP blew up")
-            return PeakProcessor().process(frame)
+            return PeakProcessor().process(frame, onset_threshold_pa=onset_threshold_pa)
 
     shot_id = _unmarked(repo, "SUP-1_AR15_01_001.dxd", order=1)
     svc = MarkingService(

@@ -45,10 +45,13 @@ def pretrigger_floor_pa(
 def find_onset(pressure: np.ndarray, threshold_pa: float = ONSET_THRESHOLD_PA) -> int | None:
     """Index of the first sample whose *signed* pressure exceeds ``threshold_pa``.
 
-    TBAC's shot-onset detector (``find(Y>1.)``): the first raw-pressure sample
-    above 1 Pa. Returns ``None`` when no sample crosses the threshold (a silent /
-    non-shot frame) or the frame is empty, leaving the caller to decide how to
-    handle it.
+    Generalises TBAC's shot-onset detector (``find(Y>1.)``): the first
+    raw-pressure sample above the trigger the shot was recorded with. The caller
+    supplies ``threshold_pa`` per shot (the recorder's trigger, so sub-trigger
+    wind in the pre-trigger lead is skipped); it defaults to the 1 Pa
+    ``ONSET_THRESHOLD_PA`` legacy fallback. Returns ``None`` when no sample
+    crosses the threshold (a silent / non-shot frame) or the frame is empty,
+    leaving the caller to decide how to handle it.
     """
     p = np.asarray(pressure)
     if p.size == 0:

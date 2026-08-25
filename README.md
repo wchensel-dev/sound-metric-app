@@ -393,10 +393,13 @@ sma ingest
 sma ingest C:\captures\inbox
 
 # See what's waiting, then mark a shot. Channels auto-tag from AI 1 / AI 2, so
-# --se/--ml are only needed to override a non-conforming capture.
+# --se/--ml are only needed to override a non-conforming capture. The onset
+# trigger defaults to 2 Pa (config set-default-trigger-pa); pass --trigger-pa to
+# record older data captured at a different level (e.g. the 10 Pa manual era).
 sma list unmarked
 sma mark 1 --ammo M855 --wind-speed 5 --temp 72 --rh 40
 sma mark 2 --ammo M855 --se "Mic B" --ml "Mic A"   # manual override
+sma mark 3 --ammo M855 --trigger-pa 10             # legacy 10 Pa capture
 
 # Record the session's context on the batch
 sma batch 1 --label "Morning string" --date 2026-07-22 --wind-speed 4 --temp 88 `
