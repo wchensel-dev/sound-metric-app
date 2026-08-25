@@ -412,7 +412,11 @@ def _cmd_config(args: argparse.Namespace, repo: WorkflowRepository) -> int:
     print(f"Settings file : {config.config_path()}")
     folder = config.get_input_folder()
     print(f"Input folder  : {folder if folder else '(unset)'}")
-    print(f"Trigger (Pa)  : {config.get_default_trigger_pa():g} (default for marking)")
+    try:
+        trigger_display = f"{config.get_default_trigger_pa():g}"
+    except ValueError as exc:
+        trigger_display = f"(invalid: {exc})"
+    print(f"Trigger (Pa)  : {trigger_display} (default for marking)")
     print(f"Targets       : FRP {config.TARGET_FRP_SHOTS}, regular {config.TARGET_REGULAR_SHOTS}")
     return 0
 

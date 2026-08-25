@@ -490,6 +490,16 @@ def test_config_default_trigger_shows_and_updates(env, capsys):
     assert "Trigger (Pa)  : 3" in capsys.readouterr().out
 
 
+def test_config_show_survives_corrupt_trigger(env, capsys):
+    # A corrupt stored trigger must not stop `config show` from printing settings;
+    # otherwise the user cannot inspect the file well enough to repair it.
+    config.save_settings({config.TRIGGER_PA_KEY: "oops"})
+    assert workflow_cli.main(["config", "show"]) == 0
+    out = capsys.readouterr().out
+    assert "Trigger (Pa)  : (invalid:" in out
+    assert "FRP 3, regular 5" in out
+
+
 def test_config_set_default_trigger_rejects_non_positive(env, capsys):
     assert workflow_cli.main(["config", "set-default-trigger-pa", "0"]) == 2
 
