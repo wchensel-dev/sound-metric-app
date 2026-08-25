@@ -34,6 +34,16 @@ def _str_or_empty(value) -> str:
     return "" if value is None else str(value)
 
 
+def _fmt_trigger(value) -> str:
+    """Render a trigger (Pa) default for a pre-filled edit box (``None`` -> "").
+
+    Uses ``:g`` so a whole-number default like ``2.0`` seeds as ``"2"`` rather
+    than ``str()``'s ``"2.0"`` — one rule shared by both mark forms so the same
+    setting is never shown two ways.
+    """
+    return "" if value is None else f"{value:g}"
+
+
 def _safe_int(text: str) -> int | None:
     """Parse an int from a live-edited box, treating anything unparseable as ``None``.
 

@@ -2138,13 +2138,15 @@ def test_shot_edit_dialog_prefills_and_returns_the_trigger(window):
     dialog = ShotEditDialog(
         Shot(source_file="f.dxd", shot_order=1, ml_channel="AI 1", trigger_pa=10.0), **common
     )
-    assert dialog.trigger_edit.text() == "10.0"
+    # Rendered with :g -- the same rule the marking view uses -- so 10.0 seeds
+    # as "10", not str()'s "10.0".
+    assert dialog.trigger_edit.text() == "10"
     dialog._on_accept()
     assert dialog.values()["trigger_pa"] == 10.0
 
     # A legacy shot with no recorded trigger pre-fills the configured default.
     legacy = ShotEditDialog(Shot(source_file="g.dxd", shot_order=1, ml_channel="AI 1"), **common)
-    assert legacy.trigger_edit.text() == str(config.get_default_trigger_pa())
+    assert legacy.trigger_edit.text() == f"{config.get_default_trigger_pa():g}"
 
 
 def test_shot_edit_dialog_requires_a_cluster(window, monkeypatch):

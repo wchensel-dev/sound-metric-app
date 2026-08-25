@@ -22,6 +22,7 @@ from ..format import (
     _EMPTY,
     _LOADING_LABEL,
     _NONE_LABEL,
+    _fmt_trigger,
     _opt_float,
     _opt_int,
     _select_channel,
@@ -118,7 +119,7 @@ class MarkingView(_View):
             QtWidgets.QMessageBox.critical(self, "Error", str(exc))
             self.trigger_edit.clear()
             return
-        self.trigger_edit.setText(f"{default_pa:g}")
+        self.trigger_edit.setText(_fmt_trigger(default_pa))
 
     # ---- population ----------------------------------------------------- #
 

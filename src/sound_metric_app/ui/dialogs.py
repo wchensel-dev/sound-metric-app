@@ -23,6 +23,7 @@ from ..models import Shot, role_for_order
 from .format import (
     _EMPTY,
     _NONE_LABEL,
+    _fmt_trigger,
     _format_captured_at,
     _opt_float,
     _opt_int,
@@ -106,7 +107,7 @@ class ShotEditDialog(QtWidgets.QDialog):
         trigger_default = (
             shot.trigger_pa if shot.trigger_pa is not None else config.get_default_trigger_pa()
         )
-        self.trigger_edit = QtWidgets.QLineEdit(_str_or_empty(trigger_default))
+        self.trigger_edit = QtWidgets.QLineEdit(_fmt_trigger(trigger_default))
         form.addRow("Trigger (Pa):", self.trigger_edit)
         # Read-only: the capture's fired-at time, pulled from the Dewesoft file at
         # marking. Shown for reference; not user-editable.
