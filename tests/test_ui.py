@@ -415,6 +415,30 @@ def test_mark_form_previews_the_derived_role(window, qtbot):
     assert mv.role_label.text() == "—"
 
 
+def test_mark_form_pre_seeds_and_persists_the_trigger(window, qtbot):
+    from sound_metric_app import config
+
+    window.ingest_view._ingest()
+    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)
+    first_id = int(window.ingest_view.table.item(0, 0).text())
+    window.open_marking_for(first_id)
+    mv = window.marking_view
+    qtbot.waitUntil(lambda: mv.ml_combo.isEnabled() and mv.ml_combo.count() >= 3, timeout=5000)
+
+    # The trigger field is pre-seeded to the configured default.
+    assert mv.trigger_edit.text() == f"{config.get_default_trigger_pa():g}"
+
+    # Overriding it to a legacy 10 Pa capture persists that value on the shot.
+    mv.ammo_combo.setCurrentText("M855")
+    mv.trigger_edit.setText("10")
+    before = window.ingest_view.table.rowCount()
+    mv._mark()
+    qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() < before, timeout=5000)
+
+    batch_id = window.controller.batches()[0].id
+    assert [s.trigger_pa for s in window.controller.shots_for_batch(batch_id)] == [10.0]
+
+
 def test_ingest_table_shows_cluster_and_role(window, qtbot):
     window.ingest_view._ingest()
     qtbot.waitUntil(lambda: window.ingest_view.table.rowCount() == 2, timeout=5000)
@@ -2067,6 +2091,64 @@ def test_edit_shot_re_marks_with_corrected_ammo(window, qtbot):
     assert tree[0].batches[0].clusters[0].shots[0].id == shot.id
 
 
+def test_open_shot_dialog_surfaces_construction_error(window, monkeypatch):
+    from types import SimpleNamespace
+
+    from PySide6 import QtWidgets
+
+    from sound_metric_app.ui.views import data_bank as data_bank_view
+
+    bv = window.bank_view
+
+    # A corrupt default trigger makes the dialog constructor raise (e.g. a legacy
+    # shot reading get_default_trigger_pa). This runs as the _run_async success
+    # callback, outside its failure guard, so it must be surfaced here as a
+    # critical dialog rather than escaping as an unhandled crash.
+    def _boom(*_a, **_k):
+        raise ValueError("corrupt default_trigger_pa")
+
+    monkeypatch.setattr(data_bank_view, "ShotEditDialog", _boom)
+    errors: list = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "critical", lambda *a, **k: errors.append(a[2])
+    )
+
+    combo = SimpleNamespace(sku="SUP-1", platform="AR15", ammo="M855")
+    cluster = SimpleNamespace(cluster_index=1)
+    # Must not raise; the error is shown to the user instead.
+    bv._open_shot_dialog(shot=None, cluster=cluster, combo=combo, channels=[])
+    assert errors == ["corrupt default_trigger_pa"]
+
+
+def test_shot_edit_dialog_prefills_and_returns_the_trigger(window):
+    from sound_metric_app import config
+    from sound_metric_app.models import Shot
+    from sound_metric_app.ui.dialogs import ShotEditDialog
+
+    common = dict(
+        sku="SUP-1",
+        platform="AR15",
+        ammo="M855",
+        cluster_index=1,
+        channel_names=["AI 1", "AI 2"],
+        parent=window,
+    )
+
+    # A shot that recorded a 10 Pa trigger pre-fills that value and returns it.
+    dialog = ShotEditDialog(
+        Shot(source_file="f.dxd", shot_order=1, ml_channel="AI 1", trigger_pa=10.0), **common
+    )
+    # Rendered with :g -- the same rule the marking view uses -- so 10.0 seeds
+    # as "10", not str()'s "10.0".
+    assert dialog.trigger_edit.text() == "10"
+    dialog._on_accept()
+    assert dialog.values()["trigger_pa"] == 10.0
+
+    # A legacy shot with no recorded trigger pre-fills the configured default.
+    legacy = ShotEditDialog(Shot(source_file="g.dxd", shot_order=1, ml_channel="AI 1"), **common)
+    assert legacy.trigger_edit.text() == f"{config.get_default_trigger_pa():g}"
+
+
 def test_shot_edit_dialog_requires_a_cluster(window, monkeypatch):
     from PySide6 import QtWidgets
 
@@ -2200,6 +2282,32 @@ def test_malformed_ammo_config_does_not_crash_launch(tmp_path, monkeypatch, qtbo
     assert shown and "ammo_definitions" in shown[0]
     mv = win.marking_view
     assert mv.ammo_combo.count() == 0
+
+
+def test_malformed_trigger_config_does_not_crash_launch(tmp_path, monkeypatch, qtbot):
+    from PySide6 import QtWidgets
+
+    from sound_metric_app.ui import main_window as mw
+
+    # A hand-edited config with a non-positive default_trigger_pa makes
+    # config.get_default_trigger_pa raise ValueError. That read happens during
+    # MarkingView.__init__ (-> _seed_trigger_default), before the ammo path runs,
+    # so it must surface as a dialog, not an unhandled traceback that stops launch.
+    config = tmp_path / "sma_config.json"
+    config.write_text('{"default_trigger_pa": 0}', encoding="utf-8")
+    monkeypatch.setenv("SMA_CONFIG", str(config))
+
+    shown: list[str] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "critical", lambda *a, **k: shown.append(a[2])
+    )
+
+    controller = WorkflowController(tmp_path / "wf.db")
+    win = mw.MainWindow(controller)  # must not raise
+    qtbot.addWidget(win)
+
+    assert shown and "default_trigger_pa" in shown[0]
+    assert win.marking_view.trigger_edit.text() == ""
 
 
 def test_ammo_definitions_dialog_add_and_remove(window):

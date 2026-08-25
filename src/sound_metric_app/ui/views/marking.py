@@ -15,12 +15,14 @@ from pathlib import Path
 
 from PySide6 import QtWidgets
 
+from ... import config
 from ...models import MicPosition, Shot, role_for_order
 from ..controller import WorkflowController
 from ..format import (
     _EMPTY,
     _LOADING_LABEL,
     _NONE_LABEL,
+    _fmt_trigger,
     _opt_float,
     _opt_int,
     _select_channel,
@@ -79,6 +81,13 @@ class MarkingView(_View):
         form.addRow("Temp (°F):", self.temp_edit)
         self.rh_edit = QtWidgets.QLineEdit()
         form.addRow("Relative humidity (%):", self.rh_edit)
+        # Onset trigger this shot was recorded with; pre-filled from the
+        # configured default so a normal mark records the recorder's current
+        # trigger, editable for a capture recorded at a different level.
+        self.trigger_edit = QtWidgets.QLineEdit()
+        self.trigger_edit.setPlaceholderText("Pa")
+        form.addRow("Trigger (Pa):", self.trigger_edit)
+        self._seed_trigger_default()
 
         layout.addLayout(form)
 
@@ -96,6 +105,21 @@ class MarkingView(_View):
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
         layout.addStretch(1)
+
+    def _seed_trigger_default(self) -> None:
+        """Pre-fill the trigger field with the configured default (Pa)."""
+        # Runs at construction (from __init__) and after each mark, so a corrupt
+        # default_trigger_pa setting — which get_default_trigger_pa() now rejects
+        # rather than silently accepts — must surface as a dialog rather than
+        # escaping as an unhandled crash that stops launch, the same treatment
+        # the malformed-ammo path gets in _populate_ammo.
+        try:
+            default_pa = config.get_default_trigger_pa()
+        except ValueError as exc:
+            QtWidgets.QMessageBox.critical(self, "Error", str(exc))
+            self.trigger_edit.clear()
+            return
+        self.trigger_edit.setText(_fmt_trigger(default_pa))
 
     # ---- population ----------------------------------------------------- #
 
@@ -275,6 +299,7 @@ class MarkingView(_View):
                 wind_speed=_opt_float(self.wind_edit.text()),
                 temp=_opt_float(self.temp_edit.text()),
                 relative_humidity=_opt_float(self.rh_edit.text()),
+                trigger_pa=_opt_float(self.trigger_edit.text()),
             )
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, "Invalid value", str(exc))
@@ -322,6 +347,7 @@ class MarkingView(_View):
         self.wind_edit.clear()
         self.temp_edit.clear()
         self.rh_edit.clear()
+        self._seed_trigger_default()
         self.main.notify_changed()
 
     # ---- discard ---------------------------------------------------------- #

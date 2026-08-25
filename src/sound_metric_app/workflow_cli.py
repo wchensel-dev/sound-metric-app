@@ -126,6 +126,7 @@ def _cmd_mark(args: argparse.Namespace, repo: WorkflowRepository) -> int:
         wind_speed=args.wind_speed,
         temp=args.temp,
         relative_humidity=args.rh,
+        trigger_pa=args.trigger_pa,
     )
 
     shot = marked.shot
@@ -135,6 +136,8 @@ def _cmd_mark(args: argparse.Namespace, repo: WorkflowRepository) -> int:
     print(f"  batch       : #{marked.batch.id}  {marked.batch.title}")
     print(f"  cluster     : #{marked.cluster.id}  {marked.cluster.label}")
     print(f"  shot        : order {shot.shot_order}  ({role})")
+    if shot.trigger_pa is not None:
+        print(f"  trigger     : {shot.trigger_pa:g} Pa onset")
     if shot.captured_at:
         print(f"  fired       : {shot.captured_at}")
     print("  status      : idle — bring it forward with `sma include shot "
@@ -396,10 +399,24 @@ def _cmd_config(args: argparse.Namespace, repo: WorkflowRepository) -> int:
         print(f"Input folder set to {resolved}")
         return 0
 
+    if args.config_action == "set-default-trigger-pa":
+        try:
+            trigger = config.set_default_trigger_pa(args.value)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(f"Default onset trigger set to {trigger:g} Pa")
+        return 0
+
     # config_action == "show"
     print(f"Settings file : {config.config_path()}")
     folder = config.get_input_folder()
     print(f"Input folder  : {folder if folder else '(unset)'}")
+    try:
+        trigger_display = f"{config.get_default_trigger_pa():g}"
+    except ValueError as exc:
+        trigger_display = f"(invalid: {exc})"
+    print(f"Trigger (Pa)  : {trigger_display} (default for marking)")
     print(f"Targets       : FRP {config.TARGET_FRP_SHOTS}, regular {config.TARGET_REGULAR_SHOTS}")
     return 0
 
@@ -480,6 +497,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_mark.add_argument("--wind-speed", type=float, dest="wind_speed", help="wind speed (mph)")
     p_mark.add_argument("--temp", type=float, help="ambient temperature (deg F)")
     p_mark.add_argument("--rh", type=float, help="relative humidity (percent)")
+    p_mark.add_argument(
+        "--trigger-pa",
+        type=float,
+        dest="trigger_pa",
+        help=(
+            "onset trigger threshold this shot was recorded with, in Pa "
+            f"(default {config.DEFAULT_TRIGGER_PA:g}; preserved on re-mark)"
+        ),
+    )
     add_db(p_mark)
     p_mark.set_defaults(func=_cmd_mark)
 
@@ -563,6 +589,10 @@ def build_parser() -> argparse.ArgumentParser:
     config_sub.add_parser("show", help="show current settings")
     p_set_folder = config_sub.add_parser("set-input-folder", help="set the default input folder")
     p_set_folder.add_argument("path", help="folder to scan by default on `ingest`")
+    p_set_trigger = config_sub.add_parser(
+        "set-default-trigger-pa", help="set the default onset trigger (Pa) for marking"
+    )
+    p_set_trigger.add_argument("value", type=float, help="default onset trigger in Pa (e.g. 2)")
     p_config.set_defaults(func=_cmd_config)
 
     return parser

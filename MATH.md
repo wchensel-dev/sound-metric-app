@@ -17,7 +17,8 @@ reference, with the deliberate divergences noted in §12.
 | `T` | Capture duration, s | `N / fs` = 0.210 | `CAPTURE_MS` |
 | `p_ref` | Reference pressure, Pa | 20 × 10⁻⁶ | `P_REF` |
 | `p_A[n]` | A-weighted pressure signal | — | `apply_a_weighting` |
-| `θ` | Onset threshold, Pa | 1.0 | `ONSET_THRESHOLD_PA` |
+| `θ` | Onset threshold, Pa | per shot (default 2.0) | `Shot.trigger_pa` / `DEFAULT_TRIGGER_PA` |
+| `θ₀` | Legacy onset fallback, Pa | 1.0 | `ONSET_THRESHOLD_PA` |
 | `W_peak` | Peak/impulse search window, ms | 100 | `PEAK_WINDOW_MS` |
 | `τ_L` | Leq rectangular integration time, s | 0.010 | `LEQ_TAU_S` |
 | `W_Leq` | Peak-10 ms-Leq search window, ms | 25 | `LEQ_SEARCH_MS` |
@@ -34,16 +35,21 @@ All decibel values are sound pressure levels (SPL) referenced to `p_ref`.
    calibration is applied downstream of ingestion.
 2. One capture file = one channel-frame. Metrics are stateless per frame; no
    filter or integrator state carries between frames.
-3. Nominal acquisition is a **1 Pa trigger with a 10 ms pre-trigger lead and
+3. Nominal acquisition is a **hardware trigger with a 10 ms pre-trigger lead and
    200 ms post-trigger capture** (`T = 210 ms`, `N = 42 000` at `fs = 200 kHz`).
-   Actual `fs` and `N` from the file are used in all formulas; nominal values
-   drive validation warnings only.
+   The trigger level was historically 1 Pa, was raised to 10 Pa by the techs and
+   is now 2 Pa to reject wind gusts; it is not stored in the file. Actual `fs`
+   and `N` from the file are used in all formulas; nominal values drive
+   validation warnings only.
 4. Reference pressure is `p_ref = 20 µPa` (air).
 5. **Every metric is anchored to the shot onset** `n₀` (§3) and computed over a
-   fixed window from there. This assumes the pre-trigger baseline is quiet
-   relative to `θ = 1 Pa` (≈ 94 dB) so the first threshold crossing is the shot,
-   not noise — the 10 ms quiet lead guarantees this. A frame with no sample above
-   `θ` is flagged and analysed from its start (the numbers are then suspect).
+   fixed window from there. `θ` is the trigger the shot was recorded with
+   (`Shot.trigger_pa`, default 2 Pa; `θ₀ = 1 Pa` for a legacy shot that records
+   none). This assumes the pre-trigger baseline is quiet relative to `θ` so the
+   first threshold crossing is the shot, not noise — recording at the recorder's
+   own trigger keeps sub-trigger wind in the lead from capturing the onset. A
+   frame with no sample above `θ` is flagged and analysed from its start (the
+   numbers are then suspect).
 6. Metrics are computed independently per mic channel (SE, ML); channels are
    never combined at the DSP layer.
 7. A-weighting follows IEC 61672 / ANSI S1.4, normalized to 0 dB at 1 kHz, and
@@ -60,8 +66,17 @@ All decibel values are sound pressure levels (SPL) referenced to `p_ref`.
 ## 3. Onset, windows, and base operators
 
 **Onset.** `n₀ = min { n : p[n] > θ }`, the first sample whose *signed* raw
-pressure exceeds `θ = 1 Pa` (TBAC's `find(Y>1.)`). Every window below starts at
-`n₀`. If no sample exceeds `θ`, `n₀ = 0` and a warning is emitted.
+pressure exceeds `θ`, the shot's recorded trigger (`Shot.trigger_pa`, default
+2 Pa; `θ₀ = 1 Pa` for a legacy shot). This generalises TBAC's `find(Y>1.)`, which
+is the `θ = 1 Pa` case. Every window below starts at `n₀`. If no sample exceeds
+`θ`, `n₀ = 0` and a warning is emitted.
+
+> **Future work.** Two refinements are deferred here. (1) *Keep the 1 Pa anchor*:
+> use `θ` only to *locate* the shot (skipping earlier sub-trigger wind), then
+> back-walk to the `θ₀ = 1 Pa` crossing on that shot's rising edge so `n₀` stays
+> exactly TBAC's `find(Y>1.)` with full wind robustness. (2) *Auto-infer the
+> legacy trigger* of pre-field data from the ~10 ms lead (a 10 Pa reading syncs
+> to `t ≈ 10 ms`) instead of leaving those rows at the `θ₀` fallback.
 
 **Window operator.** For a signal `x` and width `w` ms:
 ```

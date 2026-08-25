@@ -87,6 +87,37 @@ def test_find_onset_empty_array_returns_none():
     assert find_onset(np.array([])) is None
 
 
+def test_find_onset_threshold_skips_sub_threshold_pre_shot_bump():
+    # A wind gust in the pre-trigger lead sits above 1 Pa but below the recorder's
+    # 2 Pa trigger. At the legacy 1 Pa threshold onset latches onto the wind; at
+    # the recorder's own trigger it skips the wind and lands on the real shot.
+    p = np.zeros(1000)
+    p[200] = 1.5  # sub-trigger wind bump
+    p[500] = 50.0  # the shot
+    assert find_onset(p, 1.0) == 200
+    assert find_onset(p, 2.0) == 500
+
+
+def test_process_uses_the_supplied_onset_threshold():
+    # A frame whose only excursion is a 1.5 Pa bump (no real shot): at the 1 Pa
+    # fallback it counts as onset, but at a 2 Pa trigger nothing crosses, so the
+    # processor warns and analyses from the frame start.
+    n = 42_000
+    p = np.zeros(n)
+    p[100] = 1.5
+    frame = Frame(samples=p, sample_rate=FS, channel="AI 1", source_file="f.dxd")
+    proc = MetricsProcessor()
+
+    for threshold in (1.0, None):  # None falls back to the 1 Pa legacy behaviour
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            proc.process(frame, onset_threshold_pa=threshold)
+        assert not any("onset threshold" in str(w.message) for w in caught)
+
+    with pytest.warns(UserWarning, match="onset threshold"):
+        proc.process(frame, onset_threshold_pa=2.0)
+
+
 # --------------------------------------------------------------------------- #
 # Base operators
 # --------------------------------------------------------------------------- #

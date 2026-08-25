@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from sound_metric_app import workflow_cli
+from sound_metric_app import config, workflow_cli
 from sound_metric_app.models import Frame
 from sound_metric_app.storage import WorkflowRepository
 
@@ -478,3 +478,61 @@ def test_config_show_reports_unset_then_set(env, capsys):
     workflow_cli.main(["config", "show"])
     out = capsys.readouterr().out
     assert str(inbox.resolve()) in out
+
+
+def test_config_default_trigger_shows_and_updates(env, capsys):
+    workflow_cli.main(["config", "show"])
+    assert f"Trigger (Pa)  : {config.DEFAULT_TRIGGER_PA:g}" in capsys.readouterr().out
+
+    assert workflow_cli.main(["config", "set-default-trigger-pa", "3"]) == 0
+    assert "3 Pa" in capsys.readouterr().out
+    workflow_cli.main(["config", "show"])
+    assert "Trigger (Pa)  : 3" in capsys.readouterr().out
+
+
+def test_config_show_survives_corrupt_trigger(env, capsys):
+    # A corrupt stored trigger must not stop `config show` from printing settings;
+    # otherwise the user cannot inspect the file well enough to repair it.
+    config.save_settings({config.TRIGGER_PA_KEY: "oops"})
+    assert workflow_cli.main(["config", "show"]) == 0
+    out = capsys.readouterr().out
+    assert "Trigger (Pa)  : (invalid:" in out
+    assert "FRP 3, regular 5" in out
+
+
+def test_config_set_default_trigger_rejects_non_positive(env, capsys):
+    assert workflow_cli.main(["config", "set-default-trigger-pa", "0"]) == 2
+
+
+def test_default_trigger_pa_get_set_round_trip(env):
+    # A fresh install yields the source-of-truth default; a saved value is honoured.
+    assert config.get_default_trigger_pa() == config.DEFAULT_TRIGGER_PA == 2.0
+    assert config.set_default_trigger_pa(5.0) == 5.0
+    assert config.get_default_trigger_pa() == 5.0
+    with pytest.raises(ValueError):
+        config.set_default_trigger_pa(0)
+
+
+def test_mark_records_the_supplied_trigger(env, capture_reader, capsys):
+    db, inbox = env
+    _touch(inbox, "SUP-1_AR15_01_001.dxd")
+    workflow_cli.main(["ingest", str(inbox), "--db", db, "--no-validate"])
+    capsys.readouterr()
+
+    assert workflow_cli.main(
+        ["mark", "1", "--ammo", "M855", "--trigger-pa", "10", "--db", db]
+    ) == 0
+    assert "10 Pa onset" in capsys.readouterr().out
+    with WorkflowRepository(db) as repo:
+        assert repo.get_shot(1).trigger_pa == 10.0
+
+
+def test_mark_defaults_the_trigger_to_config(env, capture_reader, capsys):
+    db, inbox = env
+    _touch(inbox, "SUP-1_AR15_01_001.dxd")
+    workflow_cli.main(["ingest", str(inbox), "--db", db, "--no-validate"])
+    capsys.readouterr()
+
+    workflow_cli.main(["mark", "1", "--ammo", "M855", "--db", db])
+    with WorkflowRepository(db) as repo:
+        assert repo.get_shot(1).trigger_pa == config.DEFAULT_TRIGGER_PA

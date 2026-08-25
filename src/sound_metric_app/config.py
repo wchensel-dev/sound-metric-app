@@ -16,7 +16,13 @@ P_REF: float = 20e-6
 # onset (first raw-pressure sample above ONSET_THRESHOLD_PA), aligning with
 # TBAC's process_string.m. See MATH.md §2/§6/§7.
 
-# Shot onset: first raw-pressure sample above this level (Pa). TBAC uses 1 Pa.
+# Shot onset: first raw-pressure sample above this level (Pa). The onset
+# threshold is now recorded per shot (``Shot.trigger_pa``, defaulting to
+# DEFAULT_TRIGGER_PA below) and passed into ``find_onset`` at marking. This
+# constant is the *legacy / unknown-trigger fallback*: a shot with no recorded
+# trigger (``trigger_pa`` is None — every row marked before the field existed)
+# is analysed at 1 Pa, matching TBAC's ``find(Y>1.)`` and the historical
+# behaviour, so nothing already computed shifts.
 ONSET_THRESHOLD_PA: float = 1.0
 
 # Peak/impulse search window after onset (ms): the signed peak and the
@@ -35,12 +41,15 @@ LEQ_SEARCH_MS: float = 25.0
 # window [onset, onset + LIAEQ_WINDOW_MS] (MATH.md §7).
 LIAEQ_WINDOW_MS: float = 100.0
 
-# Nominal DewesoftX acquisition standard: a 1 Pa trigger with a 10 ms
-# pre-trigger lead and 200 ms post-trigger capture (T = 210 ms, N = 42 000 at
-# fs = 200 kHz). These are the config source-of-record constants behind
-# MATH.md §1's `fs`/`N`/`T` rows and §2.3; the formulas use each file's actual
-# fs and N, so of this set only CAPTURE_MS is read at runtime — the "no onset"
-# warning cites it as the expected frame length.
+# Nominal DewesoftX acquisition standard: a hardware trigger (historically 1 Pa,
+# later raised by the techs to 10 Pa and now 2 Pa to reject wind gusts) with a
+# 10 ms pre-trigger lead and 200 ms post-trigger capture (T = 210 ms, N = 42 000
+# at fs = 200 kHz). The recorder's trigger level is not stored in the file; the
+# app re-derives onset from the data and records the trigger used per shot
+# (``Shot.trigger_pa``, default DEFAULT_TRIGGER_PA). These are the config
+# source-of-record constants behind MATH.md §1's `fs`/`N`/`T` rows and §2.3; the
+# formulas use each file's actual fs and N, so of this set only CAPTURE_MS is
+# read at runtime — the "no onset" warning cites it as the expected frame length.
 EXPECTED_FS: float = 200_000.0
 LEAD_MS: float = 10.0
 POST_MS: float = 200.0
@@ -98,6 +107,16 @@ INPUT_FOLDER_KEY: str = "input_folder"
 #: Settings key holding the user's ammo definitions — the ammo types offered as
 #: presets when marking a shot. See :func:`get_ammo_definitions`.
 AMMO_DEFINITIONS_KEY: str = "ammo_definitions"
+
+#: Settings key holding the default onset trigger threshold (Pa) pre-filled when
+#: marking a shot. See :func:`get_default_trigger_pa`.
+TRIGGER_PA_KEY: str = "default_trigger_pa"
+
+#: Default onset trigger threshold (Pa) for a freshly marked shot. Matches the
+#: recorder's current 2 Pa hardware trigger; overridable per shot at marking and
+#: globally via :func:`set_default_trigger_pa`. See ``ONSET_THRESHOLD_PA`` for
+#: the separate legacy fallback used when a shot records no trigger at all.
+DEFAULT_TRIGGER_PA: float = 2.0
 
 #: Ammo presets seeded for a fresh install (no ammo definitions saved yet).
 DEFAULT_AMMO_DEFINITIONS: tuple[str, ...] = (
@@ -190,3 +209,37 @@ def set_ammo_definitions(definitions: list[str]) -> list[str]:
     settings[AMMO_DEFINITIONS_KEY] = normalized
     save_settings(settings)
     return normalized
+
+
+def get_default_trigger_pa() -> float:
+    """The configured default onset trigger (Pa), falling back to :data:`DEFAULT_TRIGGER_PA`.
+
+    Pre-filled into the mark form / CLI so a freshly marked shot records the
+    recorder's current trigger unless the operator overrides it. A stored value
+    that is not a positive number is rejected rather than silently accepted, so a
+    corrupt setting surfaces instead of quietly skewing every new onset.
+    """
+    settings = load_settings()
+    if TRIGGER_PA_KEY not in settings:
+        return DEFAULT_TRIGGER_PA
+    stored = settings[TRIGGER_PA_KEY]
+    try:
+        value = float(stored)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"Setting {TRIGGER_PA_KEY!r} must be a number, got {type(stored).__name__}."
+        )
+    if not value > 0.0:
+        raise ValueError(f"Setting {TRIGGER_PA_KEY!r} must be positive, got {value}.")
+    return value
+
+
+def set_default_trigger_pa(value: float) -> float:
+    """Persist the default onset trigger (Pa) and return it. Must be positive."""
+    trigger = float(value)
+    if not trigger > 0.0:
+        raise ValueError(f"Trigger threshold must be positive, got {trigger}.")
+    settings = load_settings()
+    settings[TRIGGER_PA_KEY] = trigger
+    save_settings(settings)
+    return trigger

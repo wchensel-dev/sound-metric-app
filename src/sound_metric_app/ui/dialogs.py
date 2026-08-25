@@ -18,10 +18,12 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtWidgets
 
+from .. import config
 from ..models import Shot, role_for_order
 from .format import (
     _EMPTY,
     _NONE_LABEL,
+    _fmt_trigger,
     _format_captured_at,
     _opt_float,
     _opt_int,
@@ -99,6 +101,14 @@ class ShotEditDialog(QtWidgets.QDialog):
         form.addRow("Temp (°F):", self.temp_edit)
         self.rh_edit = QtWidgets.QLineEdit(_str_or_empty(shot.relative_humidity))
         form.addRow("Relative humidity (%):", self.rh_edit)
+        # Onset trigger this shot was recorded with. Pre-fill the stored value, or
+        # the configured default for a legacy shot that never recorded one, so
+        # re-marking it adopts the current trigger unless the operator says otherwise.
+        trigger_default = (
+            shot.trigger_pa if shot.trigger_pa is not None else config.get_default_trigger_pa()
+        )
+        self.trigger_edit = QtWidgets.QLineEdit(_fmt_trigger(trigger_default))
+        form.addRow("Trigger (Pa):", self.trigger_edit)
         # Read-only: the capture's fired-at time, pulled from the Dewesoft file at
         # marking. Shown for reference; not user-editable.
         form.addRow("Captured:", QtWidgets.QLabel(_format_captured_at(shot.captured_at)))
@@ -155,6 +165,7 @@ class ShotEditDialog(QtWidgets.QDialog):
                 wind_speed=_opt_float(self.wind_edit.text()),
                 temp=_opt_float(self.temp_edit.text()),
                 relative_humidity=_opt_float(self.rh_edit.text()),
+                trigger_pa=_opt_float(self.trigger_edit.text()),
                 # A full correction form: a cleared box means "blank this field",
                 # not "leave it as it was", so write the optional fields exactly.
                 replace_optional=True,

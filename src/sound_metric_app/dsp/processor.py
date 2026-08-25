@@ -55,12 +55,24 @@ class MetricsProcessor:
     filter/integrator state is carried between frames.
     """
 
-    def process(self, frame: Frame) -> MetricResult:
+    def process(
+        self, frame: Frame, *, onset_threshold_pa: float | None = None
+    ) -> MetricResult:
+        """Compute the onset-anchored metrics for ``frame``.
+
+        ``onset_threshold_pa`` is the trigger level (Pa) the shot was recorded
+        with, used to re-detect onset. ``None`` falls back to
+        ``ONSET_THRESHOLD_PA`` (1 Pa) — the legacy behaviour for a shot that
+        records no trigger.
+        """
         p = frame.samples
         fs = frame.sample_rate
 
-        onset = find_onset(p)
-        self._warn_if_off_nominal(frame, onset)
+        threshold = (
+            onset_threshold_pa if onset_threshold_pa is not None else ONSET_THRESHOLD_PA
+        )
+        onset = find_onset(p, threshold)
+        self._warn_if_off_nominal(frame, onset, threshold)
         if onset is None:
             # No shot detected; analyse from the frame start so the pipeline still
             # yields numbers (the warning above flags them as suspect).
@@ -108,19 +120,21 @@ class MetricsProcessor:
         )
 
     @staticmethod
-    def _warn_if_off_nominal(frame: Frame, onset: int | None) -> None:
+    def _warn_if_off_nominal(
+        frame: Frame, onset: int | None, threshold: float = ONSET_THRESHOLD_PA
+    ) -> None:
         """Warn when a frame can't support the onset-anchored analysis windows.
 
         Two things matter now that every metric is onset-anchored (MATH.md §2):
-        the shot must be *detectable* (a sample above the 1 Pa onset threshold),
-        and there must be at least ``LIAEQ_WINDOW_MS`` of capture after it so the
-        100 ms LIAeq window is not truncated. Total frame length is otherwise
-        irrelevant, so this is a warning, not a hard rejection.
+        the shot must be *detectable* (a sample above the shot's onset
+        ``threshold``), and there must be at least ``LIAEQ_WINDOW_MS`` of capture
+        after it so the 100 ms LIAeq window is not truncated. Total frame length
+        is otherwise irrelevant, so this is a warning, not a hard rejection.
         """
         ident = f"Frame {frame.source_file!r} channel {frame.channel!r}"
         if onset is None:
             warnings.warn(
-                f"{ident}: no sample exceeds the {ONSET_THRESHOLD_PA:g} Pa onset "
+                f"{ident}: no sample exceeds the {threshold:g} Pa onset "
                 f"threshold; metrics are computed from the frame start and may be "
                 f"meaningless (expected a triggered {CAPTURE_MS:.0f} ms capture).",
                 stacklevel=2,

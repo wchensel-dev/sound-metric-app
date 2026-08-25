@@ -221,6 +221,7 @@ class WorkflowController:
         wind_speed: float | None = None,
         temp: float | None = None,
         relative_humidity: float | None = None,
+        trigger_pa: float | None = None,
         replace_optional: bool = False,
     ) -> MarkedShot:
         """Annotate a shot, tag ML/SE, and compute + store its metrics.
@@ -245,6 +246,7 @@ class WorkflowController:
                 wind_speed=wind_speed,
                 temp=temp,
                 relative_humidity=relative_humidity,
+                trigger_pa=trigger_pa,
                 replace_optional=replace_optional,
             )
 

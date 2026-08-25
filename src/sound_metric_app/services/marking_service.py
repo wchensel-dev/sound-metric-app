@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
+from .. import config
 from ..dsp import MetricsProcessor
 from ..ingestion import autotag_map, read_capture, tag_channels
 from ..models import Batch, Cluster, Combination, Frame, MetricResult, MicPosition, Shot
@@ -78,6 +79,7 @@ class MarkingService:
         wind_speed: float | None = None,
         temp: float | None = None,
         relative_humidity: float | None = None,
+        trigger_pa: float | None = None,
         replace_optional: bool = False,
     ) -> MarkedShot:
         """Mark ``shot_id`` and compute its per-mic metrics.
@@ -103,6 +105,16 @@ class MarkingService:
             supplied). Pass ``replace_optional=True`` for a full-form edit, where
             these are written exactly and an omitted (``None``) field blanks the
             stored value instead of preserving it.
+        trigger_pa:
+            The onset trigger threshold (Pa) the shot was recorded with. It both
+            drives onset re-detection for this shot's metrics and is persisted.
+            Resolved to a concrete value before use: the explicit argument if
+            given, else the shot's already-stored trigger (preserved on re-mark),
+            else :data:`config.DEFAULT_TRIGGER_PA` on a first mark. Because it is
+            always resolved concretely, the metrics stored always match the
+            trigger stored, and only pre-existing rows never re-marked keep a
+            ``NULL`` (legacy 1 Pa) trigger. The resolved value must be positive;
+            a non-positive trigger raises ``ValueError``.
         replace_optional:
             See ``shot_order`` et al. above. Leave ``False`` for a partial
             re-mark (e.g. the CLI); set ``True`` when the caller supplies the
@@ -127,6 +139,25 @@ class MarkingService:
         if shot is None:
             raise LookupError(f"No shot with id {shot_id}")
         previous = self._previous_placement(shot)
+
+        # Resolve the onset trigger to a concrete value: an explicit argument
+        # wins, else preserve the shot's stored trigger on a re-mark, else fall
+        # back to the configured default on a first mark. Metrics are computed
+        # with this same value that is persisted, so the two never diverge.
+        if trigger_pa is not None:
+            effective_trigger_pa = float(trigger_pa)
+        elif shot.trigger_pa is not None:
+            effective_trigger_pa = float(shot.trigger_pa)
+        else:
+            effective_trigger_pa = config.get_default_trigger_pa()
+        # An onset trigger at or below 0 Pa would latch onset onto the first
+        # sample and silently corrupt every metric, so reject it here — the one
+        # point all callers (CLI, both UI forms) funnel through. Mirrors the
+        # positivity guard on the configured default in ``config``.
+        if not effective_trigger_pa > 0.0:
+            raise ValueError(
+                f"Onset trigger must be positive, got {effective_trigger_pa:g} Pa."
+            )
 
         sku = suppressor_sku or shot.suppressor_sku
         platform = test_platform or shot.test_platform
@@ -159,7 +190,10 @@ class MarkingService:
         # Run all DSP before any DB write, so a processing failure never leaves
         # a persisted mark behind.
         metrics: dict[MicPosition, MetricResult] = {
-            mic.position: self._processor.process(mic.frame) for mic in tagged
+            mic.position: self._processor.process(
+                mic.frame, onset_threshold_pa=effective_trigger_pa
+            )
+            for mic in tagged
         }
 
         # Marking and metric storage must be atomic: a shot is either fully
@@ -175,6 +209,7 @@ class MarkingService:
                 wind_speed=wind_speed,
                 temp=temp,
                 relative_humidity=relative_humidity,
+                trigger_pa=effective_trigger_pa,
                 captured_at=captured_at,
                 replace_optional=replace_optional,
             )

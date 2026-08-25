@@ -429,6 +429,10 @@ class Shot:
     wind_speed: float | None = None  # mph
     temp: float | None = None  # degrees Fahrenheit
     relative_humidity: float | None = None  # percent
+    #: Onset trigger threshold used to analyse this shot (Pa). Set at marking
+    #: (default ``config.DEFAULT_TRIGGER_PA``); ``None`` means legacy/unknown, so
+    #: the shot is analysed at the ``config.ONSET_THRESHOLD_PA`` (1 Pa) fallback.
+    trigger_pa: float | None = None
     se_channel: str | None = None  # raw channel name tagged as SE
     ml_channel: str | None = None  # raw channel name tagged as ML
     marked: bool = False
