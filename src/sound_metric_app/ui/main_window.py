@@ -23,16 +23,19 @@ Run with:  python -m sound_metric_app.ui.main_window   (needs the 'gui' extra)
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING
 
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtWidgets
 
-if TYPE_CHECKING:  # annotations only — kept out of the import path so that
-    # importing this module (and thus launching) stays cheap. The heavy imports
-    # (``.views`` pulls in pyqtgraph, a ~4 s import) are deferred into the
-    # methods that use them so ``main`` can paint a splash first — see ``main``.
-    from .compare_series import CompareSeries
-    from .controller import WorkflowController
+from .compare_series import CompareSeries
+from .controller import WorkflowController
+from .dialogs import AmmoDefinitionsDialog
+from .views import (
+    BatchAverageView,
+    CompareView,
+    DataBankView,
+    IngestView,
+    MarkingView,
+)
 
 #: The Compare tab's title, which grows a count of what is pinned to it (see
 #: :meth:`MainWindow.update_compare_count`).
@@ -46,18 +49,6 @@ _COMPARE_TAB_LABEL = "Compare"
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, controller: WorkflowController | None = None):
-        # Deferred so that importing this module does not drag in pyqtgraph
-        # (~4 s). ``main`` paints a splash before constructing the window, and
-        # this is where that cost is actually paid — with the splash visible.
-        from .controller import WorkflowController
-        from .views import (
-            BatchAverageView,
-            CompareView,
-            DataBankView,
-            IngestView,
-            MarkingView,
-        )
-
         super().__init__()
         self.setWindowTitle("Sound Metric App — Workflow")
         # Wider than the other tabs need: the Report tab splits into a tree on the
@@ -97,8 +88,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _edit_ammo_definitions(self) -> None:
         """Open the ammo-preset editor; on save, persist and refresh the mark form."""
-        from .dialogs import AmmoDefinitionsDialog
-
         dialog = AmmoDefinitionsDialog(self.controller.ammo_definitions(), parent=self)
         if dialog.exec() != QtWidgets.QDialog.Accepted:
             return
@@ -149,37 +138,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
 
-def _make_splash() -> QtWidgets.QSplashScreen:
-    """A minimal 'Loading…' splash, built from Qt-only parts.
-
-    It exists purely to give the desktop launcher immediate feedback: building
-    the real window pulls in pyqtgraph (~4 s) and reads the database before it
-    can paint, and with nothing on screen the operator assumes the click missed
-    and clicks again — spawning duplicate processes. The splash is deliberately
-    free of any heavy import so it can appear before that cost is paid.
-    """
-    pixmap = QtGui.QPixmap(440, 160)
-    pixmap.fill(QtGui.QColor("#1f2933"))
-    splash = QtWidgets.QSplashScreen(pixmap)
-    splash.showMessage(
-        "Sound Metric App\n\nLoading…",
-        QtCore.Qt.AlignmentFlag.AlignCenter,
-        QtGui.QColor("#f5f7fa"),
-    )
-    return splash
-
-
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
-    splash = _make_splash()
-    splash.show()
-    # Force the splash to paint before the blocking view import + DB load below;
-    # without this the event loop never runs until app.exec() and the splash
-    # stays blank for the whole startup.
-    app.processEvents()
     win = MainWindow()
     win.show()
-    splash.finish(win)
     return app.exec()
 
 
