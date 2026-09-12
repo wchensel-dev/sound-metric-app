@@ -4,9 +4,6 @@ Mathematical definition of every metric produced by this application. Intended
 for verification of correctness. Source of record: `src/sound_metric_app/dsp/`
 and `src/sound_metric_app/config.py`.
 
-The metric definitions follow Thunder Beast Arms Corp's (TBAC) `process_string.m`
-reference, with the deliberate divergences noted in §12.
-
 ## 1. Symbols and constants
 
 | Symbol | Meaning | Value | Source |
@@ -37,46 +34,28 @@ All decibel values are sound pressure levels (SPL) referenced to `p_ref`.
    filter or integrator state carries between frames.
 3. Nominal acquisition is a **hardware trigger with a 10 ms pre-trigger lead and
    200 ms post-trigger capture** (`T = 210 ms`, `N = 42 000` at `fs = 200 kHz`).
-   The trigger level was historically 1 Pa, was raised to 10 Pa by the techs and
-   is now 2 Pa to reject wind gusts; it is not stored in the file. Actual `fs`
-   and `N` from the file are used in all formulas; nominal values drive
-   validation warnings only.
+   Actual `fs` and `N` from the file are used in all formulas; nominal values
+   drive validation warnings only.
 4. Reference pressure is `p_ref = 20 µPa` (air).
 5. **Every metric is anchored to the shot onset** `n₀` (§3) and computed over a
    fixed window from there. `θ` is the trigger the shot was recorded with
    (`Shot.trigger_pa`, default 2 Pa; `θ₀ = 1 Pa` for a legacy shot that records
-   none). This assumes the pre-trigger baseline is quiet relative to `θ` so the
-   first threshold crossing is the shot, not noise — recording at the recorder's
-   own trigger keeps sub-trigger wind in the lead from capturing the onset. A
-   frame with no sample above `θ` is flagged and analysed from its start (the
-   numbers are then suspect).
+   none). A frame with no sample above `θ` is flagged and analysed from its
+   start (the numbers are then suspect).
 6. Metrics are computed independently per mic channel (SE, ML); channels are
    never combined at the DSP layer.
 7. A-weighting follows IEC 61672 / ANSI S1.4, normalized to 0 dB at 1 kHz, and
    matches TBAC's `adsgn.m` (§8).
 8. **One shot per analysis window.** The operator controls the range so no
    second blast, reflection, or comparable transient lands within `W = 100 ms`
-   of onset. All onset-anchored metrics share that one window (§3), so this
-   assumption is what makes "largest sample in the window" (§4) and "the shot's
-   peak" the same quantity, and what keeps `LIAeq,100ms` (§7) attributable to a
-   single shot. A contaminating event is not truncated away — an event inside
-   the window is inside every metric, by design, so a frame that violates this
-   is visible rather than silently partitioned.
+   of onset.
 
 ## 3. Onset, windows, and base operators
 
 **Onset.** `n₀ = min { n : p[n] > θ }`, the first sample whose *signed* raw
 pressure exceeds `θ`, the shot's recorded trigger (`Shot.trigger_pa`, default
-2 Pa; `θ₀ = 1 Pa` for a legacy shot). This generalises TBAC's `find(Y>1.)`, which
-is the `θ = 1 Pa` case. Every window below starts at `n₀`. If no sample exceeds
-`θ`, `n₀ = 0` and a warning is emitted.
-
-> **Future work.** Two refinements are deferred here. (1) *Keep the 1 Pa anchor*:
-> use `θ` only to *locate* the shot (skipping earlier sub-trigger wind), then
-> back-walk to the `θ₀ = 1 Pa` crossing on that shot's rising edge so `n₀` stays
-> exactly TBAC's `find(Y>1.)` with full wind robustness. (2) *Auto-infer the
-> legacy trigger* of pre-field data from the ~10 ms lead (a 10 Pa reading syncs
-> to `t ≈ 10 ms`) instead of leaving those rows at the `θ₀` fallback.
+2 Pa; `θ₀ = 1 Pa` for a legacy shot). Every window below starts at `n₀`. If no
+sample exceeds `θ`, `n₀ = 0` and a warning is emitted.
 
 **Window operator.** For a signal `x` and width `w` ms:
 ```
@@ -105,9 +84,7 @@ rms(x) = sqrt( (1/M) · Σ_n x[n]² )     [Pa],  M = len(x)
 peak_pa = peak( W(p, W_peak) )                 [Pa]
 peak_db = L(peak_pa)                            [dB]
 ```
-Largest signed raw pressure in the 100 ms window after onset. This is the
-largest sample *in the window*, not "the shot's peak" by construction — the two
-coincide because capture discipline keeps one shot per frame (§2.8).
+Largest signed raw pressure in the 100 ms window after onset.
 
 ## 5. Peak dBA — `peak_a_pa`, `peak_dba`
 
@@ -128,30 +105,14 @@ Q[k] = Q[k−1] + (s[k−1] + s[k]) / 2 · Δt        [Pa·ms]
 ```
 `Q` rises through the blast's positive-overpressure phase and falls once pressure
 turns negative. The impulse is the peak of `Q` taken **before** its minimum (the
-deepest point of the negative phase), so a later secondary rise cannot inflate it
-(TBAC's dynamic window):
+deepest point of the negative phase):
 ```
 i_min         = argmin_k Q[k]
 impulse_pa_ms = max( Q[0 .. i_min] )            [Pa·ms]   (global max if i_min = 0)
 peak_impulse_db = L(impulse_pa_ms)              [dB·ms]
 ```
 The `dB·ms` unit follows TBAC: `L(·)` of a Pa·ms magnitude, with time in
-milliseconds. Because every metric is onset-anchored, `Q` starts at the shot, so
-its positive phase is contiguous from `k = 0` and the peak is captured.
-
-The min-bounding rejects a later (e.g. reflected) rise **only when the rarefaction
-drives `Q` below its start** (`i_min > 0`) — the usual free-field case. When `Q`
-stays non-negative over the whole window (`i_min = 0`, e.g. a blast whose
-rarefaction never pulls the running integral negative), the impulse is the global
-max over the **entire `W_peak = 100 ms` window**, and any rise within those 100 ms
-— a reflection, a second blast — could in principle inflate it. The capture
-discipline of §2.8 (one shot, no comparable transient within `W` of onset) is the
-*only* thing that bounds it. Nothing in the code detects or flags an `i_min = 0`
-frame, so a violation of §2.8 shows up as a silently high impulse rather than a
-warning — inspect the Report graph's `Q` trace (which marks the peak) when an
-impulse reads implausibly high. TBAC clips to a short window instead for exactly
-this reason in a reverberant space (§12). A NaN in the input propagates so
-contaminated data surfaces.
+milliseconds.
 
 ## 7. LIAeq,100ms — `liaeq_pa`, `liaeq_100ms_db` (proprietary divergence)
 
@@ -161,10 +122,6 @@ from onset:
 liaeq_pa       = rms( W(p_A, W_LIAeq) )         [Pa]
 liaeq_100ms_db = L(liaeq_pa) = 10 · log10( (1/M · Σ p_A²) / p_ref² )   [dB]
 ```
-This is our divergence from TBAC (§12): where they take a peak 10 ms-Leq (§8.1)
-to reject reflections in a reverberant space, we integrate the full 100 ms of the
-free-field decay. Both are reported so shots validate against TBAC and against
-our model on the same capture.
 
 ## 8. Peak Leq(10 ms) — `leq10ms_pa`, `leq10ms_db`
 
@@ -180,9 +137,6 @@ The metric is the peak of `r` in the search window:
 leq10ms_pa = max( W(r, W_Leq) )                 [Pa]
 leq10ms_db = L(leq10ms_pa)                       [dB]
 ```
-Unlike `Leq_fast`'s FFT (circular) convolution, `r` is strictly causal, so its
-first `L` samples ramp up from zero state instead of wrapping the array tail; the
-onset-anchored search window sits past that ramp, so the reported maximum matches.
 
 ## 9. A-weighting filter — `a_weighting_sos` / `apply_a_weighting`
 
@@ -210,14 +164,6 @@ sos[0, 0:3] ← sos[0, 0:3] / |H_d(e^{j2π·1000/fs})|
 ```
 
 **Application:** causal IIR filtering `p_A = sosfilt(sos, p)` (forward only).
-
-**Parity with TBAC.** TBAC's `adsgn.m` (Couvreur, IEC 1672) is the *same* analog
-prototype — identical `f1..f4`, four zeros at the origin, identical pole
-structure. It differs only in how 1 kHz is normalized: TBAC bakes in the analytic
-constant `A1000 = 1.9997 dB` (numerator × 10^(1.9997/20) ≈ × 1.2589), where we
-measure the discrete 1 kHz response and divide. The two agree to sub-millidecibel
-at these sample rates. (TBAC's `bilinear(..., 1/Fs)` passes the sampling period
-`T` per Octave's convention, not a bug; scipy passes `fs`.)
 
 **Verification points** (relative response, from `tests/test_metrics.py`):
 
@@ -258,10 +204,6 @@ skips shots whose value is missing (an unpopulated row after a migration, or a N
 metric stored as NULL); in normal fully-populated operation that count equals `n`,
 so the two coincide.
 
-This matches TBAC, which accumulates linear Pa (and Pa·ms) across shots, divides
-by the shot count, and converts to dB at the end. It is **not** a mean of the dB
-values (which, by Jensen, would read lower); the log is applied once, to the mean.
-
 ## 11. Fast/Slow display envelope — `graphing._exp_rms_spl_db`
 
 Display-only smoothing for the SPL-over-time report graphs; it does **not** feed
@@ -275,20 +217,4 @@ L[n]    = 10 · log10( max(y[n], p_ref²) / p_ref² )        [dB]
 The mean square is floored at `p_ref²` (0 dB) so silent stretches read as a clean
 0 dB floor instead of −∞. The A-weighted trace passes `x_sig = p_A`; the
 unweighted trace passes `x_sig = p`. A Pascal-domain variant (`_exp_rms_pa`)
-returns `sqrt(max(y, 0))` in Pa without the dB conversion. This is the
-exact-normalization form of the FFT-based `Leq_fast` running-RMS routine
-(Tougaard & Beedholm, 2018); the two normalizations differ by ~3 × 10⁻⁵ dB.
-
-## 12. Divergences from TBAC
-
-| Axis | TBAC `process_string.m` | This app | Kind |
-|---|---|---|---|
-| Sample rate | 262 144 Hz (2¹⁷ per 0.5 s) | 200 000 Hz clean | deliberate |
-| Analysis anchor | peak/impulse from fixed `Time_Start`; Leq from onset | **all windows onset-anchored** | deliberate (robustness) |
-| Peak | signed positive overpressure | signed positive overpressure | aligned |
-| Impulse | `∫p·dt` positive phase, unweighted, Pa·ms + dB·ms | same | aligned |
-| Peak 10 ms-Leq | max 10 ms rectangular running Leq within 25 ms of onset | same (§8) | aligned |
-| Energy window | 10 ms-Leq only (rejects reflections) | **+ LIAeq,100ms** full free-field decay (§7) | deliberate |
-| Peak/impulse window | short, clipped to reject reverberant reflections | **100 ms, equal to the energy window** (§2.8) | deliberate |
-| Averaging | linear Pa/Pa·ms mean → dB | same (§10) | aligned |
-| A-weighting | `adsgn.m` (IEC 1672) | same prototype (§9) | aligned |
+returns `sqrt(max(y, 0))` in Pa without the dB conversion.
