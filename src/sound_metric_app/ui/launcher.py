@@ -23,6 +23,17 @@ def main() -> int:
     try:
         from .main_window import main as _main
     except ImportError:
+        # PySide6, imported at ``main_window`` module scope, is missing.
+        print(_INSTALL_HINT, file=sys.stderr)
+        return 1
+    # ``main_window`` now imports cleanly with only PySide6 present; pyqtgraph is
+    # pulled in later, deep inside ``MainWindow.__init__`` (deferred so the splash
+    # can paint before that ~4 s import). That moves its ImportError past the guard
+    # above, so probe for it here instead — via ``find_spec``, which reports the
+    # missing package without paying pyqtgraph's import cost when it is present.
+    import importlib.util
+
+    if importlib.util.find_spec("pyqtgraph") is None:
         print(_INSTALL_HINT, file=sys.stderr)
         return 1
     return _main()
