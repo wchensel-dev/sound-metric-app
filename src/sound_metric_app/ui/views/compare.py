@@ -85,8 +85,8 @@ class CompareView(_View):
         #: both keyed by ``CompareSeries.key``.
         self._traces: dict[tuple[int, MicPosition], MetricTrace] = {}
         self._errors: dict[tuple[int, MicPosition], str] = {}
-        #: The (metric, smoothing) the two dicts above were filled for.
-        self._cache_key: tuple[str, str] | None = None
+        #: The (metric, smoothing, absolute) the two dicts above were filled for.
+        self._cache_key: tuple[str, str, bool] | None = None
         #: Bumped on each load so a slow read for a superseded overlay is dropped.
         self._graph_token = 0
 
