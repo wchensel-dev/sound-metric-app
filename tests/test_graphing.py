@@ -286,6 +286,18 @@ def test_liaeq_trace_has_level_line_not_peak():
     assert trace.level == pytest.approx(pa_to_db(rms_pa(p_a[onset : onset + n])))
 
 
+def test_liaeq_instant_curve_is_magnitude_and_ignores_absolute():
+    # LIAeq is an inherently non-negative metric: its instantaneous curve is the
+    # rectified magnitude regardless of `absolute`, so a rarefaction never dips
+    # below the 0 dB line and toggling the button cannot change the curve.
+    frame = _shot_frame()
+    assert frame.samples.min() < 0.0, "fixture needs a rarefaction for this to bite"
+    default = build_metric_trace(frame, "liaeq_100ms_db")
+    magnitude = build_metric_trace(frame, "liaeq_100ms_db", absolute=True)
+    assert default.values.min() >= 0.0
+    np.testing.assert_array_equal(default.values, magnitude.values)
+
+
 def test_default_smoothing_is_instantaneous_point_cloud():
     assert build_metric_trace(_shot_frame(), "peak_db").connected is False
 

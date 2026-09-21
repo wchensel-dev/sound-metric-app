@@ -268,10 +268,19 @@ def build_metric_trace(
     t_ms = np.arange(p.shape[0]) / fs * 1000.0
     onset = find_onset(p)
 
-    def spl(sig: np.ndarray) -> tuple[np.ndarray, bool]:
-        """SPL-over-time values for ``sig`` plus whether to join them as a line."""
+    def spl(sig: np.ndarray, signed: bool = False) -> tuple[np.ndarray, bool]:
+        """SPL-over-time values for ``sig`` plus whether to join them as a line.
+
+        ``signed`` marks a peak metric, whose instantaneous curve carries the
+        sample's sign by default and rectifies to magnitude only when the caller
+        passes ``absolute=True``. The non-negative metrics (LIAeq) leave it
+        ``False`` and always draw the rectified magnitude, so ``absolute`` is a
+        no-op for them as documented.
+        """
         if smoothing == SMOOTHING_INSTANT:
-            return (_spl_db(sig) if absolute else _signed_spl_db(sig)), False
+            if signed and not absolute:
+                return _signed_spl_db(sig), False
+            return _spl_db(sig), False
         return _exp_rms_spl_db(sig, fs, _TIME_WEIGHT_TAU[smoothing]), True
 
     if metric_key == "peak_pa":
@@ -295,7 +304,7 @@ def build_metric_trace(
     if metric_key == "peak_db":
         start, stop = _onset_window(fs, onset, PEAK_WINDOW_MS)
         w_start, w_end = _window_bounds(start, stop, p.shape[0])
-        values, connected = spl(p)
+        values, connected = spl(p, signed=True)
         return MetricTrace(
             t_ms, values, "SPL (dB)", "Peak dB",
             peak_index=_signed_peak_index(p, start, stop), connected=connected,
@@ -307,7 +316,7 @@ def build_metric_trace(
         p_a = apply_a_weighting(p, fs)
         start, stop = _onset_window(fs, onset, PEAK_WINDOW_MS)
         w_start, w_end = _window_bounds(start, stop, p.shape[0])
-        values, connected = spl(p_a)
+        values, connected = spl(p_a, signed=True)
         return MetricTrace(
             t_ms, values, "SPL (dBA)", "Peak dBA",
             peak_index=_signed_peak_index(p_a, start, stop), connected=connected,
