@@ -1101,6 +1101,88 @@ def test_y_bounds_ignore_a_non_finite_level_line(qtbot):
     assert graph._y_bounds == (10.0, 20.0)
 
 
+def test_level_line_spans_the_calc_window_and_is_labelled(qtbot):
+    # The energy-average marker (LIAeq) is a horizontal *segment* over the calc
+    # window, not an infinite line across the plot, so the number reads as the
+    # energy equivalent of that time-bounded 100 ms frame. Its value is printed
+    # above the bar's right end.
+    import pyqtgraph as pg
+
+    from sound_metric_app.dsp.graphing import MetricTrace
+    from sound_metric_app.ui.graph import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+
+    trace = MetricTrace(
+        t_ms=np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+        values=np.array([1.0, 2.0, 3.0, 2.0, 1.0]),
+        y_label="SPL (dBA)",
+        title="LIAeq,100ms",
+        level=12.5,
+        window_start_index=1,
+        window_end_index=3,
+    )
+    graph.show_trace(trace)
+
+    # A finite two-point curve at the level, spanning exactly window start->end --
+    # no infinite horizontal line.
+    assert not [
+        item
+        for item in graph._plot.getPlotItem().items
+        if isinstance(item, pg.InfiniteLine) and item.angle == 0
+    ]
+    segments = [
+        item
+        for item in graph._plot.getPlotItem().items
+        if isinstance(item, pg.PlotDataItem)
+        and list(item.getData()[1]) == [12.5, 12.5]
+    ]
+    assert len(segments) == 1
+    assert list(segments[0].getData()[0]) == [1.0, 3.0]
+
+    # The value is printed in the trace's unit, anchored at the window's right end.
+    labels = [
+        item
+        for item in graph._plot.getPlotItem().items
+        if isinstance(item, pg.TextItem)
+    ]
+    assert len(labels) == 1
+    assert labels[0].toPlainText() == "12.50 dBA"
+    assert labels[0].pos().x() == pytest.approx(3.0)
+    assert labels[0].pos().y() == pytest.approx(12.5)
+
+
+def test_level_line_falls_back_to_full_width_without_a_window(qtbot):
+    # With no window to bracket (an edge outside the capture) there is no span to
+    # draw the segment over, so the level still shows as a full-width line.
+    import pyqtgraph as pg
+
+    from sound_metric_app.dsp.graphing import MetricTrace
+    from sound_metric_app.ui.graph import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+
+    trace = MetricTrace(
+        t_ms=np.array([0.0, 1.0, 2.0]),
+        values=np.array([10.0, 20.0, 15.0]),
+        y_label="SPL (dBA)",
+        title="LIAeq,100ms",
+        level=12.5,
+        window_start_index=None,
+        window_end_index=None,
+    )
+    graph.show_trace(trace)
+    horizontals = [
+        item
+        for item in graph._plot.getPlotItem().items
+        if isinstance(item, pg.InfiniteLine) and item.angle == 0
+    ]
+    assert len(horizontals) == 1
+    assert horizontals[0].value() == pytest.approx(12.5)
+
+
 def test_onset_zoom_frames_fixed_times_off_the_capture_axis(qtbot):
     # The onset close-ups frame *fixed* times -- a set start, a set width -- so
     # the same slice of every shot frames identically and close-ups compare shot
@@ -1536,6 +1618,87 @@ def test_single_trace_keeps_the_plain_legend_free_graph(qtbot):
 
     graph.show_message("nothing graphed")
     assert not graph._legend.isVisible()
+
+
+def test_absolute_value_toggle_reports_state_and_signals(qtbot):
+    # The button feeds build_metric_trace's `absolute` argument: off by default,
+    # and flipping it must both flip the reported state and fire the signal the
+    # views re-render on.
+    from sound_metric_app.ui.graph import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+
+    assert graph.absolute_value() is False
+    with qtbot.waitSignal(graph.absoluteChanged):
+        graph._absolute_button.setChecked(True)
+    assert graph.absolute_value() is True
+
+
+def test_connect_points_toggle_joins_the_point_cloud_in_place(qtbot):
+    # The Connect-points toggle is a pure rendering choice: it adds a line pen to
+    # an instantaneous point cloud (and drops it again) without redrawing, so an
+    # envelope curve is left alone and the toggle state persists across a redraw.
+    from PySide6 import QtCore
+
+    from sound_metric_app.dsp.graphing import MetricTrace
+    from sound_metric_app.ui.graph import MetricGraph
+
+    def _draws_line(item) -> bool:
+        # pyqtgraph normalises "no line" as either a None pen or a NoPen QPen;
+        # both render nothing, so treat them the same.
+        pen = item.opts["pen"]
+        return pen is not None and pen.style() != QtCore.Qt.NoPen
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+    cloud = MetricTrace(
+        t_ms=np.array([0.0, 1.0, 2.0]),
+        values=np.array([1.0, 5.0, 2.0]),
+        y_label="SPL (dB)",
+        title="Peak dB",
+        peak_index=1,
+        connected=False,
+    )
+
+    assert graph.connect_points() is False
+    graph.show_trace(cloud)
+    (item,) = graph._plot.listDataItems()
+    assert not _draws_line(item)  # a bare point cloud
+
+    with qtbot.assertNotEmitted(graph.smoothingChanged):
+        graph._connect_button.setChecked(True)
+    assert graph.connect_points() is True
+    # Restyled in place — the same item now carries a connecting pen.
+    assert graph._plot.listDataItems() == [item]
+    assert _draws_line(item)
+
+    # The choice sticks: a fresh render of another cloud comes out connected too.
+    graph.show_trace(cloud)
+    (redrawn,) = graph._plot.listDataItems()
+    assert _draws_line(redrawn)
+
+    graph._connect_button.setChecked(False)
+    assert not _draws_line(graph._plot.listDataItems()[0])
+
+
+def test_connect_points_leaves_the_envelope_line_untouched(qtbot):
+    # An envelope (connected=True) is already a joined line; the toggle must not
+    # strip its pen when switched off.
+    from PySide6 import QtCore
+
+    from sound_metric_app.ui.graph import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+    a, _b = _overlay_traces()  # connected=True
+
+    graph.show_trace(a)
+    (item,) = graph._plot.listDataItems()
+    assert item.opts["pen"].style() != QtCore.Qt.NoPen
+    graph._connect_button.setChecked(True)
+    graph._connect_button.setChecked(False)
+    assert item.opts["pen"].style() != QtCore.Qt.NoPen  # never dropped
 
 
 def test_readout_names_which_overlaid_curve_was_picked(qtbot):

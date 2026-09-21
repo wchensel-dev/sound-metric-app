@@ -54,7 +54,47 @@ def test_peak_db_marks_signed_peak_in_onset_window():
     # The bar sits on the largest *signed* sample within the onset window.
     assert trace.peak_index == start + int(np.argmax(frame.samples[start:stop]))
     assert np.all(np.isfinite(trace.values))
-    assert trace.values.min() >= 0.0
+
+
+def test_peak_db_curve_is_signed_so_its_high_point_is_the_reported_peak():
+    # The default (signed) presentation must agree with the reported number: the
+    # curve's maximum in the window falls on the same sample the marker does,
+    # rather than on a deeper rarefaction the old |p| curve could draw taller.
+    frame = _shot_frame()
+    assert frame.samples.min() < 0.0, "fixture needs a rarefaction for this to bite"
+    trace = build_metric_trace(frame, "peak_db")
+    start, stop = _onset_window(frame.samples)
+    assert start + int(np.argmax(trace.values[start:stop])) == trace.peak_index
+    # Signed: the rarefaction dips below the 0 dB line.
+    assert trace.values.min() < 0.0
+
+
+def test_absolute_rectifies_the_peak_curves_without_moving_the_marker():
+    # `absolute=True` is the opt-in magnitude presentation. It rectifies the drawn
+    # curve but must leave the reported peak (index and value) exactly where the
+    # signed default put it.
+    frame = _shot_frame()
+    for key in ("peak_pa", "peak_db", "peak_dba"):
+        signed = build_metric_trace(frame, key)
+        magnitude = build_metric_trace(frame, key, absolute=True)
+        assert magnitude.peak_index == signed.peak_index, key
+        assert magnitude.values[signed.peak_index] == pytest.approx(
+            signed.values[signed.peak_index]
+        ), key
+        # Rectified curves never dip below zero; the signed one does (rarefaction).
+        assert magnitude.values.min() >= 0.0, key
+        assert signed.values.min() < 0.0, key
+        # Above the reference the two agree in magnitude sample by sample.
+        assert np.allclose(magnitude.values, np.abs(signed.values))
+
+
+def test_absolute_is_a_noop_for_the_time_weighted_envelope():
+    # A Fast/Slow curve is an RMS envelope, already non-negative, so the toggle
+    # cannot change it.
+    frame = _shot_frame()
+    signed = build_metric_trace(frame, "peak_db", SMOOTHING_FAST)
+    magnitude = build_metric_trace(frame, "peak_db", SMOOTHING_FAST, absolute=True)
+    np.testing.assert_array_equal(signed.values, magnitude.values)
 
 
 def test_peak_dba_uses_a_weighted_signal():
@@ -244,6 +284,18 @@ def test_liaeq_trace_has_level_line_not_peak():
     n = window_samples(FS, LIAEQ_WINDOW_MS)
     assert trace.peak_index is None
     assert trace.level == pytest.approx(pa_to_db(rms_pa(p_a[onset : onset + n])))
+
+
+def test_liaeq_instant_curve_is_magnitude_and_ignores_absolute():
+    # LIAeq is an inherently non-negative metric: its instantaneous curve is the
+    # rectified magnitude regardless of `absolute`, so a rarefaction never dips
+    # below the 0 dB line and toggling the button cannot change the curve.
+    frame = _shot_frame()
+    assert frame.samples.min() < 0.0, "fixture needs a rarefaction for this to bite"
+    default = build_metric_trace(frame, "liaeq_100ms_db")
+    magnitude = build_metric_trace(frame, "liaeq_100ms_db", absolute=True)
+    assert default.values.min() >= 0.0
+    np.testing.assert_array_equal(default.values, magnitude.values)
 
 
 def test_default_smoothing_is_instantaneous_point_cloud():
