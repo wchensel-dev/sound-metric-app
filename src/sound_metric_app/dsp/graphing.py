@@ -6,7 +6,9 @@ the report metrics maps to one curve over the capture's time axis, plus a
 single annotation that explains where the reported number comes from:
 
 * the peak metrics (raw Pascals, dB, and dBA) mark the largest *signed* sample in
-  the onset-anchored peak window with a vertical bar;
+  the onset-anchored peak window with a vertical bar; their instantaneous curve
+  is drawn signed too (``sign(p)`` kept, so the curve's high point *is* the marked
+  peak), unless the caller passes ``absolute=True`` for the rectified magnitude;
 * the Impulse metric plots the cumulative ``∫p·dt`` curve (Pa·ms) and marks its
   positive-phase peak; the Peak-10 ms-Leq metric marks the max of its running
   rectangular level;
@@ -119,13 +121,37 @@ class MetricTrace:
 
 
 def _spl_db(pressure: np.ndarray) -> np.ndarray:
-    """Instantaneous SPL of a pressure signal: ``20*log10(|p|/p_ref)`` (dB).
+    """Instantaneous SPL *magnitude* of a pressure signal: ``20*log10(|p|/p_ref)`` (dB).
 
-    Magnitude is floored at ``P_REF`` (0 dB) so zero-crossings become a clean
-    0 dB floor rather than ``-inf`` spikes that would wreck the plot's autoscale.
+    Fully rectified: every sample becomes its magnitude in dB, so a rarefaction
+    trough draws just as tall as an overpressure crest. This is the absolute-value
+    presentation, reached only when the caller asks for it (``absolute=True``);
+    :func:`_signed_spl_db` is the default. Magnitude is floored at ``P_REF``
+    (0 dB) so zero-crossings become a clean 0 dB floor rather than ``-inf`` spikes
+    that would wreck the plot's autoscale.
     """
     mag = np.maximum(np.abs(pressure), P_REF)
     return 20.0 * np.log10(mag / P_REF)
+
+
+def _signed_spl_db(pressure: np.ndarray) -> np.ndarray:
+    """Instantaneous SPL carrying the sample's sign: ``sign(p)*20*log10(|p|/p_ref)``.
+
+    The signed counterpart of :func:`_spl_db`, and the default the peak dB / dBA
+    traces draw. The magnitude in dB is unchanged, but a rarefaction (negative
+    pressure) plots *below* the 0 dB line rather than mirrored above it, so the
+    curve's maximum lands on the same sample the metric reports — the largest
+    *signed* pressure (``max p``, not ``max|p|``; see
+    :func:`~sound_metric_app.dsp.metrics.signed_peak_pa`). Without the sign a
+    deeper rarefaction elsewhere would draw taller than the reported peak, so the
+    marker would appear to ignore the curve's visible high point.
+
+    Magnitude is floored at ``P_REF`` first, so a sub-reference or zero sample
+    reads exactly 0 dB regardless of sign (``sign(0)`` is 0 anyway); only samples
+    above the reference carry their polarity into a non-zero level.
+    """
+    mag = np.maximum(np.abs(pressure), P_REF)
+    return np.sign(pressure) * 20.0 * np.log10(mag / P_REF)
 
 
 def _exp_rms_spl_db(pressure: np.ndarray, fs: float, tau_s: float) -> np.ndarray:
@@ -202,7 +228,10 @@ def _signed_peak_index(signal: np.ndarray, start: int, stop: int) -> int | None:
 
 
 def build_metric_trace(
-    frame: Frame, metric_key: str, smoothing: str = SMOOTHING_INSTANT
+    frame: Frame,
+    metric_key: str,
+    smoothing: str = SMOOTHING_INSTANT,
+    absolute: bool = False,
 ) -> MetricTrace:
     """Turn a raw :class:`Frame` into the :class:`MetricTrace` for ``metric_key``.
 
@@ -216,6 +245,20 @@ def build_metric_trace(
     the reported scalar (the peak sample, the LIAeq level) is unchanged, so the
     marker and reference line stay put. The Impulse and Peak-10 ms-Leq traces
     carry their own dedicated curves and ignore ``smoothing``.
+
+    ``absolute`` chooses between the two presentations of the instantaneous
+    peak curves (``peak_pa`` / ``peak_db`` / ``peak_dba``):
+
+    * ``False`` (default) draws the *signed* pressure — the raw waveform for Pa,
+      ``sign(p)*dB(|p|)`` for dB/dBA. The curve's maximum then coincides with the
+      largest signed sample, which is exactly the value the metric reports.
+    * ``True`` draws the rectified *magnitude* — ``|p|`` / ``dB(|p|)`` — so every
+      excursion, crest or trough, reads as a positive level.
+
+    Like ``smoothing``, it changes only the drawn curve: ``peak_index`` still
+    marks the reported signed peak and its value is untouched either way. It is a
+    no-op for the Fast/Slow envelopes (an RMS is already non-negative) and for the
+    inherently non-negative metrics (Impulse, Leq, LIAeq).
     """
     if smoothing not in _SMOOTHING_MODES:
         raise ValueError(f"Unknown smoothing mode: {smoothing!r}")
@@ -228,16 +271,17 @@ def build_metric_trace(
     def spl(sig: np.ndarray) -> tuple[np.ndarray, bool]:
         """SPL-over-time values for ``sig`` plus whether to join them as a line."""
         if smoothing == SMOOTHING_INSTANT:
-            return _spl_db(sig), False
+            return (_spl_db(sig) if absolute else _signed_spl_db(sig)), False
         return _exp_rms_spl_db(sig, fs, _TIME_WEIGHT_TAU[smoothing]), True
 
     if metric_key == "peak_pa":
-        # Raw pressure, unconverted. Instantaneous is the literal waveform (Pa);
-        # Fast/Slow is the RMS pressure envelope in the same units.
+        # Raw pressure, unconverted. Instantaneous is the literal waveform (Pa),
+        # signed unless the caller asked for its magnitude; Fast/Slow is the RMS
+        # pressure envelope in the same units (already non-negative).
         start, stop = _onset_window(fs, onset, PEAK_WINDOW_MS)
         w_start, w_end = _window_bounds(start, stop, p.shape[0])
         if smoothing == SMOOTHING_INSTANT:
-            values, connected = p, False
+            values, connected = (np.abs(p) if absolute else p), False
         else:
             values = _exp_rms_pa(p, fs, _TIME_WEIGHT_TAU[smoothing])
             connected = True

@@ -164,9 +164,11 @@ class CompareView(_View):
         split.addWidget(pinned)
 
         self.graph = MetricGraph()
-        # Re-draw with the new weighting when the dropdown changes; the cache is
-        # keyed by it, so this reloads rather than redrawing stale curves.
+        # Re-draw with the new weighting when the dropdown changes, or with the
+        # new signed/absolute presentation when the toggle flips; the cache is
+        # keyed by both, so this reloads rather than redrawing stale curves.
         self.graph.smoothingChanged.connect(self._render)
+        self.graph.absoluteChanged.connect(self._render)
         split.addWidget(self.graph)
         # The pinned rows are a narrow index; the graph is the view. Give it the
         # width.
@@ -259,7 +261,11 @@ class CompareView(_View):
 
     def _render(self, *_args) -> None:
         """Load whatever the current overlay is missing, then draw it."""
-        cache_key = (self.metric_combo.currentData(), self.graph.current_smoothing())
+        cache_key = (
+            self.metric_combo.currentData(),
+            self.graph.current_smoothing(),
+            self.graph.absolute_value(),
+        )
         if cache_key != self._cache_key:
             self._traces.clear()
             self._errors.clear()
@@ -273,7 +279,7 @@ class CompareView(_View):
             self.tree.clear()
             return
 
-        metric_key, smoothing = cache_key
+        metric_key, smoothing, absolute = cache_key
         # A hidden series is not drawn, so its capture is not worth reading --
         # unhiding is what asks for it (and finds it already cached if it was
         # hidden after being drawn).
@@ -299,7 +305,11 @@ class CompareView(_View):
             for series in pending:
                 try:
                     trace = self.controller.metric_trace(
-                        series.shot_id, series.position, metric_key, smoothing=smoothing
+                        series.shot_id,
+                        series.position,
+                        metric_key,
+                        smoothing=smoothing,
+                        absolute=absolute,
                     )
                 except Exception as exc:  # noqa: BLE001 — shown against its row
                     results.append((series, None, str(exc)))

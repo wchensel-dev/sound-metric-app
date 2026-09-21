@@ -12,6 +12,7 @@ from .axis_bounds import AxisBoundsButton, AxisBoundsDialog
 from .framing import _ONSET_ZOOM_MS, _ONSET_ZOOM_START_MS, FramingBar
 from .palette import _MARK_COLOR, _SERIES_COLORS, series_color
 from .readout import PointReadout
+from .scale_drag_axis import ScaleDragAxis
 
 
 class MetricGraph(QtWidgets.QWidget):
@@ -61,6 +62,12 @@ class MetricGraph(QtWidgets.QWidget):
 
     #: Emitted when the user picks a different level-weighting from the dropdown.
     smoothingChanged = QtCore.Signal()
+
+    #: Emitted when the user toggles the absolute-value button. Like
+    #: :attr:`smoothingChanged`, the owning view re-requests the trace(s) — the
+    #: choice is baked into the curve by :func:`~sound_metric_app.dsp.build_metric_trace`,
+    #: not applied to already-drawn values.
+    absoluteChanged = QtCore.Signal()
 
     #: Dropdown entries: (label, ``build_metric_trace`` smoothing mode).
     _SMOOTHING_OPTIONS = (
@@ -133,9 +140,47 @@ class MetricGraph(QtWidgets.QWidget):
             lambda *_: self.smoothingChanged.emit()
         )
         header.addWidget(self._smoothing_combo)
+        # Absolute-value toggle: off draws the signed peak curve (whose high point
+        # is the reported peak); on rectifies it to magnitude. Checkable so its
+        # pressed state shows which presentation is live.
+        self._absolute_button = QtWidgets.QPushButton("Absolute value")
+        self._absolute_button.setCheckable(True)
+        self._absolute_button.setToolTip(
+            "How the peak Pa / dB / dBA curve is drawn.\n"
+            "Off: signed — rarefactions dip below the line, so the curve's peak "
+            "is the reported value.\n"
+            "On: |value| — every excursion is drawn as a positive magnitude.\n"
+            "The reported number and its marker never change."
+        )
+        self._absolute_button.toggled.connect(lambda *_: self.absoluteChanged.emit())
+        header.addWidget(self._absolute_button)
+        # Connect-points toggle: joins the instantaneous point cloud with a line
+        # so the samples read as a curve. Purely a rendering choice over the same
+        # data, so it restyles the drawn curves in place (see
+        # :meth:`_apply_connect_style`) rather than re-requesting the trace — the
+        # view and any picked point survive the toggle. No effect on the Fast/Slow
+        # envelopes, which are already joined lines.
+        self._connect_button = QtWidgets.QPushButton("Connect points")
+        self._connect_button.setCheckable(True)
+        self._connect_button.setToolTip(
+            "Join the instantaneous samples with a line.\n"
+            "Off: one dot per sample (a point cloud).\n"
+            "On: the dots are connected so they read as a curve.\n"
+            "The Fast/Slow envelopes are already lines and are unaffected."
+        )
+        self._connect_button.toggled.connect(self._on_connect_toggled)
+        header.addWidget(self._connect_button)
         layout.addLayout(header)
 
-        self._plot = pg.PlotWidget()
+        # Both axes carry the tick numbers as scale handles: dragging them
+        # stretches or squeezes that axis (see :class:`ScaleDragAxis`), leaving
+        # the plot body as the sole place a left-drag pans.
+        self._plot = pg.PlotWidget(
+            axisItems={
+                "bottom": ScaleDragAxis(orientation="bottom"),
+                "left": ScaleDragAxis(orientation="left"),
+            }
+        )
         # Keep redraws cheap on a full 20k-sample frame: clip to the view and let
         # pyqtgraph peak-downsample when zoomed out.
         self._plot.setClipToView(True)
@@ -199,6 +244,14 @@ class MetricGraph(QtWidgets.QWidget):
         #: click can find the sample it landed on. Empty whenever the plot shows
         #: a message rather than curves.
         self._series: list[tuple[str, MetricTrace, tuple[int, int, int]]] = []
+        #: Whether the Connect-points toggle is on. Set here so :meth:`_draw_curve`
+        #: reads a defined value on the very first render.
+        self._connect_points = False
+        #: The drawn curve items, one per series, as ``(item, colour, is_cloud)``.
+        #: ``is_cloud`` is True for an instantaneous point cloud — the only kind
+        #: the Connect-points toggle restyles; an envelope stays a line. Kept so
+        #: the toggle can add or drop the connecting line without a full redraw.
+        self._curve_items: list[tuple[object, tuple[int, int, int], bool]] = []
 
         # A click anywhere on the plot scene tries to select the nearest sample.
         self._plot.scene().sigMouseClicked.connect(self._on_plot_clicked)
@@ -209,6 +262,37 @@ class MetricGraph(QtWidgets.QWidget):
     def current_smoothing(self) -> str:
         """The ``build_metric_trace`` smoothing mode currently selected."""
         return self._smoothing_combo.currentData()
+
+    def absolute_value(self) -> bool:
+        """Whether the absolute-value (magnitude) presentation is toggled on.
+
+        Passed straight to ``build_metric_trace``'s ``absolute`` argument; see
+        :attr:`absoluteChanged`.
+        """
+        return self._absolute_button.isChecked()
+
+    def connect_points(self) -> bool:
+        """Whether the Connect-points toggle is on (point clouds drawn joined)."""
+        return self._connect_points
+
+    def _on_connect_toggled(self, checked: bool) -> None:
+        """Add or drop the connecting line on the drawn point clouds.
+
+        Restyles the existing curve items in place: no data changes, so the
+        view range and any picked-point readout are left exactly as they were.
+        """
+        self._connect_points = bool(checked)
+        self._apply_connect_style()
+
+    def _apply_connect_style(self) -> None:
+        """Give each point-cloud curve a connecting pen, or none, per the toggle.
+
+        Envelope curves (``is_cloud`` False) are already joined lines and keep
+        their pen untouched, so switching to Fast/Slow and back is unaffected.
+        """
+        for item, color, is_cloud in self._curve_items:
+            if is_cloud:
+                item.setPen(pg.mkPen(color, width=1) if self._connect_points else None)
 
     @classmethod
     def series_color(cls, index: int) -> tuple[int, int, int]:
@@ -252,6 +336,7 @@ class MetricGraph(QtWidgets.QWidget):
         self._window_x_bounds = None
         self._y_bounds = None
         self._series = []
+        self._curve_items = []
         self.clear_readout()
         self._framing.set_curve_enabled(False)
         self._framing.set_window_enabled(False)
@@ -431,6 +516,7 @@ class MetricGraph(QtWidgets.QWidget):
         self._legend.setVisible(len(series) > 1)
         # New curves invalidate any prior point pick (different samples/units).
         self._series = series
+        self._curve_items = []
         self.clear_readout()
         first = series[0][1]
         # Typed bounds are kept across a redraw of the same metric -- which is
@@ -454,7 +540,8 @@ class MetricGraph(QtWidgets.QWidget):
             mark_color = color if multiple else self._MARK_COLOR
             # A label is only spent on a legend entry when there is a legend;
             # pyqtgraph adds one row per named curve regardless of visibility.
-            self._draw_curve(trace, color, label if multiple else None)
+            item = self._draw_curve(trace, color, label if multiple else None)
+            self._curve_items.append((item, color, not trace.connected))
             if trace.peak_index is not None:
                 self._plot.addItem(
                     pg.InfiniteLine(
@@ -463,12 +550,7 @@ class MetricGraph(QtWidgets.QWidget):
                     )
                 )
             if trace.level is not None:
-                self._plot.addItem(
-                    pg.InfiniteLine(
-                        pos=trace.level, angle=0,
-                        pen=pg.mkPen(mark_color, width=1, style=QtCore.Qt.DashLine),
-                    )
-                )
+                self._draw_level_line(trace, mark_color)
             if trace.window_start_index is not None:
                 window_starts.append(float(trace.t_ms[trace.window_start_index]))
             if trace.window_end_index is not None:
@@ -528,29 +610,34 @@ class MetricGraph(QtWidgets.QWidget):
         # come back exactly where they put them.
         self._apply_manual_bounds()
 
-    def _draw_curve(self, trace, color: tuple[int, int, int], name: str | None) -> None:
-        """Plot one trace's samples in ``color``, legending it as ``name`` if given."""
+    def _draw_curve(self, trace, color: tuple[int, int, int], name: str | None):
+        """Plot one trace's samples in ``color``, legending it as ``name`` if given.
+
+        Returns the created plot item so :meth:`_apply_connect_style` can restyle
+        a point cloud in place when the Connect-points toggle flips.
+        """
         if trace.connected:
             # Time-weighted envelope: a joined line reads as the continuous level
             # a meter shows. NaN samples break the line into gaps.
-            self._plot.plot(
+            return self._plot.plot(
                 trace.t_ms, trace.values, pen=pg.mkPen(color, width=1), name=name
             )
-        else:
-            # One dot per sample, no connecting line (pen=None). NaN samples
-            # (silent Impulse tail) simply don't plot a point. pxMode keeps dots
-            # a fixed screen size regardless of zoom.
-            self._plot.plot(
-                trace.t_ms,
-                trace.values,
-                pen=None,
-                symbol="o",
-                symbolSize=2,
-                symbolPen=None,
-                symbolBrush=pg.mkBrush(*color),
-                pxMode=True,
-                name=name,
-            )
+        # One dot per sample. The Connect-points toggle adds a connecting line
+        # (pen); off it is a bare point cloud (pen=None). NaN samples (silent
+        # Impulse tail) simply don't plot a point, and break the line if drawn.
+        # pxMode keeps dots a fixed screen size regardless of zoom.
+        pen = pg.mkPen(color, width=1) if self._connect_points else None
+        return self._plot.plot(
+            trace.t_ms,
+            trace.values,
+            pen=pen,
+            symbol="o",
+            symbolSize=2,
+            symbolPen=None,
+            symbolBrush=pg.mkBrush(*color),
+            pxMode=True,
+            name=name,
+        )
 
     def _draw_window_markers(
         self, series, starts: list[float], ends: list[float]
@@ -604,6 +691,37 @@ class MetricGraph(QtWidgets.QWidget):
         else:
             self._window_x_bounds = None
             self._framing.set_window_enabled(False)
+
+    def _draw_level_line(self, trace, color: tuple[int, int, int]) -> None:
+        """Draw the energy-average marker: a dashed bar over the calc window.
+
+        Unlike a peak metric's vertical, the energy-average metric (LIAeq) has no
+        single sample to point at -- it reports one level integrated over its
+        100 ms window. So the marker is a horizontal dashed segment spanning
+        *exactly* that window rather than an infinite line across the whole plot,
+        which ties the reported number to the time-bounded frame it was computed
+        over; the value is printed in the trace's unit just above the bar's right
+        end, so the number is readable without picking a point.
+
+        Falls back to a full-width :class:`~pyqtgraph.InfiniteLine` when the trace
+        carries no window to bracket (either edge outside the capture) -- there is
+        then no span to draw the segment over, but the level is still worth showing.
+        """
+        pen = pg.mkPen(color, width=1, style=QtCore.Qt.DashLine)
+        if trace.window_start_index is None or trace.window_end_index is None:
+            self._plot.addItem(pg.InfiniteLine(pos=trace.level, angle=0, pen=pen))
+            return
+        x0 = float(trace.t_ms[trace.window_start_index])
+        x1 = float(trace.t_ms[trace.window_end_index])
+        self._plot.plot([x0, x1], [trace.level, trace.level], pen=pen)
+        # Anchored bottom-right at the segment's right end, so the text sits just
+        # above the bar and ends flush with the window close rather than centring
+        # on it. Same unit the point readout uses (dBA for LIAeq).
+        unit = _unit_of(trace.y_label)
+        unit_suffix = f" {unit}" if unit else ""
+        label = pg.TextItem(f"{trace.level:.2f}{unit_suffix}", color=color, anchor=(1, 1))
+        label.setPos(x1, trace.level)
+        self._plot.addItem(label)
 
     # ---- point readout -------------------------------------------------- #
 

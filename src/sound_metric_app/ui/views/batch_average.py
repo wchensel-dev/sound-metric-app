@@ -148,8 +148,10 @@ class BatchAverageView(_View):
         split.addWidget(self.tree)
 
         self.graph = MetricGraph()
-        # Re-graph the same cell with the new weighting when the dropdown changes.
+        # Re-graph the same cell with the new weighting when the dropdown changes,
+        # or with the new signed/absolute presentation when the toggle flips.
         self.graph.smoothingChanged.connect(self._render_current)
+        self.graph.absoluteChanged.connect(self._render_current)
         split.addWidget(self.graph)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 1)
@@ -420,6 +422,7 @@ class BatchAverageView(_View):
         self._graph_token += 1
         token = self._graph_token
         smoothing = self.graph.current_smoothing()
+        absolute = self.graph.absolute_value()
         self.graph.show_message("Loading…")
 
         def done(trace) -> None:
@@ -429,7 +432,7 @@ class BatchAverageView(_View):
 
         self._run_async(
             lambda: self.controller.metric_trace(
-                shot_id, position, metric_key, smoothing=smoothing
+                shot_id, position, metric_key, smoothing=smoothing, absolute=absolute
             ),
             done,
         )
