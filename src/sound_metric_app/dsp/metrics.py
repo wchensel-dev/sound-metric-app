@@ -6,7 +6,7 @@ the pure, window-agnostic operators (the caller slices the window it wants) plus
 the onset detector. Exact definitions live in ``MATH.md``.
 
 Levels are ``20*log10(magnitude / p_ref)`` where the magnitude is a pressure (Pa)
-or a positive-phase impulse (Pa·ms) — TBAC reports both that way.
+or a positive-phase impulse (Pa·ms).
 """
 
 from __future__ import annotations
@@ -45,8 +45,7 @@ def pretrigger_floor_pa(
 def find_onset(pressure: np.ndarray, threshold_pa: float = ONSET_THRESHOLD_PA) -> int | None:
     """Index of the first sample whose *signed* pressure exceeds ``threshold_pa``.
 
-    Generalises TBAC's shot-onset detector (``find(Y>1.)``): the first
-    raw-pressure sample above the trigger the shot was recorded with. The caller
+    The first raw-pressure sample above the trigger the shot was recorded with. The caller
     supplies ``threshold_pa`` per shot (the recorder's trigger, so sub-trigger
     wind in the pre-trigger lead is skipped); it defaults to the 1 Pa
     ``ONSET_THRESHOLD_PA`` legacy fallback. Returns ``None`` when no sample
