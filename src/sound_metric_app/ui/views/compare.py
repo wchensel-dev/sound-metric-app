@@ -457,8 +457,10 @@ class CompareView(_View):
             trace = self._traces.get(series.key)
             is_anchor = index == 0
             steps = 0 if is_anchor else self._offsets.get(series.key, 0)
-            shift = f"   (slid {steps * self._NUDGE_STEP_MS:+.1f} ms)" if steps else ""
-            item = QtWidgets.QTreeWidgetItem([series.label + shift, "", "", ""])
+            slid = f"(slid {steps * self._NUDGE_STEP_MS:+.1f} ms)" if steps else ""
+            item = QtWidgets.QTreeWidgetItem(
+                [f"{series.label}   {slid}" if slid else series.label, "", "", ""]
+            )
             item.setToolTip(self._LABEL_COL, series.detail)
             if series.key in self._hidden:
                 hidden += 1
@@ -479,7 +481,11 @@ class CompareView(_View):
                     if steps
                     else trace
                 )
-                drawn.append((series.label, draw_trace, color))
+                # The graph's legend and click readout read times off the slid
+                # copy, so carry the slide in the label they print.
+                drawn.append(
+                    (f"{series.label} {slid}" if slid else series.label, draw_trace, color)
+                )
                 # Translate the fit rather than refit; the anchor moves with it.
                 curve = self._quantiles.get(series.key)
                 if curve is not None and steps:

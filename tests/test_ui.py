@@ -789,6 +789,10 @@ def test_compare_slide_shifts_a_shot_visually_without_touching_the_trace(window,
     assert float(cv._traces[second_key].t_ms[0]) == pytest.approx(true_t0)
     assert anchor_key not in cv._offsets
     assert "slid +0.1 ms" in cv.tree.topLevelItem(1).text(cv._LABEL_COL)
+    # The graph's label (legend + click readout prefix) flags the slide too, so a
+    # time read off the slid curve is never mistaken for the recorded time.
+    assert "slid +0.1 ms" in cv.graph._series[1][0]
+    assert "slid" not in cv.graph._series[0][0]
 
     _slide_button(cv, 1, "−").click()
     qtbot.waitUntil(lambda: cv._offsets.get(second_key) == 0, timeout=5000)
