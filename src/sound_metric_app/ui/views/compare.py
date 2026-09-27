@@ -9,15 +9,23 @@ each other.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ...dsp import MetricTrace
+from ...dsp.quantile import QuantileCurve, fit_quantile_curve
 from ...models import MicPosition
 from ..compare_series import CompareSeries
 from ..controller import WorkflowController
-from ..graph import MetricGraph, _color_swatch, _MUTED_INK
+from ..graph import (
+    QUANTILE_HIDDEN,
+    MetricGraph,
+    _color_swatch,
+    _MUTED_INK,
+    quantile_short_label,
+)
 from ..metric_columns import _REPORT_METRICS
 from .base import _View
 
@@ -46,24 +54,41 @@ class CompareView(_View):
     the row keeps its colour while hidden, so unhiding puts it back exactly
     where the eye left it. Remove unpins outright.
 
+    Every row but the first (the fixed anchor) has ``+`` / ``−`` / ``R`` slide
+    controls that shift its drawn curve in 0.1 ms steps to line up fronts.
+    Purely visual: the memoized trace and every reported number are untouched.
+
+    On the LIAeq graph the quantile-curve button is offered; fits run on the
+    loading worker, only once the button asks for them.
+
     Traces are memoized per pinned series for as long as the metric and the
     level weighting hold still. Pinning the ninth shot then re-reads one capture
     rather than nine, which is what makes it reasonable to redraw on every
     change. Changing either control drops the whole cache — it also bounds it,
     since only one metric x weighting generation is ever held. A mutation
-    elsewhere in the app drops it too (see :meth:`invalidate_traces`).
+    elsewhere in the app drops it too (see :meth:`invalidate_traces`). Quantile
+    fits are memoized alongside.
     """
 
     #: Pre-selected metric: the impulse curve is what these comparisons are for.
     _DEFAULT_METRIC = "impulse_pa_ms"
 
+    #: The only metric drawn as a cloud with a spread to take a quantile of.
+    _QUANTILE_METRIC = "liaeq_100ms_db"
+
     _EMPTY_MESSAGE = (
         "Pin shots here with the Compare button on a Batch average or Data bank shot row."
     )
 
-    #: Pinned-row columns: the shot (swatch + label), then its two own-row
-    #: actions. The buttons are sized to their text and the label takes the rest.
-    _LABEL_COL, _HIDE_COL, _REMOVE_COL = range(3)
+    #: Pinned-row columns: shot label, slide controls, Hide, Remove.
+    _LABEL_COL, _NUDGE_COL, _HIDE_COL, _REMOVE_COL = range(4)
+    _NUDGE_STEP_MS = 0.1
+    #: Pixels between the three slide buttons.
+    _NUDGE_SPACING = 1
+    #: Horizontal padding (px) added to a button's text width.
+    _TEXT_BTN_PAD = 12
+    _NUDGE_BTN_PAD = 8
+    _COMPACT_BTN_QSS = "QPushButton { padding: 1px 3px; }"
     #: Room the label column needs for a full series name plus its swatch. Held
     #: as the pinned pane's minimum width (plus the buttons) so the splitter
     #: cannot open on a column narrow enough to elide every row to "#7 ·…" —
@@ -81,14 +106,24 @@ class CompareView(_View):
         #: goes. Kept as keys rather than indices so removing one series cannot
         #: silently hide its neighbour.
         self._hidden: set[tuple[int, MicPosition]] = set()
+        #: Per-series slide in :attr:`_NUDGE_STEP_MS` steps; drawn copy only.
+        self._offsets: dict[tuple[int, MicPosition], int] = {}
         #: Memoized curves and load failures for the current metric x weighting,
         #: both keyed by ``CompareSeries.key``.
         self._traces: dict[tuple[int, MicPosition], MetricTrace] = {}
         self._errors: dict[tuple[int, MicPosition], str] = {}
-        #: The (metric, smoothing, absolute) the two dicts above were filled for.
-        self._cache_key: tuple[str, str, bool] | None = None
+        #: Memoized quantile fits, dropped with :attr:`_traces`. None = fit came
+        #: back empty; missing = not yet attempted.
+        self._quantiles: dict[tuple[int, MicPosition], QuantileCurve | None] = {}
+        #: The (metric, absolute) the two dicts above were filled for.
+        self._cache_key: tuple[str, bool] | None = None
         #: Bumped on each load so a slow read for a superseded overlay is dropped.
         self._graph_token = 0
+        #: ``(x_range, y_range)`` captured by :meth:`_render` and restored at the
+        #: end of :meth:`_draw`; None lets the plot autorange.
+        self._held_view: tuple[tuple[float, float], tuple[float, float]] | None = None
+        #: Set when the held view spans a metric change, to warn it may be off-scale.
+        self._notice_pending = False
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -119,7 +154,7 @@ class CompareView(_View):
         # what they do, and three columns of headings over a narrow panel would
         # cost more width than they explain.
         self.tree = QtWidgets.QTreeWidget()
-        self.tree.setColumnCount(3)
+        self.tree.setColumnCount(4)
         self.tree.setHeaderHidden(True)
         self.tree.setRootIsDecorated(False)
         header = self.tree.header()
@@ -132,15 +167,27 @@ class CompareView(_View):
         # their buttons — so the action columns are sized from what a button
         # actually needs at the current font and DPI, rather than a magic number
         # that a larger system font would spill out of.
+        # Label width plus a small pad, tighter than QPushButton's default.
+        fm = self.tree.fontMetrics()
         buttons_width = 0
+        self._btn_widths: dict[int, int] = {}
         for col, labels in (
             (self._HIDE_COL, ("Hide", "Show")),
             (self._REMOVE_COL, ("Remove",)),
         ):
-            width = max(QtWidgets.QPushButton(text).sizeHint().width() for text in labels)
+            width = max(fm.horizontalAdvance(text) for text in labels) + self._TEXT_BTN_PAD
             header.setSectionResizeMode(col, QtWidgets.QHeaderView.Fixed)
             self.tree.setColumnWidth(col, width)
+            self._btn_widths[col] = width
             buttons_width += width
+        self._nudge_btn_width = (
+            max(fm.horizontalAdvance(text) for text in ("+", "−", "R"))
+            + self._NUDGE_BTN_PAD
+        )
+        nudge_col_width = self._nudge_btn_width * 3 + self._NUDGE_SPACING * 2
+        header.setSectionResizeMode(self._NUDGE_COL, QtWidgets.QHeaderView.Fixed)
+        self.tree.setColumnWidth(self._NUDGE_COL, nudge_col_width)
+        buttons_width += nudge_col_width
         pinned_layout.addWidget(self.tree, 1)
 
         button_row = QtWidgets.QHBoxLayout()
@@ -163,12 +210,12 @@ class CompareView(_View):
         )
         split.addWidget(pinned)
 
-        self.graph = MetricGraph()
-        # Re-draw with the new weighting when the dropdown changes, or with the
-        # new signed/absolute presentation when the toggle flips; the cache is
-        # keyed by both, so this reloads rather than redrawing stale curves.
-        self.graph.smoothingChanged.connect(self._render)
+        self.graph = MetricGraph(quantile_curves=True)
+        # Re-draw with the new signed/absolute presentation when the toggle
+        # flips; the cache is keyed by it, so this reloads rather than redrawing
+        # stale curves.
         self.graph.absoluteChanged.connect(self._render)
+        self.graph.quantileModeChanged.connect(self._render)
         split.addWidget(self.graph)
         # The pinned rows are a narrow index; the graph is the view. Give it the
         # width.
@@ -214,23 +261,25 @@ class CompareView(_View):
         self._render()
 
     def clear(self) -> None:
-        """Drop every pinned series."""
+        """Drop every pinned series; the only action that does not keep the zoom."""
         if not self._series:
             return
         for series in self._series:
             self._forget(series)
         self._series = []
-        self._on_pinned_changed()
+        self._on_pinned_changed(keep_view=False)
 
     def _forget(self, series: CompareSeries) -> None:
         """Release a removed series' state, so nothing outlives its row."""
         self._traces.pop(series.key, None)
         self._errors.pop(series.key, None)
+        self._quantiles.pop(series.key, None)
         self._hidden.discard(series.key)
+        self._offsets.pop(series.key, None)
 
-    def _on_pinned_changed(self) -> None:
+    def _on_pinned_changed(self, keep_view: bool = True) -> None:
         self.main.update_compare_count(len(self._series))
-        self._render()
+        self._render(keep_view=keep_view)
 
     def invalidate_traces(self) -> None:
         """Drop the memoized curves, keeping what is pinned.
@@ -243,58 +292,82 @@ class CompareView(_View):
         """
         self._traces.clear()
         self._errors.clear()
+        self._quantiles.clear()
         self._cache_key = None
 
     def refresh(self) -> None:
         """Redraw only if the curves were invalidated; navigation leaves it alone.
 
         Nothing here is scoped to a batch or a SKU, so switching tabs has
-        nothing to re-read — and a redraw would autorange away the zoom the
-        operator had just framed, which on this tab is the whole point of the
-        visit. A dropped cache (:meth:`invalidate_traces`, i.e. an actual
-        mutation) is the one thing that forces the reload.
+        nothing to re-read. A dropped cache (:meth:`invalidate_traces`) is the
+        one thing that forces a reload, and that keeps the current zoom.
         """
         if self._cache_key is None and self._series:
             self._render()
 
     # ---- graph ------------------------------------------------------------ #
 
-    def _render(self, *_args) -> None:
-        """Load whatever the current overlay is missing, then draw it."""
+    def _render(self, *_args, keep_view: bool = True) -> None:
+        """Load whatever the current overlay is missing, then draw it.
+
+        ``keep_view`` holds the current zoom across the redraw (captured before
+        any ``Loading…`` message blanks the plot). Only Clear All passes False.
+        """
         cache_key = (
             self.metric_combo.currentData(),
-            self.graph.current_smoothing(),
             self.graph.absolute_value(),
+        )
+        prev_metric = self._cache_key[0] if self._cache_key else None
+        self._held_view = (
+            self.graph.current_view_bounds()
+            if keep_view and self.graph.is_showing_curves()
+            else None
+        )
+        self._notice_pending = (
+            self._held_view is not None
+            and prev_metric is not None
+            and prev_metric != cache_key[0]
         )
         if cache_key != self._cache_key:
             self._traces.clear()
             self._errors.clear()
+            self._quantiles.clear()
             self._cache_key = cache_key
+        # Before anything reads the mode: unavailable reads as Hidden.
+        self.graph.set_quantile_available(cache_key[0] == self._QUANTILE_METRIC)
 
         self._graph_token += 1
         token = self._graph_token
         if not self._series:
+            self._held_view = None
+            self._notice_pending = False
             self.graph.show_message(self._EMPTY_MESSAGE)
             self.status_label.setText("")
             self.tree.clear()
             return
 
-        metric_key, smoothing, absolute = cache_key
+        metric_key, absolute = cache_key
         # A hidden series is not drawn, so its capture is not worth reading --
         # unhiding is what asks for it (and finds it already cached if it was
         # hidden after being drawn).
+        visible = [s for s in self._series if s.key not in self._hidden]
         pending = [
-            s
-            for s in self._series
-            if s.key not in self._hidden
-            and s.key not in self._traces
-            and s.key not in self._errors
+            s for s in visible if s.key not in self._traces and s.key not in self._errors
         ]
-        if not pending:
+        # Fits for traces already in hand; traces loaded below are fitted after.
+        want_fits = self.graph.quantile_mode() != QUANTILE_HIDDEN
+        fit_pending = (
+            [s for s in visible if s.key in self._traces and s.key not in self._quantiles]
+            if want_fits
+            else []
+        )
+        if not pending and not fit_pending:
             self._draw()
             return
 
         self.graph.show_message("Loading…")
+        # Snapshot so the worker reads no dict this thread owns.
+        in_hand = {s.key: self._traces[s.key] for s in fit_pending}
 
         def load():
             # One worker for the whole batch of missing curves, and one failure
@@ -308,26 +381,61 @@ class CompareView(_View):
                         series.shot_id,
                         series.position,
                         metric_key,
-                        smoothing=smoothing,
                         absolute=absolute,
                     )
                 except Exception as exc:  # noqa: BLE001 — shown against its row
                     results.append((series, None, str(exc)))
                 else:
                     results.append((series, trace, None))
-            return results
+            # Fits take a few hundred ms each; keep them off the UI thread.
+            fits = {}
+            if want_fits:
+                for series in fit_pending:
+                    fits[series.key] = self._fit_quantile(
+                        in_hand[series.key], series, metric_key
+                    )
+                for series, trace, _error in results:
+                    if trace is not None:
+                        fits[series.key] = self._fit_quantile(trace, series, metric_key)
+            return results, fits
 
-        def done(results) -> None:
+        def done(payload) -> None:
             if token != self._graph_token:
                 return  # a newer overlay superseded this load; drop it
+            results, fits = payload
             for series, trace, error in results:
                 if trace is None:
                     self._errors[series.key] = error
                 else:
                     self._traces[series.key] = trace
+            self._quantiles.update(fits)
             self._draw()
 
         self._run_async(load, done)
+
+    def _fit_quantile(
+        self, trace: MetricTrace, series: CompareSeries, metric_key: str
+    ) -> QuantileCurve | None:
+        """Fit one series' quantile curve on the worker; None on any failure.
+
+        Anchored at the window start (the detected onset for this metric).
+        """
+        anchor = (
+            float(trace.t_ms[trace.window_start_index])
+            if trace.window_start_index is not None
+            else None
+        )
+        try:
+            return fit_quantile_curve(
+                trace.t_ms,
+                trace.values,
+                anchor_ms=anchor,
+                y_label=trace.y_label,
+                source_metric=metric_key,
+                label=series.label,
+            )
+        except Exception:  # noqa: BLE001 — an absent aid, never a broken overlay
+            return None
 
     def _draw(self) -> None:
         """Rebuild the pinned rows and the overlay from the memoized traces.
@@ -339,12 +447,19 @@ class CompareView(_View):
         """
         self.tree.clear()
         drawn: list[tuple[str, MetricTrace, tuple[int, int, int]]] = []
+        # Parallel to ``drawn``; the graph pairs them by position.
+        curves: list[QuantileCurve | None] = []
         hidden = 0
         unavailable = 0
+        without_curve = 0
+        quantile_on = self.graph.quantile_mode() != QUANTILE_HIDDEN
         for index, series in enumerate(self._series):
             color = MetricGraph.series_color(index)
             trace = self._traces.get(series.key)
-            item = QtWidgets.QTreeWidgetItem([series.label, "", ""])
+            is_anchor = index == 0
+            steps = 0 if is_anchor else self._offsets.get(series.key, 0)
+            shift = f"   (slid {steps * self._NUDGE_STEP_MS:+.1f} ms)" if steps else ""
+            item = QtWidgets.QTreeWidgetItem([series.label + shift, "", "", ""])
             item.setToolTip(self._LABEL_COL, series.detail)
             if series.key in self._hidden:
                 hidden += 1
@@ -359,28 +474,72 @@ class CompareView(_View):
                 item.setToolTip(self._LABEL_COL, f"{series.detail}\n\n{error}")
             else:
                 item.setIcon(self._LABEL_COL, _color_swatch(color))
-                drawn.append((series.label, trace, color))
+                # Slide the drawn copy only; the memoized trace is untouched.
+                draw_trace = (
+                    replace(trace, t_ms=trace.t_ms + steps * self._NUDGE_STEP_MS)
+                    if steps
+                    else trace
+                )
+                drawn.append((series.label, draw_trace, color))
+                # Translate the fit rather than refit; the anchor moves with it.
+                curve = self._quantiles.get(series.key)
+                if curve is not None and steps:
+                    offset_ms = steps * self._NUDGE_STEP_MS
+                    curve = replace(
+                        curve,
+                        t_ms=curve.t_ms + offset_ms,
+                        anchor_ms=curve.anchor_ms + offset_ms,
+                    )
+                curves.append(curve)
+                if curve is None and quantile_on:
+                    without_curve += 1
             self.tree.addTopLevelItem(item)
-            self._add_row_buttons(item, series)
+            self._add_row_buttons(item, series, is_anchor)
 
         metric_label = self.metric_combo.currentText()
-        self.graph.show_traces(drawn, f"{metric_label} — {len(drawn)} shot(s) overlaid")
+        self.graph.show_traces(
+            drawn,
+            f"{metric_label} — {len(drawn)} shot(s) overlaid",
+            quantile_curves=curves,
+        )
+        # show_traces autoranges; restore the held zoom.
+        if self._held_view is not None:
+            self.graph.set_view(*self._held_view)
+            self._held_view = None
+            if self._notice_pending:
+                self.graph.show_view_notice(
+                    "Metric changed — the previous zoom was kept, so this curve "
+                    "may sit off-scale. Use Auto Frame to refit."
+                )
+        self._notice_pending = False
         parts = [f"{len(drawn)} of {len(self._series)} drawn"]
         if hidden:
             parts.append(f"{hidden} hidden")
         if unavailable:
             parts.append(f"{unavailable} unavailable (hover for why)")
+        if without_curve:
+            parts.append(
+                f"{without_curve} without a {quantile_short_label()} curve"
+            )
         self.status_label.setText("   —   ".join(parts))
 
     def _add_row_buttons(
-        self, item: QtWidgets.QTreeWidgetItem, series: CompareSeries
+        self,
+        item: QtWidgets.QTreeWidgetItem,
+        series: CompareSeries,
+        is_anchor: bool,
     ) -> None:
-        """Put one pinned row's own Hide and Remove buttons on it.
+        """Put one pinned row's slide controls (if any), Hide, and Remove on it.
 
-        Both handlers rebuild this very tree, which would free the button Qt is
-        still emitting the click for, so both are deferred a turn of the event
-        loop (see :meth:`_View._defer`).
+        Every handler rebuilds this very tree, which would free the button Qt is
+        still emitting the click for, so each is deferred a turn of the event
+        loop (see :meth:`_View._defer`). The anchor row gets no slide cell.
         """
+        if not is_anchor:
+            self.tree.setItemWidget(
+                item, self._NUDGE_COL, self._make_nudge_widget(series)
+            )
+
         is_hidden = series.key in self._hidden
         hide_btn = QtWidgets.QPushButton("Show" if is_hidden else "Hide")
         hide_btn.setToolTip(
@@ -389,9 +548,67 @@ class CompareView(_View):
             else "Take this shot's curve off the graph, keeping it pinned here."
         )
         hide_btn.clicked.connect(lambda: self._defer(lambda: self._toggle_hidden(series)))
+        hide_btn.setStyleSheet(self._COMPACT_BTN_QSS)
+        hide_btn.setFixedWidth(self._btn_widths[self._HIDE_COL])
         self.tree.setItemWidget(item, self._HIDE_COL, hide_btn)
 
         remove_btn = QtWidgets.QPushButton("Remove")
         remove_btn.setToolTip("Unpin this shot from the Compare tab.")
         remove_btn.clicked.connect(lambda: self._defer(lambda: self._remove(series)))
+        remove_btn.setStyleSheet(self._COMPACT_BTN_QSS)
+        remove_btn.setFixedWidth(self._btn_widths[self._REMOVE_COL])
         self.tree.setItemWidget(item, self._REMOVE_COL, remove_btn)
+
+    def _make_nudge_widget(self, series: CompareSeries) -> QtWidgets.QWidget:
+        """Build one row's ``+`` / ``−`` / ``R`` slide buttons into a cell."""
+        container = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(self._NUDGE_SPACING)
+        step = self._NUDGE_STEP_MS
+        for text, tip, action in (
+            (
+                "+",
+                f"Slide this shot {step:.1f} ms later (right) to line it up with the first shot.",
+                lambda: self._nudge(series, +1),
+            ),
+            (
+                "−",
+                f"Slide this shot {step:.1f} ms earlier (left) to line it up with the first shot.",
+                lambda: self._nudge(series, -1),
+            ),
+            (
+                "R",
+                "Reset this shot to its true recorded time (no slide).",
+                lambda: self._reset_offset(series),
+            ),
+        ):
+            btn = QtWidgets.QPushButton(text)
+            btn.setToolTip(tip)
+            btn.setStyleSheet(self._COMPACT_BTN_QSS)
+            btn.setFixedWidth(self._nudge_btn_width)
+            # Bind `action` now rather than capturing the loop variable.
+            btn.clicked.connect(lambda _=False, a=action: self._defer(a))
+            row.addWidget(btn)
+        return container
+
+    def _nudge(self, series: CompareSeries, delta_steps: int) -> None:
+        """Slide one shot's curve by ``delta_steps`` visual steps and redraw."""
+        self._offsets[series.key] = self._offsets.get(series.key, 0) + delta_steps
+        self._redraw_keeping_view()
+
+    def _reset_offset(self, series: CompareSeries) -> None:
+        """Return one shot's curve to its true time; a no-op if it never moved."""
+        if self._offsets.pop(series.key, 0):
+            self._redraw_keeping_view()
+
+    def _redraw_keeping_view(self) -> None:
+        """Redraw after a slide from cached traces, holding the current zoom."""
+        if not self._series:
+            return
+        x_range, y_range = self.graph.current_view_bounds()
+        # Pinned below; drop any view held by an in-flight render.
+        self._held_view = None
+        self._notice_pending = False
+        self._draw()
+        self.graph.set_view(x_range, y_range)

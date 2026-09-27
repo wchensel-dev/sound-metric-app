@@ -1,12 +1,9 @@
-"""DSP layer: pure, testable acoustic metric functions and the processor."""
+"""DSP layer: pure, testable acoustic metric functions and the processor.
 
-from .graphing import (
-    SMOOTHING_FAST,
-    SMOOTHING_INSTANT,
-    SMOOTHING_SLOW,
-    MetricTrace,
-    build_metric_trace,
-)
+:mod:`.quantile` is a visual aid only and feeds no reported number.
+"""
+
+from .graphing import MetricTrace, build_metric_trace
 from .metrics import (
     find_onset,
     pa_to_db,
@@ -18,11 +15,21 @@ from .metrics import (
     window_samples,
 )
 from .processor import MetricsProcessor
+from .quantile import (
+    DEFAULT_QUANTILE,
+    QUANTILE_METHOD,
+    QuantileCurve,
+    fit_quantile_curve,
+)
 from .weighting import a_weighting_sos, apply_a_weighting
 
 __all__ = [
     "a_weighting_sos",
     "apply_a_weighting",
+    "DEFAULT_QUANTILE",
+    "QUANTILE_METHOD",
+    "QuantileCurve",
+    "fit_quantile_curve",
     "find_onset",
     "window_samples",
     "pa_to_db",
@@ -34,7 +41,4 @@ __all__ = [
     "MetricsProcessor",
     "MetricTrace",
     "build_metric_trace",
-    "SMOOTHING_INSTANT",
-    "SMOOTHING_FAST",
-    "SMOOTHING_SLOW",
 ]

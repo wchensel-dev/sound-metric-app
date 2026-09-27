@@ -1,7 +1,7 @@
 """Build the per-metric time series a Report graph draws from a raw frame.
 
 Kept Qt-free (numpy only) so the trace math is unit-testable without a GUI, and
-so the heavy read + A-weight + smooth work can run on a worker thread. Each of
+so the heavy read + A-weight work can run on a worker thread. Each of
 the report metrics maps to one curve over the capture's time axis, plus a
 single annotation that explains where the reported number comes from:
 
@@ -22,13 +22,9 @@ therefore changes nothing. ``window_start_index`` and ``window_end_index`` brack
 that window, separating the samples the reported number came from from the ones
 drawn for context only. Widening the *drawn* span never widens a *computed* one.
 
-Each SPL-over-time metric can be drawn two ways, chosen by the caller's
-``smoothing`` argument: the raw per-sample instantaneous level
-(:data:`SMOOTHING_INSTANT`), or an exponentially time-weighted RMS envelope at
-the standard sound-level-meter Fast/Slow time constants (:data:`SMOOTHING_FAST`,
-:data:`SMOOTHING_SLOW`). Instantaneous SPL swings from the 0 dB floor to the
-cycle peak on every acoustic cycle, so it reads as a point cloud; the
-time-weighted envelope is the continuous line a level meter shows.
+Each SPL-over-time metric is drawn as the raw per-sample instantaneous level.
+It swings from the 0 dB floor to the cycle peak on every acoustic cycle, so it
+reads as a point cloud.
 
 The full sample count (thousands of points) is returned unthinned — the widget,
 not this layer, decides how to render density.
@@ -39,15 +35,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy import signal
 
 from ..config import (
-    FAST_TIME_S,
     LEQ_SEARCH_MS,
     LIAEQ_WINDOW_MS,
     P_REF,
     PEAK_WINDOW_MS,
-    SLOW_TIME_S,
 )
 from ..models import Frame
 from .metrics import (
@@ -61,18 +54,6 @@ from .metrics import (
     window_samples,
 )
 from .weighting import apply_a_weighting
-
-#: SPL-over-time rendering modes for :func:`build_metric_trace`.
-SMOOTHING_INSTANT = "instant"  # raw per-sample level, no time weighting
-SMOOTHING_FAST = "fast"  # 125 ms exponential RMS (SLM "Fast")
-SMOOTHING_SLOW = "slow"  # 1 s exponential RMS (SLM "Slow")
-
-#: Time constant (seconds) for each exponentially time-weighted mode.
-_TIME_WEIGHT_TAU = {SMOOTHING_FAST: FAST_TIME_S, SMOOTHING_SLOW: SLOW_TIME_S}
-
-#: Every accepted ``smoothing`` value.
-_SMOOTHING_MODES = (SMOOTHING_INSTANT, SMOOTHING_FAST, SMOOTHING_SLOW)
-
 
 @dataclass
 class MetricTrace:
@@ -114,7 +95,7 @@ class MetricTrace:
     title: str
     peak_index: int | None = None  # sample index for a vertical peak marker
     level: float | None = None  # y for a horizontal reference line
-    connected: bool = False  # draw as a joined line (envelope) vs a point cloud
+    connected: bool = False  # draw as a joined line (curve) vs a point cloud
     window_start_index: int | None = None  # sample index where the window opens
     window_end_index: int | None = None  # last sample index inside this metric's window
     onset_detected: bool = True  # False when the window fell back to the frame start
@@ -152,36 +133,6 @@ def _signed_spl_db(pressure: np.ndarray) -> np.ndarray:
     """
     mag = np.maximum(np.abs(pressure), P_REF)
     return np.sign(pressure) * 20.0 * np.log10(mag / P_REF)
-
-
-def _exp_rms_spl_db(pressure: np.ndarray, fs: float, tau_s: float) -> np.ndarray:
-    """Exponentially time-weighted RMS level (dB), sound-level-meter Fast/Slow style.
-
-    Squared pressure is passed through a single-pole exponential average with
-    time constant ``tau_s`` (Fast = 125 ms, Slow = 1 s), then converted to dB.
-    This is the integration a level meter applies: it turns the per-cycle swing
-    of the raw waveform into a continuous level envelope. The mean-square is
-    floored at ``P_REF**2`` (0 dB) so quiet stretches never fall to ``-inf``.
-    """
-    a = float(np.exp(-1.0 / (fs * tau_s)))
-    sq = pressure**2
-    # y[n] = a*y[n-1] + (1-a)*x[n]: a first-order IIR low-pass on the power.
-    mean_sq = signal.lfilter([1.0 - a], [1.0, -a], sq)
-    mean_sq = np.maximum(mean_sq, P_REF**2)
-    return 10.0 * np.log10(mean_sq / P_REF**2)
-
-
-def _exp_rms_pa(pressure: np.ndarray, fs: float, tau_s: float) -> np.ndarray:
-    """Exponentially time-weighted RMS pressure in Pascals (linear, not dB).
-
-    The Pascal-domain analogue of :func:`_exp_rms_spl_db`: the same single-pole
-    average over squared pressure, but returned as the square-root RMS envelope
-    in Pa rather than converted to a dB level. Used for the raw ``peak_pa`` trace
-    so its Fast/Slow curve stays in the same units as the instantaneous one.
-    """
-    a = float(np.exp(-1.0 / (fs * tau_s)))
-    mean_sq = signal.lfilter([1.0 - a], [1.0, -a], pressure**2)
-    return np.sqrt(np.maximum(mean_sq, 0.0))
 
 
 def _onset_window(fs: float, onset: int | None, window_ms: float) -> tuple[int, int]:
@@ -230,7 +181,6 @@ def _signed_peak_index(signal: np.ndarray, start: int, stop: int) -> int | None:
 def build_metric_trace(
     frame: Frame,
     metric_key: str,
-    smoothing: str = SMOOTHING_INSTANT,
     absolute: bool = False,
 ) -> MetricTrace:
     """Turn a raw :class:`Frame` into the :class:`MetricTrace` for ``metric_key``.
@@ -238,13 +188,6 @@ def build_metric_trace(
     ``metric_key`` is one of the report's stored metric columns: ``peak_pa``,
     ``peak_db``, ``peak_dba``, ``peak_impulse_db``, ``leq10ms_db``,
     ``liaeq_100ms_db``.
-
-    ``smoothing`` selects how an SPL-over-time curve is drawn — the raw per-sample
-    level (:data:`SMOOTHING_INSTANT`) or a Fast/Slow time-weighted RMS envelope
-    (:data:`SMOOTHING_FAST` / :data:`SMOOTHING_SLOW`). It shapes only that curve;
-    the reported scalar (the peak sample, the LIAeq level) is unchanged, so the
-    marker and reference line stay put. The Impulse and Peak-10 ms-Leq traces
-    carry their own dedicated curves and ignore ``smoothing``.
 
     ``absolute`` chooses between the two presentations of the instantaneous
     peak curves (``peak_pa`` / ``peak_db`` / ``peak_dba``):
@@ -255,21 +198,18 @@ def build_metric_trace(
     * ``True`` draws the rectified *magnitude* — ``|p|`` / ``dB(|p|)`` — so every
       excursion, crest or trough, reads as a positive level.
 
-    Like ``smoothing``, it changes only the drawn curve: ``peak_index`` still
-    marks the reported signed peak and its value is untouched either way. It is a
-    no-op for the Fast/Slow envelopes (an RMS is already non-negative) and for the
+    It changes only the drawn curve: ``peak_index`` still marks the reported
+    signed peak and its value is untouched either way. It is a no-op for the
     inherently non-negative metrics (Impulse, Leq, LIAeq).
     """
-    if smoothing not in _SMOOTHING_MODES:
-        raise ValueError(f"Unknown smoothing mode: {smoothing!r}")
 
     p = np.asarray(frame.samples, dtype=float)
     fs = float(frame.sample_rate)
     t_ms = np.arange(p.shape[0]) / fs * 1000.0
     onset = find_onset(p)
 
-    def spl(sig: np.ndarray, signed: bool = False) -> tuple[np.ndarray, bool]:
-        """SPL-over-time values for ``sig`` plus whether to join them as a line.
+    def spl(sig: np.ndarray, signed: bool = False) -> np.ndarray:
+        """Instantaneous SPL-over-time values for ``sig``.
 
         ``signed`` marks a peak metric, whose instantaneous curve carries the
         sample's sign by default and rectifies to magnitude only when the caller
@@ -277,26 +217,19 @@ def build_metric_trace(
         ``False`` and always draw the rectified magnitude, so ``absolute`` is a
         no-op for them as documented.
         """
-        if smoothing == SMOOTHING_INSTANT:
-            if signed and not absolute:
-                return _signed_spl_db(sig), False
-            return _spl_db(sig), False
-        return _exp_rms_spl_db(sig, fs, _TIME_WEIGHT_TAU[smoothing]), True
+        if signed and not absolute:
+            return _signed_spl_db(sig)
+        return _spl_db(sig)
 
     if metric_key == "peak_pa":
-        # Raw pressure, unconverted. Instantaneous is the literal waveform (Pa),
-        # signed unless the caller asked for its magnitude; Fast/Slow is the RMS
-        # pressure envelope in the same units (already non-negative).
+        # Raw pressure, unconverted: the literal waveform (Pa), signed unless the
+        # caller asked for its magnitude.
         start, stop = _onset_window(fs, onset, PEAK_WINDOW_MS)
         w_start, w_end = _window_bounds(start, stop, p.shape[0])
-        if smoothing == SMOOTHING_INSTANT:
-            values, connected = (np.abs(p) if absolute else p), False
-        else:
-            values = _exp_rms_pa(p, fs, _TIME_WEIGHT_TAU[smoothing])
-            connected = True
+        values = np.abs(p) if absolute else p
         return MetricTrace(
             t_ms, values, "Pressure (Pa)", "Peak Pa",
-            peak_index=_signed_peak_index(p, start, stop), connected=connected,
+            peak_index=_signed_peak_index(p, start, stop),
             window_start_index=w_start, window_end_index=w_end,
             onset_detected=onset is not None,
         )
@@ -304,10 +237,9 @@ def build_metric_trace(
     if metric_key == "peak_db":
         start, stop = _onset_window(fs, onset, PEAK_WINDOW_MS)
         w_start, w_end = _window_bounds(start, stop, p.shape[0])
-        values, connected = spl(p, signed=True)
         return MetricTrace(
-            t_ms, values, "SPL (dB)", "Peak dB",
-            peak_index=_signed_peak_index(p, start, stop), connected=connected,
+            t_ms, spl(p, signed=True), "SPL (dB)", "Peak dB",
+            peak_index=_signed_peak_index(p, start, stop),
             window_start_index=w_start, window_end_index=w_end,
             onset_detected=onset is not None,
         )
@@ -316,10 +248,9 @@ def build_metric_trace(
         p_a = apply_a_weighting(p, fs)
         start, stop = _onset_window(fs, onset, PEAK_WINDOW_MS)
         w_start, w_end = _window_bounds(start, stop, p.shape[0])
-        values, connected = spl(p_a, signed=True)
         return MetricTrace(
-            t_ms, values, "SPL (dBA)", "Peak dBA",
-            peak_index=_signed_peak_index(p_a, start, stop), connected=connected,
+            t_ms, spl(p_a, signed=True), "SPL (dBA)", "Peak dBA",
+            peak_index=_signed_peak_index(p_a, start, stop),
             window_start_index=w_start, window_end_index=w_end,
             onset_detected=onset is not None,
         )
@@ -380,10 +311,9 @@ def build_metric_trace(
         p_a = apply_a_weighting(p, fs)
         start, stop = _onset_window(fs, onset, LIAEQ_WINDOW_MS)
         w_start, w_end = _window_bounds(start, stop, p.shape[0])
-        values, connected = spl(p_a)
         return MetricTrace(
-            t_ms, values, "SPL (dBA)", "LIAeq,100ms",
-            level=pa_to_db(rms_pa(p_a[start:stop])), connected=connected,
+            t_ms, spl(p_a), "SPL (dBA)", "LIAeq,100ms",
+            level=pa_to_db(rms_pa(p_a[start:stop])),
             window_start_index=w_start, window_end_index=w_end,
             onset_detected=onset is not None,
         )

@@ -6,12 +6,7 @@ import numpy as np
 import pytest
 
 from sound_metric_app.config import LEQ_SEARCH_MS, LIAEQ_WINDOW_MS, PEAK_WINDOW_MS
-from sound_metric_app.dsp import (
-    SMOOTHING_FAST,
-    SMOOTHING_INSTANT,
-    SMOOTHING_SLOW,
-    build_metric_trace,
-)
+from sound_metric_app.dsp import build_metric_trace
 from sound_metric_app.dsp.metrics import (
     find_onset,
     leq_window_samples,
@@ -88,15 +83,6 @@ def test_absolute_rectifies_the_peak_curves_without_moving_the_marker():
         assert np.allclose(magnitude.values, np.abs(signed.values))
 
 
-def test_absolute_is_a_noop_for_the_time_weighted_envelope():
-    # A Fast/Slow curve is an RMS envelope, already non-negative, so the toggle
-    # cannot change it.
-    frame = _shot_frame()
-    signed = build_metric_trace(frame, "peak_db", SMOOTHING_FAST)
-    magnitude = build_metric_trace(frame, "peak_db", SMOOTHING_FAST, absolute=True)
-    np.testing.assert_array_equal(signed.values, magnitude.values)
-
-
 def test_peak_dba_uses_a_weighted_signal():
     frame = _shot_frame()
     trace = build_metric_trace(frame, "peak_dba")
@@ -115,13 +101,6 @@ def test_peak_pa_trace_is_the_raw_pressure_waveform():
     assert np.array_equal(trace.values, np.asarray(frame.samples, dtype=float))
     assert trace.peak_index == start + int(np.argmax(frame.samples[start:stop]))
     assert trace.level is None
-
-
-def test_peak_pa_time_weighted_is_a_connected_pascal_envelope():
-    trace = build_metric_trace(_shot_frame(), "peak_pa", SMOOTHING_FAST)
-    assert trace.y_label == "Pressure (Pa)"
-    assert trace.connected is True
-    assert np.all(trace.values >= 0.0)
 
 
 def test_impulse_trace_is_the_cumulative_integral_curve():
@@ -298,37 +277,8 @@ def test_liaeq_instant_curve_is_magnitude_and_ignores_absolute():
     np.testing.assert_array_equal(default.values, magnitude.values)
 
 
-def test_default_smoothing_is_instantaneous_point_cloud():
+def test_peak_db_is_an_instantaneous_point_cloud():
     assert build_metric_trace(_shot_frame(), "peak_db").connected is False
-
-
-@pytest.mark.parametrize("smoothing", [SMOOTHING_FAST, SMOOTHING_SLOW])
-def test_time_weighted_trace_is_a_connected_smoother_curve(smoothing):
-    frame = _shot_frame()
-    instant = build_metric_trace(frame, "peak_db", SMOOTHING_INSTANT)
-    weighted = build_metric_trace(frame, "peak_db", smoothing)
-    assert weighted.connected is True
-    assert weighted.values.shape == instant.values.shape
-    assert np.nanmax(np.abs(np.diff(weighted.values))) < np.nanmax(
-        np.abs(np.diff(instant.values))
-    )
-    assert weighted.peak_index == instant.peak_index
-
-
-def test_liaeq_smoothing_keeps_its_level_line():
-    frame = _shot_frame()
-    trace = build_metric_trace(frame, "liaeq_100ms_db", SMOOTHING_FAST)
-    onset = find_onset(frame.samples) or 0
-    p_a = apply_a_weighting(frame.samples, FS)
-    n = window_samples(FS, LIAEQ_WINDOW_MS)
-    assert trace.connected is True
-    assert trace.peak_index is None
-    assert trace.level == pytest.approx(pa_to_db(rms_pa(p_a[onset : onset + n])))
-
-
-def test_unknown_smoothing_raises():
-    with pytest.raises(ValueError):
-        build_metric_trace(_shot_frame(), "peak_db", "medium")
 
 
 def test_unknown_metric_key_raises():

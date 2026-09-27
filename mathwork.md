@@ -11,7 +11,7 @@ modification, not part of the formal metric definitions.
 ## Preamble
 
 The metric definitions follow Thunder Beast Arms Corp's (TBAC) `process_string.m`
-reference, with the deliberate divergences noted in §12.
+reference, with the deliberate divergences noted in §11.
 
 ## §2. Assumptions
 
@@ -57,17 +57,21 @@ discipline of §2.8 (one shot, no comparable transient within `W` of onset) is t
 frame, so a violation of §2.8 shows up as a silently high impulse rather than a
 warning — inspect the Report graph's `Q` trace (which marks the peak) when an
 impulse reads implausibly high. TBAC clips to a short window instead for exactly
-this reason in a reverberant space (§12). A NaN in the input propagates so
+this reason in a reverberant space (§11). A NaN in the input propagates so
 contaminated data surfaces.
 
 ## §7. LIAeq,100ms
 
-This is our divergence from TBAC (§12): where they take a peak 10 ms-Leq (§8.1)
+This is our divergence from TBAC (§11): where they take a peak 10 ms-Leq (§8.1)
 to reject reflections in a reverberant space, we integrate the full 100 ms of the
 free-field decay. Both are reported so shots validate against TBAC and against
 our model on the same capture.
 
 ## §8. Peak Leq(10 ms)
+
+This is the exact-normalization form of the FFT-based `Leq_fast` running-RMS
+routine (Tougaard & Beedholm, 2018); the two normalizations differ by
+~3 × 10⁻⁵ dB.
 
 Unlike `Leq_fast`'s FFT (circular) convolution, `r` is strictly causal, so its
 first `L` samples ramp up from zero state instead of wrapping the array tail; the
@@ -89,13 +93,7 @@ This matches TBAC, which accumulates linear Pa (and Pa·ms) across shots, divide
 by the shot count, and converts to dB at the end. It is **not** a mean of the dB
 values (which, by Jensen, would read lower); the log is applied once, to the mean.
 
-## §11. Fast/Slow display envelope
-
-This is the
-exact-normalization form of the FFT-based `Leq_fast` running-RMS routine
-(Tougaard & Beedholm, 2018); the two normalizations differ by ~3 × 10⁻⁵ dB.
-
-## §12. Divergences from TBAC
+## §11. Divergences from TBAC
 
 | Axis | TBAC `process_string.m` | This app | Kind |
 |---|---|---|---|

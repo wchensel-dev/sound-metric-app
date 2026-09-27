@@ -20,8 +20,6 @@ and `src/sound_metric_app/config.py`.
 | `τ_L` | Leq rectangular integration time, s | 0.010 | `LEQ_TAU_S` |
 | `W_Leq` | Peak-10 ms-Leq search window, ms | 25 | `LEQ_SEARCH_MS` |
 | `W_LIAeq` | LIAeq energy window, ms | 100 | `LIAEQ_WINDOW_MS` |
-| `τ_F` | Fast display time constant, s | 0.125 | `FAST_TIME_S` |
-| `τ_S` | Slow display time constant, s | 1.0 | `SLOW_TIME_S` |
 | `f1..f4` | A-weighting pole frequencies, Hz | 20.598997, 107.65265, 737.86223, 12194.217 | `weighting._F1.._F4` |
 
 All decibel values are sound pressure levels (SPL) referenced to `p_ref`.
@@ -204,17 +202,30 @@ skips shots whose value is missing (an unpopulated row after a migration, or a N
 metric stored as NULL); in normal fully-populated operation that count equals `n`,
 so the two coincide.
 
-## 11. Fast/Slow display envelope — `graphing._exp_rms_spl_db`
+## 11. Quantile regression curve — `dsp.quantile.fit_quantile_curve`
 
-Display-only smoothing for the SPL-over-time report graphs; it does **not** feed
-any stored metric. Squared pressure is passed through a one-pole exponential
-average (IEC 61672 Fast `τ_F = 125 ms` / Slow `τ_S = 1 s`), then converted to dB:
+A **visual aid only** on the Compare tab; it feeds no reported number. Given the
+per-sample points `(t_i, y_i)` of one plotted series' metric trace (e.g. an LIAeq
+dBA trace), it draws a smooth curve tracing the cloud's `τ` percentile
+(default `τ = 0.95`) at each instant — not a peak-hold or envelope.
+
+**Estimator:** linear quantile regression (Koenker & Bassett 1978) on a cubic
+B-spline basis `x(t)`:
 ```
-a       = exp( −1 / (fs · τ) )              τ ∈ {τ_F, τ_S}
-y[n]    = a · y[n−1] + (1 − a) · x_sig[n]²
-L[n]    = 10 · log10( max(y[n], p_ref²) / p_ref² )        [dB]
+ρ_τ(r) = r · (τ − 1{r < 0})
+β̂      = argmin_β Σ_i ρ_τ( y_i − x(t_i)ᵀβ )
+Q_τ(t) = x(t)ᵀβ̂
 ```
-The mean square is floored at `p_ref²` (0 dB) so silent stretches read as a clean
-0 dB floor instead of −∞. The A-weighted trace passes `x_sig = p_A`; the
-unweighted trace passes `x_sig = p`. A Pascal-domain variant (`_exp_rms_pa`)
-returns `sqrt(max(y, 0))` in Pa without the dB conversion.
+The asymmetric "check" loss `ρ_τ` penalises points above the curve by `τ` and
+below by `1 − τ`, so at the optimum ~`τ` of the points in any neighbourhood sit
+below the curve.
+
+**Knot placement:** uniform in a log-warped time centred on the onset `t₀`,
+`u(t) = sign(t − t₀) · ln(1 + |t − t₀| / ε)` (`ε = 0.05 ms`), so knots are dense
+around the pressure step and sparse down the decay. The coefficient count scales
+with the data (~1 per 14 samples), capped so every knot span holds enough samples
+to estimate the quantile.
+
+**Solve / guards:** iteratively reweighted least squares from an OLS start; the
+lowest-loss iterate is kept. Fitted values outside `[min y, max y]` (spline
+ringing) are clamped. Separately fitted quantiles are not guaranteed not to cross.

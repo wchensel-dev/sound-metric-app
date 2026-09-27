@@ -9,6 +9,7 @@ Run headless:  QT_QPA_PLATFORM=offscreen pytest tests/test_ui.py
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -665,6 +666,17 @@ def _row_button(cv, row: int, column: int):
     return cv.tree.itemWidget(cv.tree.topLevelItem(row), column)
 
 
+def _slide_button(cv, row: int, symbol: str):
+    """One slide button (``+``, ``−``, ``R``) from a Compare row's nudge cell."""
+    cell = cv.tree.itemWidget(cv.tree.topLevelItem(row), cv._NUDGE_COL)
+    if cell is None:
+        return None
+    for btn in cell.findChildren(QtWidgets.QPushButton):
+        if btn.text() == symbol:
+            return btn
+    return None
+
+
 def _loaded_report(window, qtbot):
     """Mark + include the fixture shots and return the loaded Batch average view."""
     _mark_all_shots(window, qtbot)
@@ -751,6 +763,75 @@ def test_compare_removes_and_clears_pinned_shots(window, qtbot):
     assert window.tabs.tabText(compare_tab) == "Compare"
 
 
+def test_compare_slide_shifts_a_shot_visually_without_touching_the_trace(window, qtbot):
+    rv = _loaded_report(window, qtbot)
+    cv = window.compare_view
+    for button in _frp_compare_buttons(rv):
+        button.click()
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 2, timeout=5000)
+
+    # The anchor row has no slide cell.
+    assert cv.tree.itemWidget(cv.tree.topLevelItem(0), cv._NUDGE_COL) is None
+    assert _slide_button(cv, 1, "+") is not None
+    assert _slide_button(cv, 1, "−") is not None
+    assert _slide_button(cv, 1, "R") is not None
+
+    second_key = cv._series[1].key
+    anchor_key = cv._series[0].key
+    true_t0 = float(cv._traces[second_key].t_ms[0])
+    assert float(cv.graph._series[1][1].t_ms[0]) == pytest.approx(true_t0)
+
+    _slide_button(cv, 1, "+").click()  # deferred a turn of the event loop
+    qtbot.waitUntil(lambda: cv._offsets.get(second_key) == 1, timeout=5000)
+
+    assert float(cv.graph._series[1][1].t_ms[0]) == pytest.approx(true_t0 + 0.1)
+    # The memoized trace did not move.
+    assert float(cv._traces[second_key].t_ms[0]) == pytest.approx(true_t0)
+    assert anchor_key not in cv._offsets
+    assert "slid +0.1 ms" in cv.tree.topLevelItem(1).text(cv._LABEL_COL)
+
+    _slide_button(cv, 1, "−").click()
+    qtbot.waitUntil(lambda: cv._offsets.get(second_key) == 0, timeout=5000)
+    assert float(cv.graph._series[1][1].t_ms[0]) == pytest.approx(true_t0)
+
+    _slide_button(cv, 1, "+").click()
+    qtbot.waitUntil(lambda: cv._offsets.get(second_key) == 1, timeout=5000)
+    _slide_button(cv, 1, "R").click()
+    qtbot.waitUntil(lambda: second_key not in cv._offsets, timeout=5000)
+    assert float(cv.graph._series[1][1].t_ms[0]) == pytest.approx(true_t0)
+
+
+def test_compare_slide_holds_the_current_zoom(window, qtbot):
+    rv = _loaded_report(window, qtbot)
+    cv = window.compare_view
+    for button in _frp_compare_buttons(rv):
+        button.click()
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 2, timeout=5000)
+    window.tabs.setCurrentWidget(cv)
+    cv.graph._framing._frame_onset_btns[0].click()
+    framed_x = cv.graph._plot.getViewBox().viewRange()[0]
+
+    _slide_button(cv, 1, "+").click()
+    qtbot.waitUntil(lambda: cv._offsets.get(cv._series[1].key) == 1, timeout=5000)
+    assert cv.graph._plot.getViewBox().viewRange()[0] == pytest.approx(framed_x)
+
+
+def test_compare_slide_is_forgotten_when_its_shot_is_removed(window, qtbot):
+    rv = _loaded_report(window, qtbot)
+    cv = window.compare_view
+    for button in _frp_compare_buttons(rv):
+        button.click()
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 2, timeout=5000)
+    second_key = cv._series[1].key
+
+    _slide_button(cv, 1, "+").click()
+    qtbot.waitUntil(lambda: cv._offsets.get(second_key) == 1, timeout=5000)
+
+    _row_button(cv, 1, cv._REMOVE_COL).click()
+    qtbot.waitUntil(lambda: len(cv._series) == 1, timeout=5000)
+    assert second_key not in cv._offsets
+
+
 def test_compare_row_gives_its_width_to_the_label_not_the_buttons(window, qtbot):
     # A tree header stretches its *last* section by default, which handed the
     # spare width to the Remove column and elided every row down to "#7 ·…".
@@ -759,13 +840,16 @@ def test_compare_row_gives_its_width_to_the_label_not_the_buttons(window, qtbot)
     cv = window.compare_view
     header = cv.tree.header()
 
+    fm = cv.tree.fontMetrics()
     assert not header.stretchLastSection()
     assert header.sectionResizeMode(cv._LABEL_COL) == QtWidgets.QHeaderView.Stretch
-    for col in (cv._HIDE_COL, cv._REMOVE_COL):
+    for col, text in ((cv._HIDE_COL, "Hide"), (cv._REMOVE_COL, "Remove")):
         assert header.sectionResizeMode(col) == QtWidgets.QHeaderView.Fixed
-        # Sized from a real button, so a larger system font widens the column
-        # instead of spilling out of it.
-        assert cv.tree.columnWidth(col) >= QtWidgets.QPushButton("Remove").sizeHint().width()
+        # Font-relative, but tighter than a default button.
+        assert cv.tree.columnWidth(col) >= fm.horizontalAdvance(text)
+        assert cv.tree.columnWidth(col) < QtWidgets.QPushButton(text).sizeHint().width()
+    assert header.sectionResizeMode(cv._NUDGE_COL) == QtWidgets.QHeaderView.Fixed
+    assert cv._nudge_btn_width < cv.tree.columnWidth(cv._HIDE_COL)
 
 
 def test_compare_hide_takes_a_curve_off_without_unpinning_it(window, qtbot):
@@ -868,6 +952,64 @@ def test_compare_metric_switch_redraws_every_pinned_shot(window, qtbot):
     )
     assert len(cv.graph._plot.listDataItems()) == 2
     assert len(cv._traces) == 2  # the new metric's curves, not the old ones
+
+
+def test_compare_hide_holds_the_current_zoom(window, qtbot):
+    rv = _loaded_report(window, qtbot)
+    cv = window.compare_view
+    for button in _frp_compare_buttons(rv):
+        button.click()
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 2, timeout=5000)
+    window.tabs.setCurrentWidget(cv)
+    cv.graph._framing._frame_onset_btns[0].click()
+    framed_x = cv.graph._plot.getViewBox().viewRange()[0]
+
+    _row_button(cv, 0, cv._HIDE_COL).click()  # deferred a turn of the event loop
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 1, timeout=5000)
+    assert cv.graph._plot.getViewBox().viewRange()[0] == pytest.approx(framed_x)
+
+    _row_button(cv, 0, cv._HIDE_COL).click()
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 2, timeout=5000)
+    assert cv.graph._plot.getViewBox().viewRange()[0] == pytest.approx(framed_x)
+
+
+def test_compare_metric_switch_holds_the_zoom_and_warns_it_may_be_off_scale(window, qtbot):
+    rv = _loaded_report(window, qtbot)
+    cv = window.compare_view
+    for button in _frp_compare_buttons(rv):
+        button.click()
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 2, timeout=5000)
+    window.tabs.setCurrentWidget(cv)
+    cv.graph._framing._frame_onset_btns[0].click()
+    framed_x = cv.graph._plot.getViewBox().viewRange()[0]
+    # isHidden(), not isVisible(): the test window is never shown.
+    assert cv.graph._notice_bar.isHidden()
+
+    cv.metric_combo.setCurrentIndex(cv.metric_combo.findData("peak_dba"))
+    qtbot.waitUntil(
+        lambda: cv.graph._plot.getAxis("left").labelText == "SPL (dBA)", timeout=5000
+    )
+    assert cv.graph._plot.getViewBox().viewRange()[0] == pytest.approx(framed_x)
+    assert not cv.graph._notice_bar.isHidden()
+
+    cv.graph._framing._auto_frame_btn.click()
+    assert cv.graph._notice_bar.isHidden()
+
+
+def test_compare_mutation_holds_the_current_zoom(window, qtbot):
+    rv = _loaded_report(window, qtbot)
+    cv = window.compare_view
+    _frp_compare_buttons(rv)[0].click()
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 1, timeout=5000)
+    window.tabs.setCurrentWidget(cv)
+    cv.graph._framing._frame_onset_btns[0].click()
+    framed_x = cv.graph._plot.getViewBox().viewRange()[0]
+
+    window.notify_changed()
+    assert cv._traces == {}
+    qtbot.waitUntil(lambda: len(cv._traces) == 1, timeout=5000)
+    assert cv.graph._plot.getViewBox().viewRange()[0] == pytest.approx(framed_x)
+    assert cv.graph._notice_bar.isHidden()  # same units, so no off-scale caution
 
 
 def test_compare_draws_the_shots_it_can_and_flags_the_ones_it_cannot(window, qtbot):
@@ -1638,7 +1780,7 @@ def test_absolute_value_toggle_reports_state_and_signals(qtbot):
 def test_connect_points_toggle_joins_the_point_cloud_in_place(qtbot):
     # The Connect-points toggle is a pure rendering choice: it adds a line pen to
     # an instantaneous point cloud (and drops it again) without redrawing, so an
-    # envelope curve is left alone and the toggle state persists across a redraw.
+    # line curve is left alone and the toggle state persists across a redraw.
     from PySide6 import QtCore
 
     from sound_metric_app.dsp.graphing import MetricTrace
@@ -1666,7 +1808,7 @@ def test_connect_points_toggle_joins_the_point_cloud_in_place(qtbot):
     (item,) = graph._plot.listDataItems()
     assert not _draws_line(item)  # a bare point cloud
 
-    with qtbot.assertNotEmitted(graph.smoothingChanged):
+    with qtbot.assertNotEmitted(graph.absoluteChanged):
         graph._connect_button.setChecked(True)
     assert graph.connect_points() is True
     # Restyled in place — the same item now carries a connecting pen.
@@ -1682,8 +1824,8 @@ def test_connect_points_toggle_joins_the_point_cloud_in_place(qtbot):
     assert not _draws_line(graph._plot.listDataItems()[0])
 
 
-def test_connect_points_leaves_the_envelope_line_untouched(qtbot):
-    # An envelope (connected=True) is already a joined line; the toggle must not
+def test_connect_points_leaves_a_line_curve_untouched(qtbot):
+    # A line curve (connected=True) is already a joined line; the toggle must not
     # strip its pen when switched off.
     from PySide6 import QtCore
 
@@ -2488,3 +2630,294 @@ def test_ammo_definitions_dialog_add_and_remove(window):
     dialog.list.setCurrentRow(0)
     dialog._remove()
     assert dialog.definitions() == ["Custom 62gr"]
+
+
+# ---- quantile curve (Compare tab only) ----------------------------------- #
+
+def _drain(view, qtbot) -> None:
+    """Wait for ``view``'s worker tasks; a live QThread at teardown crashes Qt."""
+    qtbot.waitUntil(lambda: not view._tasks, timeout=30000)
+
+
+def _quantile_curve(t0: float = 0.0, t1: float = 4.0, level: float = 5.0):
+    """A stand-in fitted curve, so a graph test needs no real fit (or capture)."""
+    from sound_metric_app.dsp.quantile import QuantileCurve
+
+    t = np.linspace(t0, t1, 9)
+    return QuantileCurve(
+        t_ms=t,
+        values=np.full(t.shape, level),
+        quantile=0.95,
+        coefficients=np.zeros(4),
+        knots_u=np.zeros(8),
+        anchor_ms=t0,
+        warp_eps_ms=0.05,
+        y_label="SPL (dBA)",
+        data_range=(0.0, level),
+    )
+
+
+def test_the_quantile_button_is_opt_in_per_graph(qtbot):
+    from sound_metric_app.ui.graph import QUANTILE_HIDDEN, MetricGraph
+
+    plain = MetricGraph()
+    qtbot.addWidget(plain)
+    assert plain._quantile_button is None
+    assert plain.quantile_mode() == QUANTILE_HIDDEN
+    plain.set_quantile_available(True)  # a no-op, not an error
+    assert plain.quantile_mode() == QUANTILE_HIDDEN
+
+    opted = MetricGraph(quantile_curves=True)
+    qtbot.addWidget(opted)
+    assert opted._quantile_button is not None
+    assert not opted._quantile_button.is_available()
+    assert opted.quantile_mode() == QUANTILE_HIDDEN
+
+
+def test_the_one_button_cycles_hidden_overlay_replace_and_wraps(qtbot):
+    from sound_metric_app.ui.graph import (
+        QUANTILE_HIDDEN,
+        QUANTILE_OVERLAY,
+        QUANTILE_REPLACE,
+        MetricGraph,
+    )
+
+    graph = MetricGraph(quantile_curves=True)
+    qtbot.addWidget(graph)
+    graph.set_quantile_available(True)
+    button = graph._quantile_button.button
+    changes: list[str] = []
+    graph.quantileModeChanged.connect(lambda: changes.append(graph.quantile_mode()))
+
+    assert graph.quantile_mode() == QUANTILE_HIDDEN
+    assert "off" in button.text()
+    button.click()
+    assert graph.quantile_mode() == QUANTILE_OVERLAY and "overlay" in button.text()
+    button.click()
+    assert graph.quantile_mode() == QUANTILE_REPLACE and "replace" in button.text()
+    button.click()  # wraps
+    assert graph.quantile_mode() == QUANTILE_HIDDEN
+    assert changes == [QUANTILE_OVERLAY, QUANTILE_REPLACE, QUANTILE_HIDDEN]
+    assert "P95" in button.text()
+
+
+def test_withdrawing_the_button_keeps_the_mode_but_reports_hidden(qtbot):
+    from sound_metric_app.ui.graph import QUANTILE_HIDDEN, QUANTILE_OVERLAY, MetricGraph
+
+    graph = MetricGraph(quantile_curves=True)
+    qtbot.addWidget(graph)
+    graph.set_quantile_available(True)
+    graph._quantile_button.button.click()
+    assert graph.quantile_mode() == QUANTILE_OVERLAY
+
+    graph.set_quantile_available(False)
+    assert graph.quantile_mode() == QUANTILE_HIDDEN
+    assert not graph._quantile_button.is_available()
+
+    graph.set_quantile_available(True)
+    assert graph.quantile_mode() == QUANTILE_OVERLAY  # restored, not reset
+
+
+def test_overlay_draws_the_fit_over_its_samples_and_replace_instead_of_them(qtbot):
+    from sound_metric_app.ui.graph import MetricGraph
+
+    graph = MetricGraph(quantile_curves=True)
+    qtbot.addWidget(graph)
+    graph.set_quantile_available(True)
+    a, b = _overlay_traces()
+    a = replace(a, level=4.0, peak_index=None)
+    series = [("first", a, BLUE), ("second", b, RED)]
+    curves = [_quantile_curve(level=5.0), _quantile_curve(level=6.0)]
+
+    # Hidden: curves supplied but not drawn.
+    graph.show_traces(series, "two shots", quantile_curves=curves)
+    assert len(graph._plot.listDataItems()) == 3  # two clouds + a's level bar
+    assert graph._quantile_items == []
+
+    graph._quantile_button.button.click()  # -> overlay
+    graph.show_traces(series, "two shots", quantile_curves=curves)
+    assert len(graph._plot.listDataItems()) == 5  # + two fitted curves
+    assert [label for label, _curve in graph._quantile_items] == ["first", "second"]
+    assert graph._raw_drawn
+    assert len(graph._curve_items) == 2
+
+    graph._quantile_button.button.click()  # -> replace
+    graph.show_traces(series, "two shots", quantile_curves=curves)
+    assert not graph._raw_drawn
+    assert graph._curve_items == []  # the clouds are gone
+    assert len(graph._quantile_items) == 2
+    # Two fits plus a's level bar; window brackets still armed.
+    assert len(graph._plot.listDataItems()) == 3
+    assert graph._window_x_bounds == (0.0, 4.0)
+
+
+def test_replace_frames_y_on_the_curves_it_actually_shows(qtbot):
+    # X stays the trace's extent in every mode.
+    from sound_metric_app.ui.graph import MetricGraph
+
+    graph = MetricGraph(quantile_curves=True)
+    qtbot.addWidget(graph)
+    graph.set_quantile_available(True)
+    a, b = _overlay_traces()
+    series = [("first", a, BLUE), ("second", b, RED)]
+    curves = [_quantile_curve(level=20.0), _quantile_curve(level=30.0)]
+
+    graph.show_traces(series, "two shots", quantile_curves=curves)
+    assert graph._y_bounds == (1.0, 9.0)  # hidden: the samples' own extent
+    x_bounds = graph._x_bounds
+
+    graph._quantile_button.button.click()  # overlay: both, so the union
+    graph.show_traces(series, "two shots", quantile_curves=curves)
+    assert graph._y_bounds == (1.0, 30.0)
+    assert graph._x_bounds == x_bounds
+
+    graph._quantile_button.button.click()  # replace: the curves alone
+    graph.show_traces(series, "two shots", quantile_curves=curves)
+    assert graph._y_bounds == (20.0, 30.0)
+    assert graph._x_bounds == x_bounds
+
+
+def test_a_series_without_a_fit_keeps_its_samples_even_in_replace(qtbot):
+    from sound_metric_app.ui.graph import MetricGraph
+
+    graph = MetricGraph(quantile_curves=True)
+    qtbot.addWidget(graph)
+    graph.set_quantile_available(True)
+    a, b = _overlay_traces()
+    graph._quantile_button.button.click()
+    graph._quantile_button.button.click()  # -> replace
+    graph.show_traces(
+        [("first", a, BLUE), ("second", b, RED)],
+        "two shots",
+        quantile_curves=[_quantile_curve(), None],
+    )
+    assert len(graph._quantile_items) == 1
+    assert len(graph._curve_items) == 1
+
+
+def test_a_click_reads_the_fitted_curve_and_says_that_is_what_it_is(qtbot):
+    from sound_metric_app.ui.graph import MetricGraph
+
+    graph = MetricGraph(quantile_curves=True)
+    qtbot.addWidget(graph)
+    graph.set_quantile_available(True)
+    a, _b = _overlay_traces()
+    graph._quantile_button.button.click()
+    graph._quantile_button.button.click()  # -> replace
+    graph.show_traces([("first", a, BLUE)], "one shot", quantile_curves=[_quantile_curve()])
+
+    graph._show_quantile_readout(0, 2, 5.0)
+    assert graph._readout._pick_marker is not None
+    text = graph._readout._readout_label.text()
+    assert "P95" in text and "5.000 dBA" in text and "first" in text
+
+
+def test_the_quantile_button_is_offered_on_the_liaeq_metric_only(window, qtbot):
+    from sound_metric_app.ui.graph import QUANTILE_HIDDEN
+
+    rv = _loaded_report(window, qtbot)
+    _frp_compare_buttons(rv)[0].click()
+    cv = window.compare_view
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) >= 1, timeout=5000)
+
+    assert cv.metric_combo.currentData() == "impulse_pa_ms"
+    assert not cv.graph._quantile_button.is_available()
+    assert cv.graph.quantile_mode() == QUANTILE_HIDDEN
+
+    cv.metric_combo.setCurrentIndex(cv.metric_combo.findData("liaeq_100ms_db"))
+    qtbot.waitUntil(lambda: cv.graph._quantile_button.is_available(), timeout=5000)
+
+    cv.metric_combo.setCurrentIndex(cv.metric_combo.findData("peak_dba"))
+    qtbot.waitUntil(lambda: not cv.graph._quantile_button.is_available(), timeout=5000)
+    _drain(cv, qtbot)
+
+
+def test_fits_are_computed_only_when_asked_for_then_memoized(window, qtbot):
+    from sound_metric_app.ui.graph import QUANTILE_OVERLAY
+
+    rv = _loaded_report(window, qtbot)
+    for button in _frp_compare_buttons(rv):
+        button.click()
+    cv = window.compare_view
+    cv.metric_combo.setCurrentIndex(cv.metric_combo.findData("liaeq_100ms_db"))
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) >= 2, timeout=5000)
+
+    assert len(cv._traces) == 2
+    assert cv._quantiles == {}
+
+    cv.graph._quantile_button.button.click()  # -> overlay
+    qtbot.waitUntil(lambda: len(cv._quantiles) == 2, timeout=20000)
+    assert cv.graph.quantile_mode() == QUANTILE_OVERLAY
+    assert all(curve is not None for curve in cv._quantiles.values())
+    fitted = dict(cv._quantiles)
+
+    # Cycling on to Replace reuses the memoized fits.
+    cv.graph._quantile_button.button.click()  # -> replace
+    qtbot.waitUntil(lambda: not cv.graph._raw_drawn, timeout=5000)
+    assert all(cv._quantiles[key] is fitted[key] for key in fitted)
+
+    # A presentation change expires the fits with the traces.
+    cv.graph._absolute_button.setChecked(True)
+    assert cv._quantiles == {}
+    _drain(cv, qtbot)
+
+
+def test_a_slide_shifts_the_fitted_curve_without_refitting_it(window, qtbot):
+    rv = _loaded_report(window, qtbot)
+    for button in _frp_compare_buttons(rv):
+        button.click()
+    cv = window.compare_view
+    cv.metric_combo.setCurrentIndex(cv.metric_combo.findData("liaeq_100ms_db"))
+    qtbot.waitUntil(lambda: len(cv._traces) == 2, timeout=5000)
+    cv.graph._quantile_button.button.click()  # -> overlay
+    qtbot.waitUntil(lambda: len(cv._quantiles) == 2, timeout=20000)
+
+    second = cv._series[1]
+    before = cv._quantiles[second.key]
+    drawn_before = float(cv.graph._quantile_items[1][1].t_ms[0])
+
+    cv._nudge(second, +1)
+    assert cv._quantiles[second.key] is before
+    drawn_after = float(cv.graph._quantile_items[1][1].t_ms[0])
+    assert drawn_after == pytest.approx(drawn_before + cv._NUDGE_STEP_MS)
+    shifted = cv.graph._quantile_items[1][1]
+    assert shifted.anchor_ms == pytest.approx(before.anchor_ms + cv._NUDGE_STEP_MS)
+    _drain(cv, qtbot)
+
+
+def test_the_quantile_curve_changes_no_reported_number(window, qtbot):
+    rv = _loaded_report(window, qtbot)
+    for button in _frp_compare_buttons(rv):
+        button.click()
+    cv = window.compare_view
+    cv.metric_combo.setCurrentIndex(cv.metric_combo.findData("liaeq_100ms_db"))
+    qtbot.waitUntil(lambda: len(cv._traces) == 2, timeout=5000)
+
+    def snapshot():
+        rows = []
+        for i in range(rv.tree.topLevelItemCount()):
+            item = rv.tree.topLevelItem(i)
+            rows.append(tuple(item.text(c) for c in range(rv.tree.columnCount())))
+            for j in range(item.childCount()):
+                child = item.child(j)
+                rows.append(tuple(child.text(c) for c in range(rv.tree.columnCount())))
+        traces = {
+            key: (trace.values.copy(), trace.level, trace.window_start_index)
+            for key, trace in cv._traces.items()
+        }
+        return rows, traces
+
+    before_rows, before_traces = snapshot()
+    for _ in range(3):  # overlay, replace, back to hidden
+        cv.graph._quantile_button.button.click()
+        _drain(cv, qtbot)
+    qtbot.waitUntil(lambda: cv.graph.is_showing_curves(), timeout=20000)
+
+    after_rows, after_traces = snapshot()
+    assert after_rows == before_rows
+    assert set(after_traces) == set(before_traces)
+    for key, (values, level, window_start) in before_traces.items():
+        after_values, after_level, after_window = after_traces[key]
+        assert after_values == pytest.approx(values, nan_ok=True)
+        assert after_level == level
+        assert after_window == window_start
