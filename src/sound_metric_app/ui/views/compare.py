@@ -122,8 +122,9 @@ class CompareView(_View):
         #: ``(x_range, y_range)`` captured by :meth:`_render` and restored at the
         #: end of :meth:`_draw`; None lets the plot autorange.
         self._held_view: tuple[tuple[float, float], tuple[float, float]] | None = None
-        #: Set when the held view spans a metric change, to warn it may be off-scale.
-        self._notice_pending = False
+        #: Set when the held view spans a metric/absolute change: its Y range is
+        #: in the old units, so only X is restored and Y autoranges.
+        self._refit_y = False
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -317,15 +318,14 @@ class CompareView(_View):
             self.metric_combo.currentData(),
             self.graph.absolute_value(),
         )
-        prev_metric = self._cache_key[0] if self._cache_key else None
         if not keep_view:
             self._held_view = None
         elif self.graph.is_showing_curves():
             self._held_view = self.graph.current_view_bounds()
         # else "Loading…" is up: keep the zoom the superseded load was holding.
-        self._notice_pending = self._held_view is not None and (
-            self._notice_pending
-            or (prev_metric is not None and prev_metric != cache_key[0])
+        self._refit_y = self._held_view is not None and (
+            self._refit_y
+            or (self._cache_key is not None and self._cache_key != cache_key)
         )
         if cache_key != self._cache_key:
             self._traces.clear()
@@ -339,7 +339,7 @@ class CompareView(_View):
         token = self._graph_token
         if not self._series:
             self._held_view = None
-            self._notice_pending = False
+            self._refit_y = False
             self.graph.show_message(self._EMPTY_MESSAGE)
             self.status_label.setText("")
             self.tree.clear()
@@ -501,16 +501,13 @@ class CompareView(_View):
             f"{metric_label} — {len(drawn)} shot(s) overlaid",
             quantile_curves=curves,
         )
-        # show_traces autoranges; restore the held zoom.
+        # show_traces autoranges; restore the held zoom. Across a metric change
+        # the held Y is in the old units, so keep X and leave Y autoranging.
         if self._held_view is not None:
-            self.graph.set_view(*self._held_view)
+            x_range, y_range = self._held_view
+            self.graph.set_view(x_range, None if self._refit_y else y_range)
             self._held_view = None
-            if self._notice_pending:
-                self.graph.show_view_notice(
-                    "Metric changed — the previous zoom was kept, so this curve "
-                    "may sit off-scale. Use Auto Frame to refit."
-                )
-        self._notice_pending = False
+        self._refit_y = False
         parts = [f"{len(drawn)} of {len(self._series)} drawn"]
         if hidden:
             parts.append(f"{hidden} hidden")
@@ -613,6 +610,6 @@ class CompareView(_View):
         x_range, y_range = self.graph.current_view_bounds()
         # Pinned below; drop any view held by an in-flight render.
         self._held_view = None
-        self._notice_pending = False
+        self._refit_y = False
         self._draw()
         self.graph.set_view(x_range, y_range)

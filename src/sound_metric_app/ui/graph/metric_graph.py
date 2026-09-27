@@ -172,26 +172,6 @@ class MetricGraph(QtWidgets.QWidget):
             self._quantile_button.set_available(False)
         layout.addLayout(header)
 
-        # Closeable caution strip; see :meth:`show_view_notice`.
-        self._notice_bar = QtWidgets.QFrame()
-        self._notice_bar.setVisible(False)
-        self._notice_bar.setStyleSheet(
-            "QFrame { background: rgba(240, 200, 0, 0.18);"
-            " border: 1px solid rgba(240, 200, 0, 0.5); border-radius: 3px; }"
-        )
-        notice_row = QtWidgets.QHBoxLayout(self._notice_bar)
-        notice_row.setContentsMargins(8, 2, 4, 2)
-        self._notice_label = QtWidgets.QLabel("")
-        self._notice_label.setWordWrap(True)
-        notice_row.addWidget(self._notice_label, 1)
-        notice_close = QtWidgets.QToolButton()
-        notice_close.setText("✕")
-        notice_close.setAutoRaise(True)
-        notice_close.setToolTip("Dismiss this notice.")
-        notice_close.clicked.connect(self.clear_view_notice)
-        notice_row.addWidget(notice_close, 0, QtCore.Qt.AlignTop)
-        layout.addWidget(self._notice_bar)
-
         # Both axes carry the tick numbers as scale handles: dragging them
         # stretches or squeezes that axis (see :class:`ScaleDragAxis`), leaving
         # the plot body as the sole place a left-drag pans.
@@ -364,7 +344,6 @@ class MetricGraph(QtWidgets.QWidget):
         self._plot.clear()
         self._legend.clear()
         self._legend.setVisible(False)
-        self.clear_view_notice()
         self._title_label.setText(text)
         self._plot.setLabel("left", "")
         self._x_bounds = None
@@ -396,7 +375,6 @@ class MetricGraph(QtWidgets.QWidget):
         """
         if span is None:
             return
-        self.clear_view_notice()
         self._plot.setXRange(span[0], span[1], padding=padding)
         # A framing click is a fresh X decision and drops any typed one, or the
         # button would appear to do nothing the next time the plot redrew. Y is
@@ -464,23 +442,15 @@ class MetricGraph(QtWidgets.QWidget):
     def set_view(
         self,
         x_range: tuple[float, float],
-        y_range: tuple[float, float],
+        y_range: tuple[float, float] | None,
     ) -> None:
-        """Restore a view after a redraw; unlike :meth:`set_axis_bounds`, not remembered."""
-        self._plot.setXRange(*x_range, padding=0)
-        self._plot.setYRange(*y_range, padding=0)
+        """Restore a view after a redraw; unlike :meth:`set_axis_bounds`, not remembered.
 
-    def show_view_notice(self, text: str) -> None:
-        """Show the caution strip, e.g. when a kept zoom may hide the new curve.
-
-        Cleared by its ✕, any framing button, typed bounds, or :meth:`show_message`.
+        A None ``y_range`` leaves Y to autorange.
         """
-        self._notice_label.setText(text)
-        self._notice_bar.setVisible(True)
-
-    def clear_view_notice(self) -> None:
-        """Hide the caution strip. Safe to call when it is already hidden."""
-        self._notice_bar.setVisible(False)
+        self._plot.setXRange(*x_range, padding=0)
+        if y_range is not None:
+            self._plot.setYRange(*y_range, padding=0)
 
     def edit_axis_bounds(self) -> None:
         """Ask for X/Y bounds and frame the plot to them. A no-op when cancelled.
@@ -513,7 +483,6 @@ class MetricGraph(QtWidgets.QWidget):
         framing buttons (Y) and a redraw of the same metric (both), so a
         hide/unhide or an added shot doesn't spring the frame back.
         """
-        self.clear_view_notice()
         self._manual_x_bounds = x_range
         self._manual_y_bounds = y_range
         self._manual_bounds_metric = (

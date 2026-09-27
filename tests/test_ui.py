@@ -973,7 +973,8 @@ def test_compare_hide_holds_the_current_zoom(window, qtbot):
     assert cv.graph._plot.getViewBox().viewRange()[0] == pytest.approx(framed_x)
 
 
-def test_compare_metric_switch_holds_the_zoom_and_warns_it_may_be_off_scale(window, qtbot):
+def test_compare_metric_switch_holds_x_and_refits_y(window, qtbot):
+    # The held Y range is in the old metric's units, so only X survives.
     rv = _loaded_report(window, qtbot)
     cv = window.compare_view
     for button in _frp_compare_buttons(rv):
@@ -981,19 +982,20 @@ def test_compare_metric_switch_holds_the_zoom_and_warns_it_may_be_off_scale(wind
     qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 2, timeout=5000)
     window.tabs.setCurrentWidget(cv)
     cv.graph._framing._frame_onset_btns[0].click()
-    framed_x = cv.graph._plot.getViewBox().viewRange()[0]
-    # isHidden(), not isVisible(): the test window is never shown.
-    assert cv.graph._notice_bar.isHidden()
+    framed_x, old_y = cv.graph._plot.getViewBox().viewRange()
 
-    cv.metric_combo.setCurrentIndex(cv.metric_combo.findData("peak_dba"))
+    cv.metric_combo.setCurrentIndex(cv.metric_combo.findData("liaeq_100ms_db"))
     qtbot.waitUntil(
-        lambda: cv.graph._plot.getAxis("left").labelText == "SPL (dBA)", timeout=5000
+        lambda: cv.graph.is_showing_curves()
+        and cv.graph._plot.getAxis("left").labelText != "Impulse ∫p·dt (Pa·ms)",
+        timeout=5000,
     )
-    assert cv.graph._plot.getViewBox().viewRange()[0] == pytest.approx(framed_x)
-    assert not cv.graph._notice_bar.isHidden()
-
-    cv.graph._framing._auto_frame_btn.click()
-    assert cv.graph._notice_bar.isHidden()
+    # Autorange is applied at paint, which a never-shown window skips; run it.
+    cv.graph._plot.getViewBox().updateAutoRange()
+    x_range, y_range = cv.graph._plot.getViewBox().viewRange()
+    assert x_range == pytest.approx(framed_x)
+    assert y_range != pytest.approx(old_y)
+    assert cv.graph._plot.getViewBox().autoRangeEnabled()[1]
 
 
 def test_compare_rerender_while_loading_keeps_the_held_zoom(window, qtbot):
@@ -1060,7 +1062,6 @@ def test_compare_mutation_holds_the_current_zoom(window, qtbot):
     assert cv._traces == {}
     qtbot.waitUntil(lambda: len(cv._traces) == 1, timeout=5000)
     assert cv.graph._plot.getViewBox().viewRange()[0] == pytest.approx(framed_x)
-    assert cv.graph._notice_bar.isHidden()  # same units, so no off-scale caution
 
 
 def test_compare_draws_the_shots_it_can_and_flags_the_ones_it_cannot(window, qtbot):
