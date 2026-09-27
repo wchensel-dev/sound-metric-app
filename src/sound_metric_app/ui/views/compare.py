@@ -318,15 +318,14 @@ class CompareView(_View):
             self.graph.absolute_value(),
         )
         prev_metric = self._cache_key[0] if self._cache_key else None
-        self._held_view = (
-            self.graph.current_view_bounds()
-            if keep_view and self.graph.is_showing_curves()
-            else None
-        )
-        self._notice_pending = (
-            self._held_view is not None
-            and prev_metric is not None
-            and prev_metric != cache_key[0]
+        if not keep_view:
+            self._held_view = None
+        elif self.graph.is_showing_curves():
+            self._held_view = self.graph.current_view_bounds()
+        # else "Loading…" is up: keep the zoom the superseded load was holding.
+        self._notice_pending = self._held_view is not None and (
+            self._notice_pending
+            or (prev_metric is not None and prev_metric != cache_key[0])
         )
         if cache_key != self._cache_key:
             self._traces.clear()

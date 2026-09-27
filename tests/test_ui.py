@@ -996,6 +996,31 @@ def test_compare_metric_switch_holds_the_zoom_and_warns_it_may_be_off_scale(wind
     assert cv.graph._notice_bar.isHidden()
 
 
+def test_compare_rerender_while_loading_keeps_the_held_zoom(window, qtbot):
+    # A second render while "Loading…" is up must not drop the zoom the first
+    # (now superseded) load was holding.
+    rv = _loaded_report(window, qtbot)
+    cv = window.compare_view
+    for button in _frp_compare_buttons(rv):
+        button.click()
+    cv.metric_combo.setCurrentIndex(cv.metric_combo.findData("liaeq_100ms_db"))
+    qtbot.waitUntil(lambda: len(cv._traces) == 2, timeout=5000)
+    qtbot.waitUntil(lambda: cv.graph.is_showing_curves(), timeout=5000)
+    window.tabs.setCurrentWidget(cv)
+    cv.graph._framing._frame_onset_btns[0].click()
+    framed_x = cv.graph._plot.getViewBox().viewRange()[0]
+
+    cv.graph._quantile_button.button.click()  # -> overlay; fits pending
+    assert not cv.graph.is_showing_curves()
+    cv.graph._quantile_button.button.click()  # -> replace, before the fits land
+    qtbot.waitUntil(lambda: len(cv._quantiles) == 2, timeout=20000)
+    qtbot.waitUntil(lambda: cv.graph.is_showing_curves(), timeout=5000)
+    # Autorange is applied at paint, which a never-shown window skips; run it.
+    cv.graph._plot.getViewBox().updateAutoRange()
+    assert cv.graph._plot.getViewBox().viewRange()[0] == pytest.approx(framed_x)
+    _drain(cv, qtbot)
+
+
 def test_compare_mutation_holds_the_current_zoom(window, qtbot):
     rv = _loaded_report(window, qtbot)
     cv = window.compare_view
