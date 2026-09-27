@@ -45,7 +45,7 @@ class CompareView(_View):
 
     The graph is the same :class:`MetricGraph` the Batch average tab draws into,
     not a copy of it: Auto Frame, Frame Calc Window, the onset close-ups, the
-    level-weighting dropdown, and the click readout are one implementation used
+    Absolute value toggle, and the click readout are one implementation used
     twice, so they cannot drift apart between the two tabs.
 
     Each pinned row carries its own Hide and Remove, because both act on that
@@ -62,13 +62,14 @@ class CompareView(_View):
     loading worker, only once the button asks for them.
 
     Traces are memoized per pinned series for as long as the metric and the
-    level weighting hold still. Pinning the ninth shot then re-reads one capture
-    rather than nine, which is what makes it reasonable to redraw on every
-    change. Changing either control drops the whole cache — it also bounds it,
-    since only one metric x weighting generation is ever held. The weighting
-    only counts for the signed peak metrics; elsewhere it draws no differently. A mutation
-    elsewhere in the app drops it too (see :meth:`invalidate_traces`). Quantile
-    fits are memoized alongside.
+    Absolute value toggle hold still. Pinning the ninth shot then re-reads one
+    capture rather than nine, which is what makes it reasonable to redraw on
+    every change. Changing either control drops the whole cache — it also
+    bounds it, since only one metric x absolute generation is ever held. The
+    toggle only counts for the signed peak metrics; elsewhere it draws no
+    differently, so it is left out of the key there. A mutation elsewhere in
+    the app drops it too (see :meth:`invalidate_traces`). Quantile fits are
+    memoized alongside.
     """
 
     #: Pre-selected metric: the impulse curve is what these comparisons are for.
@@ -106,7 +107,7 @@ class CompareView(_View):
         self._hidden: set[tuple[int, MicPosition]] = set()
         #: Per-series slide in :attr:`_NUDGE_STEP_MS` steps; drawn copy only.
         self._offsets: dict[tuple[int, MicPosition], int] = {}
-        #: Memoized curves and load failures for the current metric x weighting,
+        #: Memoized curves and load failures for the current metric x absolute,
         #: both keyed by ``CompareSeries.key``.
         self._traces: dict[tuple[int, MicPosition], MetricTrace] = {}
         self._errors: dict[tuple[int, MicPosition], str] = {}
