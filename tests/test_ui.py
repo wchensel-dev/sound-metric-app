@@ -1021,6 +1021,32 @@ def test_compare_rerender_while_loading_keeps_the_held_zoom(window, qtbot):
     _drain(cv, qtbot)
 
 
+def test_compare_slide_while_loading_keeps_the_held_zoom(window, qtbot):
+    # A slide pressed while "Loading…" is up must neither drop the zoom the load
+    # is holding nor let that load's completion autorange over it.
+    rv = _loaded_report(window, qtbot)
+    cv = window.compare_view
+    for button in _frp_compare_buttons(rv):
+        button.click()
+    cv.metric_combo.setCurrentIndex(cv.metric_combo.findData("liaeq_100ms_db"))
+    qtbot.waitUntil(lambda: len(cv._traces) == 2, timeout=5000)
+    qtbot.waitUntil(lambda: cv.graph.is_showing_curves(), timeout=5000)
+    window.tabs.setCurrentWidget(cv)
+    cv.graph._framing._frame_onset_btns[0].click()
+    framed_x = cv.graph._plot.getViewBox().viewRange()[0]
+
+    cv.graph._quantile_button.button.click()  # -> overlay; fits pending
+    assert not cv.graph.is_showing_curves()
+    second = cv._series[1]
+    cv._nudge(second, +1)
+    qtbot.waitUntil(lambda: len(cv._quantiles) == 2, timeout=20000)
+    qtbot.waitUntil(lambda: cv.graph.is_showing_curves(), timeout=5000)
+    cv.graph._plot.getViewBox().updateAutoRange()
+    assert cv.graph._plot.getViewBox().viewRange()[0] == pytest.approx(framed_x)
+    assert cv._offsets[second.key] == 1
+    _drain(cv, qtbot)
+
+
 def test_compare_mutation_holds_the_current_zoom(window, qtbot):
     rv = _loaded_report(window, qtbot)
     cv = window.compare_view

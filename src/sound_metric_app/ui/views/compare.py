@@ -605,6 +605,11 @@ class CompareView(_View):
         """Redraw after a slide from cached traces, holding the current zoom."""
         if not self._series:
             return
+        if not self.graph.is_showing_curves():
+            # "Loading…" is up: there is no view to read, and a load is holding
+            # the zoom. Supersede it so the redraw keeps that zoom and the slide.
+            self._render()
+            return
         x_range, y_range = self.graph.current_view_bounds()
         # Pinned below; drop any view held by an in-flight render.
         self._held_view = None
