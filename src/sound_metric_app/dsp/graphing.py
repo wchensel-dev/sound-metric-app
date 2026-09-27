@@ -55,6 +55,10 @@ from .metrics import (
 )
 from .weighting import apply_a_weighting
 
+#: The metrics whose curve ``build_metric_trace``'s ``absolute`` changes. The
+#: rest are inherently non-negative and draw identically either way.
+SIGNED_METRICS = frozenset({"peak_pa", "peak_db", "peak_dba"})
+
 @dataclass
 class MetricTrace:
     """One metric's curve over a capture, ready to hand straight to a plot.

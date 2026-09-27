@@ -2968,8 +2968,14 @@ def test_fits_are_computed_only_when_asked_for_then_memoized(window, qtbot):
     qtbot.waitUntil(lambda: not cv.graph._raw_drawn, timeout=5000)
     assert all(cv._quantiles[key] is fitted[key] for key in fitted)
 
-    # A presentation change expires the fits with the traces.
+    # Absolute is a no-op for LIAeq, so it keeps the traces and the fits.
+    traces = dict(cv._traces)
     cv.graph._absolute_button.setChecked(True)
+    assert all(cv._traces[key] is traces[key] for key in traces)
+    assert all(cv._quantiles[key] is fitted[key] for key in fitted)
+
+    # A metric change expires the fits with the traces.
+    cv.metric_combo.setCurrentIndex(cv.metric_combo.findData("peak_dba"))
     assert cv._quantiles == {}
     _drain(cv, qtbot)
 

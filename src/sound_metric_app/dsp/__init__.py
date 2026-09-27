@@ -3,7 +3,7 @@
 :mod:`.quantile` is a visual aid only and feeds no reported number.
 """
 
-from .graphing import MetricTrace, build_metric_trace
+from .graphing import SIGNED_METRICS, MetricTrace, build_metric_trace
 from .metrics import (
     find_onset,
     pa_to_db,
@@ -24,6 +24,7 @@ from .quantile import (
 from .weighting import a_weighting_sos, apply_a_weighting
 
 __all__ = [
+    "SIGNED_METRICS",
     "a_weighting_sos",
     "apply_a_weighting",
     "DEFAULT_QUANTILE",

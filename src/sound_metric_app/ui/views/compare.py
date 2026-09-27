@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from ...dsp import MetricTrace
+from ...dsp import SIGNED_METRICS, MetricTrace
 from ...dsp.quantile import QuantileCurve, fit_quantile_curve
 from ...models import MicPosition
 from ..compare_series import CompareSeries
@@ -65,7 +65,8 @@ class CompareView(_View):
     level weighting hold still. Pinning the ninth shot then re-reads one capture
     rather than nine, which is what makes it reasonable to redraw on every
     change. Changing either control drops the whole cache — it also bounds it,
-    since only one metric x weighting generation is ever held. A mutation
+    since only one metric x weighting generation is ever held. The weighting
+    only counts for the signed peak metrics; elsewhere it draws no differently. A mutation
     elsewhere in the app drops it too (see :meth:`invalidate_traces`). Quantile
     fits are memoized alongside.
     """
@@ -328,9 +329,12 @@ class CompareView(_View):
         ``keep_view`` holds the current zoom across the redraw (captured before
         any ``Loading…`` message blanks the plot). Only Clear All passes False.
         """
+        metric_key = self.metric_combo.currentData()
+        # Absolute changes only the signed curves; elsewhere it would drop
+        # identical traces (and their fits) for nothing.
         cache_key = (
-            self.metric_combo.currentData(),
-            self.graph.absolute_value(),
+            metric_key,
+            metric_key in SIGNED_METRICS and self.graph.absolute_value(),
         )
         if not keep_view:
             self._held_view = None

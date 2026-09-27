@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from sound_metric_app.config import LEQ_SEARCH_MS, LIAEQ_WINDOW_MS, PEAK_WINDOW_MS
-from sound_metric_app.dsp import build_metric_trace
+from sound_metric_app.dsp import SIGNED_METRICS, build_metric_trace
 from sound_metric_app.dsp.metrics import (
     find_onset,
     leq_window_samples,
@@ -81,6 +81,20 @@ def test_absolute_rectifies_the_peak_curves_without_moving_the_marker():
         assert signed.values.min() < 0.0, key
         # Above the reference the two agree in magnitude sample by sample.
         assert np.allclose(magnitude.values, np.abs(signed.values))
+
+
+def test_absolute_changes_only_the_signed_metrics():
+    # The Compare tab keys its trace cache on `absolute` only for SIGNED_METRICS,
+    # so every other metric must draw the same curve either way.
+    frame = _shot_frame()
+    for key in ("peak_pa", "peak_db", "peak_dba", "peak_impulse_db",
+                "impulse_pa_ms", "leq10ms_db", "liaeq_100ms_db"):
+        same = np.array_equal(
+            build_metric_trace(frame, key).values,
+            build_metric_trace(frame, key, absolute=True).values,
+            equal_nan=True,
+        )
+        assert same is (key not in SIGNED_METRICS), key
 
 
 def test_peak_dba_uses_a_weighted_signal():
