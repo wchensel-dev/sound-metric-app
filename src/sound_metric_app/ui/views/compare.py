@@ -86,9 +86,6 @@ class CompareView(_View):
     _NUDGE_STEP_MS = 0.1
     #: Pixels between the three slide buttons.
     _NUDGE_SPACING = 1
-    #: Horizontal padding (px) added to a button's text width.
-    _TEXT_BTN_PAD = 12
-    _NUDGE_BTN_PAD = 8
     _COMPACT_BTN_QSS = "QPushButton { padding: 1px 3px; }"
     #: Room the label column needs for a full series name plus its swatch. Held
     #: as the pinned pane's minimum width (plus the buttons) so the splitter
@@ -169,23 +166,18 @@ class CompareView(_View):
         # their buttons — so the action columns are sized from what a button
         # actually needs at the current font and DPI, rather than a magic number
         # that a larger system font would spill out of.
-        # Label width plus a small pad, tighter than QPushButton's default.
-        fm = self.tree.fontMetrics()
         buttons_width = 0
         self._btn_widths: dict[int, int] = {}
         for col, labels in (
             (self._HIDE_COL, ("Hide", "Show")),
             (self._REMOVE_COL, ("Remove",)),
         ):
-            width = max(fm.horizontalAdvance(text) for text in labels) + self._TEXT_BTN_PAD
+            width = self._compact_btn_width(labels)
             header.setSectionResizeMode(col, QtWidgets.QHeaderView.Fixed)
             self.tree.setColumnWidth(col, width)
             self._btn_widths[col] = width
             buttons_width += width
-        self._nudge_btn_width = (
-            max(fm.horizontalAdvance(text) for text in ("+", "−", "R"))
-            + self._NUDGE_BTN_PAD
-        )
+        self._nudge_btn_width = self._compact_btn_width(("+", "−", "R"))
         nudge_col_width = self._nudge_btn_width * 3 + self._NUDGE_SPACING * 2
         header.setSectionResizeMode(self._NUDGE_COL, QtWidgets.QHeaderView.Fixed)
         self.tree.setColumnWidth(self._NUDGE_COL, nudge_col_width)
@@ -578,6 +570,21 @@ class CompareView(_View):
         remove_btn.setStyleSheet(self._COMPACT_BTN_QSS)
         remove_btn.setFixedWidth(self._btn_widths[self._REMOVE_COL])
         self.tree.setItemWidget(item, self._REMOVE_COL, remove_btn)
+
+    def _compact_btn_width(self, labels: tuple[str, ...]) -> int:
+        """Width a compact-styled button needs for the widest of ``labels``.
+
+        Measured off a probe carrying ``_COMPACT_BTN_QSS``, so the button's own
+        font, border and padding all count. A stylesheet box model also drops
+        the style's minimum push-button width, keeping the result tight.
+        """
+        widths = []
+        for text in labels:
+            probe = QtWidgets.QPushButton(text)
+            probe.setStyleSheet(self._COMPACT_BTN_QSS)
+            probe.ensurePolished()
+            widths.append(probe.sizeHint().width())
+        return max(widths)
 
     def _make_nudge_widget(self, series: CompareSeries) -> QtWidgets.QWidget:
         """Build one row's ``+`` / ``−`` / ``R`` slide buttons into a cell."""

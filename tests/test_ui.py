@@ -879,8 +879,9 @@ def test_compare_row_gives_its_width_to_the_label_not_the_buttons(window, qtbot)
     assert header.sectionResizeMode(cv._LABEL_COL) == QtWidgets.QHeaderView.Stretch
     for col, text in ((cv._HIDE_COL, "Hide"), (cv._REMOVE_COL, "Remove")):
         assert header.sectionResizeMode(col) == QtWidgets.QHeaderView.Fixed
-        # Font-relative, but tighter than a default button.
-        assert cv.tree.columnWidth(col) >= fm.horizontalAdvance(text)
+        # What the compact button itself needs, but tighter than a default one.
+        assert cv.tree.columnWidth(col) >= cv._compact_btn_width((text,))
+        assert cv.tree.columnWidth(col) > fm.horizontalAdvance(text)
         assert cv.tree.columnWidth(col) < QtWidgets.QPushButton(text).sizeHint().width()
     assert header.sectionResizeMode(cv._NUDGE_COL) == QtWidgets.QHeaderView.Fixed
     assert cv._nudge_btn_width < cv.tree.columnWidth(cv._HIDE_COL)
