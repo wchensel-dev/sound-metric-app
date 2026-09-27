@@ -6,7 +6,10 @@ the decay as well as overall.
 
 from __future__ import annotations
 
+import ast
+import dataclasses
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -17,10 +20,12 @@ from sound_metric_app.dsp.quantile import (
     DEFAULT_QUANTILE,
     DEFAULT_SAMPLES_PER_BASIS,
     QUANTILE_METHOD,
+    QUANTILE_METRICS,
     _min_knot_gap_ms,
     _unwarp,
     _warp,
     fit_quantile_curve,
+    fit_trace_quantile,
 )
 from sound_metric_app.models import Frame
 
@@ -274,3 +279,65 @@ def test_fitting_does_not_touch_the_trace_it_reads():
     assert trace.t_ms == pytest.approx(t_before)
     assert trace.values == pytest.approx(v_before, nan_ok=True)
     assert trace.level == level_before
+
+
+def test_a_trace_is_fitted_anchored_at_its_window_start():
+    trace = _liaeq_trace()
+    curve = fit_trace_quantile(trace, "liaeq_100ms_db", label="#1 ML")
+    expected = _fit(trace)
+    assert curve.anchor_ms == pytest.approx(float(trace.t_ms[trace.window_start_index]))
+    assert curve.values == pytest.approx(expected.values)
+    assert curve.source_metric == "liaeq_100ms_db"
+    assert curve.y_label == trace.y_label
+    assert curve.label == "#1 ML"
+
+
+def test_a_metric_drawn_as_a_line_takes_no_curve():
+    trace = build_metric_trace(_shot_frame(), "peak_dba")
+    assert "peak_dba" not in QUANTILE_METRICS
+    assert fit_trace_quantile(trace, "peak_dba") is None
+
+
+def test_a_fitted_curve_is_frozen():
+    curve = _fit(_liaeq_trace())
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        curve.anchor_ms = 0.0
+    moved = dataclasses.replace(curve, anchor_ms=curve.anchor_ms + 1.0)
+    assert moved.anchor_ms == pytest.approx(curve.anchor_ms + 1.0)
+
+
+#: The only modules allowed to reach the quantile curve: the estimator, its
+#: package re-export, and the Compare tab's graph. Batch reports, storage, the
+#: CLI and exports must never draw on it.
+_QUANTILE_ALLOWED = {
+    "dsp/__init__.py",
+    "dsp/quantile.py",
+    "ui/graph/__init__.py",
+    "ui/graph/metric_graph.py",
+    "ui/graph/quantile_overlay.py",
+    "ui/views/compare.py",
+}
+
+
+def _imports_quantile(tree: ast.AST) -> bool:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if "quantile" in (node.module or "").lower():
+                return True
+            if any("quantile" in alias.name.lower() for alias in node.names):
+                return True
+        elif isinstance(node, ast.Import):
+            if any("quantile" in alias.name.lower() for alias in node.names):
+                return True
+    return False
+
+
+def test_only_the_compare_graph_reaches_the_quantile_curve():
+    package = Path(__file__).resolve().parents[1] / "src" / "sound_metric_app"
+    offenders = sorted(
+        rel
+        for path in package.rglob("*.py")
+        if (rel := path.relative_to(package).as_posix()) not in _QUANTILE_ALLOWED
+        and _imports_quantile(ast.parse(path.read_text(encoding="utf-8")))
+    )
+    assert offenders == []

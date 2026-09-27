@@ -18,8 +18,10 @@ from .processor import MetricsProcessor
 from .quantile import (
     DEFAULT_QUANTILE,
     QUANTILE_METHOD,
+    QUANTILE_METRICS,
     QuantileCurve,
     fit_quantile_curve,
+    fit_trace_quantile,
 )
 from .weighting import a_weighting_sos, apply_a_weighting
 
@@ -29,8 +31,10 @@ __all__ = [
     "apply_a_weighting",
     "DEFAULT_QUANTILE",
     "QUANTILE_METHOD",
+    "QUANTILE_METRICS",
     "QuantileCurve",
     "fit_quantile_curve",
+    "fit_trace_quantile",
     "find_onset",
     "window_samples",
     "pa_to_db",

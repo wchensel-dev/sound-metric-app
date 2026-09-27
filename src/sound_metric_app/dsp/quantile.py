@@ -34,20 +34,29 @@ Wang 2010 for a guaranteed ordering).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 from scipy.interpolate import BSpline
 from scipy.linalg import solveh_banded
+
+if TYPE_CHECKING:  # pragma: no cover - annotation only
+    from .graphing import MetricTrace
 
 __all__ = [
     "DEFAULT_QUANTILE",
     "DEFAULT_SAMPLES_PER_BASIS",
     "DEFAULT_WARP_EPS_MS",
     "QUANTILE_METHOD",
+    "QUANTILE_METRICS",
     "QuantileCurve",
     "fit_quantile_curve",
+    "fit_trace_quantile",
 ]
 
+#: Metrics drawn as a cloud with a spread to take a quantile of; the rest are
+#: single-valued lines a quantile would only redraw.
+QUANTILE_METRICS = frozenset({"liaeq_100ms_db"})
 #: Tracks the top edge of an LIAeq dBA cloud without chasing outliers as 0.99 does.
 DEFAULT_QUANTILE = 0.95
 #: Coefficient budget, as samples per coefficient, so it scales with the capture
@@ -190,11 +199,13 @@ def _weighted_fit(design, y: np.ndarray, weights: np.ndarray) -> np.ndarray:
         return np.linalg.lstsq(dense, rhs, rcond=None)[0]
 
 
-@dataclass
+@dataclass(frozen=True)
 class QuantileCurve:
     """A fitted quantile curve: the drawn polyline plus the model to resample it.
 
-    ``t_ms`` is non-uniform (union of a warped and a real-time grid).
+    ``t_ms`` is non-uniform (union of a warped and a real-time grid). Frozen so a
+    cached fit can be shared between readers; derive a moved copy with
+    :func:`dataclasses.replace`.
     """
 
     t_ms: np.ndarray
@@ -367,4 +378,35 @@ def fit_quantile_curve(
         source_metric=source_metric,
         label=label,
         data_range=(lo, hi),
+    )
+
+
+def fit_trace_quantile(
+    trace: MetricTrace,
+    metric_key: str,
+    *,
+    quantile: float = DEFAULT_QUANTILE,
+    label: str = "",
+) -> QuantileCurve | None:
+    """Fit ``trace`` the way the app does; None if ``metric_key`` takes no curve.
+
+    The one place that decides which metrics are fitted (:data:`QUANTILE_METRICS`)
+    and where a fit is anchored — the trace's calculation-window start, which is
+    the detected onset — so any reader of a trace draws the same curve.
+    """
+    if metric_key not in QUANTILE_METRICS:
+        return None
+    anchor = (
+        float(trace.t_ms[trace.window_start_index])
+        if trace.window_start_index is not None
+        else None
+    )
+    return fit_quantile_curve(
+        trace.t_ms,
+        trace.values,
+        quantile=quantile,
+        anchor_ms=anchor,
+        y_label=trace.y_label,
+        source_metric=metric_key,
+        label=label,
     )

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ...dsp import SIGNED_METRICS, MetricTrace
-from ...dsp.quantile import QuantileCurve, fit_quantile_curve
+from ...dsp.quantile import QUANTILE_METRICS, QuantileCurve, fit_trace_quantile
 from ...models import MicPosition
 from ..compare_series import CompareSeries
 from ..controller import WorkflowController
@@ -74,9 +74,6 @@ class CompareView(_View):
 
     #: Pre-selected metric: the impulse curve is what these comparisons are for.
     _DEFAULT_METRIC = "impulse_pa_ms"
-
-    #: The only metric drawn as a cloud with a spread to take a quantile of.
-    _QUANTILE_METRIC = "liaeq_100ms_db"
 
     _EMPTY_MESSAGE = (
         "Pin shots here with the Compare button on a Batch average or Data bank shot row."
@@ -344,7 +341,7 @@ class CompareView(_View):
             self._quantiles.clear()
             self._cache_key = cache_key
         # Before anything reads the mode: unavailable reads as Hidden.
-        self.graph.set_quantile_available(cache_key[0] == self._QUANTILE_METRIC)
+        self.graph.set_quantile_available(cache_key[0] in QUANTILE_METRICS)
 
         self._graph_token += 1
         token = self._graph_token
@@ -426,24 +423,9 @@ class CompareView(_View):
     def _fit_quantile(
         self, trace: MetricTrace, series: CompareSeries, metric_key: str
     ) -> QuantileCurve | None:
-        """Fit one series' quantile curve on the worker; None on any failure.
-
-        Anchored at the window start (the detected onset for this metric).
-        """
-        anchor = (
-            float(trace.t_ms[trace.window_start_index])
-            if trace.window_start_index is not None
-            else None
-        )
+        """Fit one series' quantile curve on the worker; None on any failure."""
         try:
-            return fit_quantile_curve(
-                trace.t_ms,
-                trace.values,
-                anchor_ms=anchor,
-                y_label=trace.y_label,
-                source_metric=metric_key,
-                label=series.label,
-            )
+            return fit_trace_quantile(trace, metric_key, label=series.label)
         except Exception:  # noqa: BLE001 — an absent aid, never a broken overlay
             return None
 
