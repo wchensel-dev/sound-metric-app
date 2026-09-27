@@ -242,9 +242,23 @@ class CompareView(_View):
         return True
 
     def _remove(self, series: CompareSeries) -> None:
-        """Unpin one series — the row's own Remove button."""
+        """Unpin one series — the row's own Remove button.
+
+        Removing the anchor promotes the next row, whose slide the anchor
+        position ignores; every survivor's slide is rebased onto it so the
+        lined-up fronts stay lined up, and it loses its now-dead entry.
+        """
+        was_anchor = bool(self._series) and self._series[0].key == series.key
         self._series = [s for s in self._series if s.key != series.key]
         self._forget(series)
+        if was_anchor and self._series:
+            base = self._offsets.pop(self._series[0].key, 0)
+            if base:
+                self._offsets = {
+                    key: steps - base
+                    for key, steps in self._offsets.items()
+                    if steps != base
+                }
         self._on_pinned_changed()
 
     def _toggle_hidden(self, series: CompareSeries) -> None:

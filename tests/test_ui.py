@@ -836,6 +836,36 @@ def test_compare_slide_is_forgotten_when_its_shot_is_removed(window, qtbot):
     assert second_key not in cv._offsets
 
 
+def test_compare_removing_the_anchor_rebases_slides_onto_the_new_one(window, qtbot):
+    rv = _loaded_report(window, qtbot)
+    cv = window.compare_view
+    for button in _frp_compare_buttons(rv):
+        button.click()
+    qtbot.waitUntil(lambda: len(cv.graph._plot.listDataItems()) == 2, timeout=5000)
+    second_key = cv._series[1].key
+    true_t0 = float(cv._traces[second_key].t_ms[0])
+
+    cv._nudge(cv._series[1], +5)
+    # The fixture pins only two rows; stand in a third row's slide (+2) to check
+    # it keeps its place relative to the promoted anchor.
+    from sound_metric_app.models import MicPosition
+
+    third_key = (-1, MicPosition.ML)
+    cv._offsets[third_key] = 2
+
+    _row_button(cv, 0, cv._REMOVE_COL).click()
+    qtbot.waitUntil(lambda: len(cv._series) == 1, timeout=5000)
+
+    # The promoted anchor sits at its true time with no dead entry left behind…
+    assert second_key not in cv._offsets
+    qtbot.waitUntil(
+        lambda: float(cv.graph._series[0][1].t_ms[0]) == pytest.approx(true_t0),
+        timeout=5000,
+    )
+    # …and the rest move with it, so the fronts stay lined up.
+    assert cv._offsets[third_key] == -3
+
+
 def test_compare_row_gives_its_width_to_the_label_not_the_buttons(window, qtbot):
     # A tree header stretches its *last* section by default, which handed the
     # spare width to the Remove column and elided every row down to "#7 ·…".
