@@ -2802,6 +2802,32 @@ def test_overlay_draws_the_fit_over_its_samples_and_replace_instead_of_them(qtbo
     assert graph._window_x_bounds == (0.0, 4.0)
 
 
+def test_replace_keeps_a_fitless_series_raw_cloud_pickable(qtbot):
+    # Replace falls back to the raw cloud for a series with no fit; that cloud
+    # is on screen, so it must stay among the pick candidates.
+    from sound_metric_app.ui.graph import MetricGraph
+
+    graph = MetricGraph(quantile_curves=True)
+    qtbot.addWidget(graph)
+    graph.set_quantile_available(True)
+    a, b = _overlay_traces()
+    series = [("first", a, BLUE), ("second", b, RED)]
+    curves = [_quantile_curve(level=5.0), None]
+
+    graph._quantile_button.button.click()  # -> overlay
+    graph.show_traces(series, "two shots", quantile_curves=curves)
+    assert graph._raw_series == [0, 1]
+
+    graph._quantile_button.button.click()  # -> replace
+    graph.show_traces(series, "two shots", quantile_curves=curves)
+    assert not graph._raw_drawn
+    assert graph._raw_series == [1]  # only the fitless shot keeps its cloud
+    assert len(graph._curve_items) == 1
+
+    graph.show_message("nothing")
+    assert graph._raw_series == []
+
+
 def test_replace_frames_y_on_the_curves_it_actually_shows(qtbot):
     # X stays the trace's extent in every mode.
     from sound_metric_app.ui.graph import MetricGraph

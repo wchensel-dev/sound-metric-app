@@ -276,6 +276,9 @@ class MetricGraph(QtWidgets.QWidget):
         self._quantile_items: list[tuple[str, object]] = []
         #: False in Replace mode, so hidden samples are not pickable.
         self._raw_drawn = True
+        #: Indices of series whose raw curve is drawn -- in Replace mode, those
+        #: with no fit to stand in for it -- so exactly those are pickable.
+        self._raw_series: list[int] = []
 
         # A click anywhere on the plot scene tries to select the nearest sample.
         self._plot.scene().sigMouseClicked.connect(self._on_plot_clicked)
@@ -371,6 +374,7 @@ class MetricGraph(QtWidgets.QWidget):
         self._curve_items = []
         self._quantile_items = []
         self._raw_drawn = True
+        self._raw_series = []
         self.clear_readout()
         self._framing.set_curve_enabled(False)
         self._framing.set_window_enabled(False)
@@ -590,6 +594,7 @@ class MetricGraph(QtWidgets.QWidget):
         self._series = series
         self._curve_items = []
         self._quantile_items = []
+        self._raw_series = []
         self.clear_readout()
         first = series[0][1]
         # Typed bounds are kept across a redraw of the same metric -- which is
@@ -612,7 +617,7 @@ class MetricGraph(QtWidgets.QWidget):
         self._raw_drawn = mode != QUANTILE_REPLACE
         quantile_name = quantile_short_label()
 
-        for (label, trace, color), curve in zip(series, curves):
+        for s_index, ((label, trace, color), curve) in enumerate(zip(series, curves)):
             mark_color = color if multiple else self._MARK_COLOR
             draw_raw = self._raw_drawn or curve is None
             # A label is only spent on a legend entry when there is a legend;
@@ -620,6 +625,7 @@ class MetricGraph(QtWidgets.QWidget):
             if draw_raw:
                 item = self._draw_curve(trace, color, label if multiple else None)
                 self._curve_items.append((item, color, not trace.connected))
+                self._raw_series.append(s_index)
             if curve is not None:
                 # Legend it only when it replaces the raw curve's row.
                 draw_quantile_curve(
@@ -843,13 +849,12 @@ class MetricGraph(QtWidgets.QWidget):
         vb = self._plot.getPlotItem().vb
         view_pos = vb.mapSceneToView(scene_pos)
 
-        # Only visible curves are pickable: raw samples unless in Replace, plus fits.
-        candidates: list[tuple[bool, int, np.ndarray, np.ndarray]] = []
-        if self._raw_drawn:
-            candidates += [
-                (False, i, trace.t_ms, trace.values)
-                for i, (_label, trace, _color) in enumerate(self._series)
-            ]
+        # Only visible curves are pickable: the drawn raw samples (all of them
+        # unless in Replace, where only fitless series keep theirs), plus fits.
+        candidates: list[tuple[bool, int, np.ndarray, np.ndarray]] = [
+            (False, i, self._series[i][1].t_ms, self._series[i][1].values)
+            for i in self._raw_series
+        ]
         candidates += [
             (True, i, curve.t_ms, curve.values)
             for i, (_label, curve) in enumerate(self._quantile_items)
