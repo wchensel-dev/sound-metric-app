@@ -326,7 +326,7 @@ cross-batch Compare view:
   **Clear all** empties the tab.
 
 Both graphs are the same widget: Auto Frame, Frame Calc Window, the +5/+10 ms
-onset close-ups, **Set Axis Bounds…**, the Instantaneous/Fast/Slow **Level** dropdown, and the
+onset close-ups, **Set Axis Bounds…**, the **Absolute value** and **Connect points** toggles, and the
 click-to-read-a-point box behave identically on the two tabs because they *are*
 the one implementation, used twice. Where a single curve draws one bracket, an
 overlay draws the union of its curves' — so the framing buttons still land

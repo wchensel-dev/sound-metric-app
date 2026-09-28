@@ -64,12 +64,6 @@ EXPECTED_SAMPLES: int = 42_000  # CAPTURE_MS at EXPECTED_FS
 # corrected by it, and nothing in the analysis path reads it.
 PRETRIGGER_FLOOR_SAMPLES: int = 100
 
-# Exponential RMS time-weighting constants for SPL-over-time display, IEC 61672.
-# "Fast" and "Slow" are the standard sound-level-meter time constants; they turn
-# the per-cycle swing of the raw waveform into a continuous level envelope.
-FAST_TIME_S: float = 0.125
-SLOW_TIME_S: float = 1.0
-
 # Default local SQLite database file (relative to working dir).
 DEFAULT_DB_PATH: str = "sound_metrics.db"
 

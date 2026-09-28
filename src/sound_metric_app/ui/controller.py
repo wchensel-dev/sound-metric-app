@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Iterator
 
 from .. import config
-from ..dsp import SMOOTHING_INSTANT, MetricTrace, build_metric_trace
+from ..dsp import MetricTrace, build_metric_trace
 from ..ingestion import ChannelInfo, autotag_map, list_channels, read_capture
 from ..models import Batch, Cluster, Combination, DiscardedFile, MicPosition, Shot
 from ..services import (
@@ -464,17 +464,14 @@ class WorkflowController:
         shot_id: int,
         position: MicPosition,
         metric_key: str,
-        smoothing: str = SMOOTHING_INSTANT,
         absolute: bool = False,
     ) -> MetricTrace:
         """The time-series a Report graph draws for one shot/mic/metric.
 
         Re-reads the shot's capture (the raw samples are not stored, only the
-        scalar metrics are) and builds the metric's curve. ``smoothing`` picks
-        how the SPL-over-time curve is drawn (instantaneous vs Fast/Slow
-        time-weighted), and ``absolute`` whether the signed peak curves are drawn
-        signed (the default) or rectified to magnitude; neither touches the
-        reported scalar. See :func:`~sound_metric_app.dsp.build_metric_trace`. The
+        scalar metrics are) and builds the metric's curve. ``absolute`` picks
+        whether the signed peak curves are drawn signed (the default) or
+        rectified to magnitude; it never touches the reported scalar. See :func:`~sound_metric_app.dsp.build_metric_trace`. The
         DB read and the capture read + DSP are both done here so the whole thing
         can run on a worker thread. Raises ``LookupError`` if the shot is gone and
         ``ValueError`` if the mic position has no channel or the channel is
@@ -493,4 +490,4 @@ class WorkflowController:
         frame = next((f for f in frames if f.channel == channel), None)
         if frame is None:
             raise ValueError(f"Channel {channel!r} not found in {Path(shot.source_file).name}.")
-        return build_metric_trace(frame, metric_key, smoothing, absolute=absolute)
+        return build_metric_trace(frame, metric_key, absolute=absolute)

@@ -15,15 +15,29 @@ of four collaborators kept in their own modules so the widget stays about
   graph, which owns the plot.
 * :mod:`.readout` — the click-to-read box and its pick marker. Which sample was
   clicked stays with the graph, which owns the drawn series.
+* :mod:`.quantile_overlay` — the opt-in quantile-curve button and its drawing;
+  the estimator is :mod:`sound_metric_app.dsp.quantile`.
 """
 
 from __future__ import annotations
 
 from .metric_graph import MetricGraph
 from .palette import _color_swatch, _MARK_COLOR, _MUTED_INK, _SERIES_COLORS, series_color
+from .quantile_overlay import (
+    QUANTILE_HIDDEN,
+    QUANTILE_MODES,
+    QUANTILE_OVERLAY,
+    QUANTILE_REPLACE,
+    quantile_short_label,
+)
 
 __all__ = [
     "MetricGraph",
+    "QUANTILE_HIDDEN",
+    "QUANTILE_MODES",
+    "QUANTILE_OVERLAY",
+    "QUANTILE_REPLACE",
+    "quantile_short_label",
     "series_color",
     "_color_swatch",
     "_MARK_COLOR",

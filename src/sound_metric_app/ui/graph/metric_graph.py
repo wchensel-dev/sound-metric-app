@@ -6,11 +6,18 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from ...dsp import SMOOTHING_FAST, SMOOTHING_INSTANT, SMOOTHING_SLOW, MetricTrace
+from ...dsp import MetricTrace
 from ..format import _unit_of
 from .axis_bounds import AxisBoundsButton, AxisBoundsDialog
 from .framing import _ONSET_ZOOM_MS, _ONSET_ZOOM_START_MS, FramingBar
 from .palette import _MARK_COLOR, _SERIES_COLORS, series_color
+from .quantile_overlay import (
+    QUANTILE_HIDDEN,
+    QUANTILE_REPLACE,
+    QuantileModeButton,
+    draw_quantile_curve,
+    quantile_short_label,
+)
 from .readout import PointReadout
 from .scale_drag_axis import ScaleDragAxis
 
@@ -20,17 +27,14 @@ class MetricGraph(QtWidgets.QWidget):
 
     Used unchanged by both graphing tabs — the Batch average tab hands it a
     single trace, the Compare tab a list — so the framing buttons, the
-    level-weighting dropdown, the point readout, and the theming are one
+    display toggles, the point readout, and the theming are one
     implementation that cannot drift between the two. Overlaying is the only
     difference between the callers, and it is expressed as the *count* of series
     passed in: :meth:`show_trace` is :meth:`show_traces` with one.
 
     A thin wrapper over a :class:`pyqtgraph.PlotWidget`, with a header row above
-    it: the graph title on the left and a level-weighting dropdown on the right.
-    That dropdown chooses how the SPL-over-time curve is drawn — the raw
-    per-sample level (a point cloud) or a Fast/Slow time-weighted RMS envelope (a
-    continuous line). It emits :attr:`smoothingChanged` when the user switches so
-    the owning view can re-request the trace(s). Colours track the active
+    it: the graph title on the left and the display toggles on the right.
+    Colours track the active
     light/dark palette so the plot doesn't clash with the rest of the window.
 
     With more than one series, each curve takes the next colour from
@@ -52,29 +56,29 @@ class MetricGraph(QtWidgets.QWidget):
     spring the frame back; a typed Y also outlives the framing buttons, which
     otherwise pin Y to the curve's extent.
 
-    The framing buttons, the axis-bounds form, and the readout box are built by
+    An opt-in quantile-curve button (``quantile_curves``) cycles a fitted curve
+    between hidden, overlaid, and replacing the samples. The caller computes the
+    fits; the level bar and window brackets are drawn in every mode.
+
+    The framing buttons, the axis-bounds form, the readout box, and the quantile
+    button are built by
     :class:`~sound_metric_app.ui.graph.framing.FramingBar`,
-    :class:`~sound_metric_app.ui.graph.axis_bounds.AxisBoundsButton`, and
-    :class:`~sound_metric_app.ui.graph.readout.PointReadout`; the bounds those
-    buttons frame to, and the hit-testing behind a pick, stay here — both need
-    the drawn series this widget owns.
+    :class:`~sound_metric_app.ui.graph.axis_bounds.AxisBoundsButton`,
+    :class:`~sound_metric_app.ui.graph.readout.PointReadout`, and
+    :class:`~sound_metric_app.ui.graph.quantile_overlay.QuantileModeButton`; the
+    bounds those buttons frame to, and the hit-testing behind a pick, stay here —
+    both need the drawn series this widget owns.
     """
 
-    #: Emitted when the user picks a different level-weighting from the dropdown.
-    smoothingChanged = QtCore.Signal()
-
-    #: Emitted when the user toggles the absolute-value button. Like
-    #: :attr:`smoothingChanged`, the owning view re-requests the trace(s) — the
+    #: Emitted when the user toggles the absolute-value button. The owning view
+    #: re-requests the trace(s) — the
     #: choice is baked into the curve by :func:`~sound_metric_app.dsp.build_metric_trace`,
     #: not applied to already-drawn values.
     absoluteChanged = QtCore.Signal()
 
-    #: Dropdown entries: (label, ``build_metric_trace`` smoothing mode).
-    _SMOOTHING_OPTIONS = (
-        ("Instantaneous", SMOOTHING_INSTANT),
-        ("Fast (125 ms)", SMOOTHING_FAST),
-        ("Slow (1 s)", SMOOTHING_SLOW),
-    )
+    #: Emitted when the user cycles the quantile-curve button; the owning view
+    #: re-renders because it computes the fits.
+    quantileModeChanged = QtCore.Signal()
 
     #: The graph's colour cycle, reachable through the widget because that is
     #: where callers meet it (see :meth:`series_color`). Defined in
@@ -116,30 +120,18 @@ class MetricGraph(QtWidgets.QWidget):
     _ONSET_ZOOM_START_MS = _ONSET_ZOOM_START_MS
     _ONSET_ZOOM_MS = _ONSET_ZOOM_MS
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, quantile_curves: bool = False):
+        """``quantile_curves`` builds the quantile-curve button (off by default)."""
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # Header: title on the left, level-weighting dropdown on the right.
+        # Header: title on the left, display toggles on the right.
         header = QtWidgets.QHBoxLayout()
         self._title_label = QtWidgets.QLabel("")
         self._title_label.setStyleSheet("font-weight: 600;")
         header.addWidget(self._title_label)
         header.addStretch(1)
-        header.addWidget(QtWidgets.QLabel("Level:"))
-        self._smoothing_combo = QtWidgets.QComboBox()
-        for label, mode in self._SMOOTHING_OPTIONS:
-            self._smoothing_combo.addItem(label, mode)
-        self._smoothing_combo.setToolTip(
-            "How the SPL-over-time curve is drawn.\n"
-            "Instantaneous: raw per-sample level (a point cloud).\n"
-            "Fast / Slow: time-weighted RMS envelope (a smooth line)."
-        )
-        self._smoothing_combo.currentIndexChanged.connect(
-            lambda *_: self.smoothingChanged.emit()
-        )
-        header.addWidget(self._smoothing_combo)
         # Absolute-value toggle: off draws the signed peak curve (whose high point
         # is the reported peak); on rectifies it to magnitude. Checkable so its
         # pressed state shows which presentation is live.
@@ -158,18 +150,26 @@ class MetricGraph(QtWidgets.QWidget):
         # so the samples read as a curve. Purely a rendering choice over the same
         # data, so it restyles the drawn curves in place (see
         # :meth:`_apply_connect_style`) rather than re-requesting the trace — the
-        # view and any picked point survive the toggle. No effect on the Fast/Slow
-        # envelopes, which are already joined lines.
+        # view and any picked point survive the toggle. No effect on the Impulse
+        # and Leq curves, which are already joined lines.
         self._connect_button = QtWidgets.QPushButton("Connect points")
         self._connect_button.setCheckable(True)
         self._connect_button.setToolTip(
             "Join the instantaneous samples with a line.\n"
             "Off: one dot per sample (a point cloud).\n"
             "On: the dots are connected so they read as a curve.\n"
-            "The Fast/Slow envelopes are already lines and are unaffected."
+            "Curves that are already lines are unaffected."
         )
         self._connect_button.toggled.connect(self._on_connect_toggled)
         header.addWidget(self._connect_button)
+        # None when not opted in; hidden until a metric offers the curve.
+        self._quantile_button = (
+            QuantileModeButton(header, on_change=self.quantileModeChanged.emit)
+            if quantile_curves
+            else None
+        )
+        if self._quantile_button is not None:
+            self._quantile_button.set_available(False)
         layout.addLayout(header)
 
         # Both axes carry the tick numbers as scale handles: dragging them
@@ -249,19 +249,22 @@ class MetricGraph(QtWidgets.QWidget):
         self._connect_points = False
         #: The drawn curve items, one per series, as ``(item, colour, is_cloud)``.
         #: ``is_cloud`` is True for an instantaneous point cloud — the only kind
-        #: the Connect-points toggle restyles; an envelope stays a line. Kept so
+        #: the Connect-points toggle restyles; a line curve stays a line. Kept so
         #: the toggle can add or drop the connecting line without a full redraw.
         self._curve_items: list[tuple[object, tuple[int, int, int], bool]] = []
+        #: Drawn quantile curves as ``(label, QuantileCurve)``, for picking.
+        self._quantile_items: list[tuple[str, object]] = []
+        #: False in Replace mode, so hidden samples are not pickable.
+        self._raw_drawn = True
+        #: Indices of series whose raw curve is drawn -- in Replace mode, those
+        #: with no fit to stand in for it -- so exactly those are pickable.
+        self._raw_series: list[int] = []
 
         # A click anywhere on the plot scene tries to select the nearest sample.
         self._plot.scene().sigMouseClicked.connect(self._on_plot_clicked)
 
         self._apply_theme()
         self.show_message("Click a metric cell on a shot row to graph it.")
-
-    def current_smoothing(self) -> str:
-        """The ``build_metric_trace`` smoothing mode currently selected."""
-        return self._smoothing_combo.currentData()
 
     def absolute_value(self) -> bool:
         """Whether the absolute-value (magnitude) presentation is toggled on.
@@ -275,6 +278,17 @@ class MetricGraph(QtWidgets.QWidget):
         """Whether the Connect-points toggle is on (point clouds drawn joined)."""
         return self._connect_points
 
+    def quantile_mode(self) -> str:
+        """Hidden, overlay, or replace; hidden whenever the button is unavailable."""
+        if self._quantile_button is None or not self._quantile_button.is_available():
+            return QUANTILE_HIDDEN
+        return self._quantile_button.mode()
+
+    def set_quantile_available(self, available: bool) -> None:
+        """Show or hide the quantile button; the chosen mode is kept while hidden."""
+        if self._quantile_button is not None:
+            self._quantile_button.set_available(available)
+
     def _on_connect_toggled(self, checked: bool) -> None:
         """Add or drop the connecting line on the drawn point clouds.
 
@@ -287,8 +301,8 @@ class MetricGraph(QtWidgets.QWidget):
     def _apply_connect_style(self) -> None:
         """Give each point-cloud curve a connecting pen, or none, per the toggle.
 
-        Envelope curves (``is_cloud`` False) are already joined lines and keep
-        their pen untouched, so switching to Fast/Slow and back is unaffected.
+        Line curves (``is_cloud`` False) are already joined and keep their pen
+        untouched.
         """
         for item, color, is_cloud in self._curve_items:
             if is_cloud:
@@ -337,6 +351,9 @@ class MetricGraph(QtWidgets.QWidget):
         self._y_bounds = None
         self._series = []
         self._curve_items = []
+        self._quantile_items = []
+        self._raw_drawn = True
+        self._raw_series = []
         self.clear_readout()
         self._framing.set_curve_enabled(False)
         self._framing.set_window_enabled(False)
@@ -418,6 +435,23 @@ class MetricGraph(QtWidgets.QWidget):
             float(y_range[1]),
         )
 
+    def is_showing_curves(self) -> bool:
+        """Whether the plot holds drawn series rather than a message."""
+        return bool(self._series)
+
+    def set_view(
+        self,
+        x_range: tuple[float, float],
+        y_range: tuple[float, float] | None,
+    ) -> None:
+        """Restore a view after a redraw; unlike :meth:`set_axis_bounds`, not remembered.
+
+        A None ``y_range`` leaves Y to autorange.
+        """
+        self._plot.setXRange(*x_range, padding=0)
+        if y_range is not None:
+            self._plot.setYRange(*y_range, padding=0)
+
     def edit_axis_bounds(self) -> None:
         """Ask for X/Y bounds and frame the plot to them. A no-op when cancelled.
 
@@ -491,7 +525,7 @@ class MetricGraph(QtWidgets.QWidget):
         """
         self.show_traces([("", trace, self.series_color(0))], subtitle)
 
-    def show_traces(self, series, subtitle: str = "") -> None:
+    def show_traces(self, series, subtitle: str = "", quantile_curves=None) -> None:
         """Draw ``series`` — ordered ``(label, MetricTrace, colour)`` — overlaid.
 
         Every trace is assumed to be the *same* metric over different shots, so
@@ -504,11 +538,22 @@ class MetricGraph(QtWidgets.QWidget):
         position: a view that can hide a curve without unpinning it has to keep
         the survivors on the colours they already had, which position alone
         cannot express. :meth:`series_color` is the palette to spend.
+
+        ``quantile_curves`` optionally parallels ``series`` with a
+        :class:`~sound_metric_app.dsp.quantile.QuantileCurve` (or None) each. A
+        series with no fit keeps its raw curve even in Replace.
         """
         series = [(label, trace, color) for label, trace, color in series]
         if not series:
             self.show_message(subtitle or "Nothing to graph.")
             return
+
+        curves = list(quantile_curves) if quantile_curves is not None else []
+        curves += [None] * (len(series) - len(curves))
+        mode = self.quantile_mode()
+        show_quantile = mode != QUANTILE_HIDDEN and any(c is not None for c in curves)
+        if not show_quantile:
+            curves = [None] * len(series)
 
         self._plot.clear()
         self._legend.clear()
@@ -517,6 +562,8 @@ class MetricGraph(QtWidgets.QWidget):
         # New curves invalidate any prior point pick (different samples/units).
         self._series = series
         self._curve_items = []
+        self._quantile_items = []
+        self._raw_series = []
         self.clear_readout()
         first = series[0][1]
         # Typed bounds are kept across a redraw of the same metric -- which is
@@ -536,12 +583,29 @@ class MetricGraph(QtWidgets.QWidget):
         window_starts: list[float] = []
         window_ends: list[float] = []
 
-        for label, trace, color in series:
+        self._raw_drawn = mode != QUANTILE_REPLACE
+        quantile_name = quantile_short_label()
+
+        for s_index, ((label, trace, color), curve) in enumerate(zip(series, curves)):
             mark_color = color if multiple else self._MARK_COLOR
+            draw_raw = self._raw_drawn or curve is None
             # A label is only spent on a legend entry when there is a legend;
             # pyqtgraph adds one row per named curve regardless of visibility.
-            item = self._draw_curve(trace, color, label if multiple else None)
-            self._curve_items.append((item, color, not trace.connected))
+            if draw_raw:
+                item = self._draw_curve(trace, color, label if multiple else None)
+                self._curve_items.append((item, color, not trace.connected))
+                self._raw_series.append(s_index)
+            if curve is not None:
+                # Legend it only when it replaces the raw curve's row.
+                draw_quantile_curve(
+                    self._plot,
+                    curve,
+                    color,
+                    (f"{label} {quantile_name}" if label else quantile_name)
+                    if multiple and not draw_raw
+                    else None,
+                )
+                self._quantile_items.append((label, curve))
             if trace.peak_index is not None:
                 self._plot.addItem(
                     pg.InfiniteLine(
@@ -564,16 +628,25 @@ class MetricGraph(QtWidgets.QWidget):
             if not finite.any():
                 continue
             xs = trace.t_ms[finite]
+            # X from the trace even when hidden, so Auto Frame ignores the mode.
             finite_x += [float(xs[0]), float(xs[-1])]
             # Y extent of everything autorange would take in -- the curve plus
             # the horizontal level line -- so a framed slice keeps the Y range
             # the full view has. A non-finite level compares False against the
             # running min/max and drops out rather than poisoning the range,
             # which is why it is appended to an already-seeded list.
-            finite_y += [
-                float(np.min(trace.values[finite])),
-                float(np.max(trace.values[finite])),
-            ]
+            if draw_raw:
+                finite_y += [
+                    float(np.min(trace.values[finite])),
+                    float(np.max(trace.values[finite])),
+                ]
+            if curve is not None:
+                q_finite = np.isfinite(curve.values)
+                if q_finite.any():
+                    finite_y += [
+                        float(np.min(curve.values[q_finite])),
+                        float(np.max(curve.values[q_finite])),
+                    ]
             if trace.level is not None:
                 finite_y.append(float(trace.level))
 
@@ -585,7 +658,8 @@ class MetricGraph(QtWidgets.QWidget):
         if finite_x:
             x0, x1 = min(finite_x), max(finite_x)
             self._x_bounds = (x0, x1)
-            y0, y1 = min(finite_y), max(finite_y)
+            # Empty only if every series is replaced by an all-NaN fit.
+            y0, y1 = (min(finite_y), max(finite_y)) if finite_y else (0.0, 0.0)
             # A flat curve would give a zero-height range Qt cannot draw, so give
             # it a nominal 1 dB.
             if y1 <= y0:
@@ -617,8 +691,8 @@ class MetricGraph(QtWidgets.QWidget):
         a point cloud in place when the Connect-points toggle flips.
         """
         if trace.connected:
-            # Time-weighted envelope: a joined line reads as the continuous level
-            # a meter shows. NaN samples break the line into gaps.
+            # Impulse / Leq curve: a joined line. NaN samples break the line
+            # into gaps.
             return self._plot.plot(
                 trace.t_ms, trace.values, pen=pg.mkPen(color, width=1), name=name
             )
@@ -744,15 +818,26 @@ class MetricGraph(QtWidgets.QWidget):
         vb = self._plot.getPlotItem().vb
         view_pos = vb.mapSceneToView(scene_pos)
 
-        best: tuple[float, int, int, float] | None = None  # (px, series, idx, value)
-        for s_index, (_label, trace, _color) in enumerate(self._series):
-            t = trace.t_ms
-            # t_ms is sorted ascending; the click falls between i-1 and i.
+        # Only visible curves are pickable: the drawn raw samples (all of them
+        # unless in Replace, where only fitless series keep theirs), plus fits.
+        candidates: list[tuple[bool, int, np.ndarray, np.ndarray]] = [
+            (False, i, self._series[i][1].t_ms, self._series[i][1].values)
+            for i in self._raw_series
+        ]
+        candidates += [
+            (True, i, curve.t_ms, curve.values)
+            for i, (_label, curve) in enumerate(self._quantile_items)
+        ]
+
+        # (px, is_quantile, source index, sample index, value)
+        best: tuple[float, bool, int, int, float] | None = None
+        for is_quantile, s_index, t, values in candidates:
+            # Both axes are sorted ascending; the click falls between i-1 and i.
             i = int(np.searchsorted(t, view_pos.x()))
             for idx in (i - 1, i):
                 if not 0 <= idx < t.size:
                     continue
-                value = float(trace.values[idx])
+                value = float(values[idx])
                 if not np.isfinite(value):
                     continue
                 # Map the sample back to screen space so the comparison is the
@@ -762,12 +847,15 @@ class MetricGraph(QtWidgets.QWidget):
                     np.hypot(point.x() - scene_pos.x(), point.y() - scene_pos.y())
                 )
                 if best is None or distance < best[0]:
-                    best = (distance, s_index, idx, value)
+                    best = (distance, is_quantile, s_index, idx, value)
 
         if best is None or best[0] > self._PICK_TOLERANCE_PX:
             return
-        _distance, s_index, idx, value = best
-        self._show_readout(idx, value, series_index=s_index)
+        _distance, is_quantile, s_index, idx, value = best
+        if is_quantile:
+            self._show_quantile_readout(s_index, idx, value)
+        else:
+            self._show_readout(idx, value, series_index=s_index)
 
     def _show_readout(self, idx: int, value: float, series_index: int = 0) -> None:
         """Mark sample ``idx`` of one series on the plot and fill the readout box.
@@ -781,6 +869,19 @@ class MetricGraph(QtWidgets.QWidget):
         unit_suffix = f" {unit}" if unit else ""
         prefix = f"{label}:  " if label else ""
         self._readout.show(x, value, f"{prefix}{value:.3f}{unit_suffix}  @ {x:.2f} ms")
+
+    def _show_quantile_readout(self, curve_index: int, idx: int, value: float) -> None:
+        """Fill the readout for a fitted curve, labelled (e.g. ``P95``) so it is
+        not mistaken for a measured sample."""
+        label, curve = self._quantile_items[curve_index]
+        x = float(curve.t_ms[idx])
+        unit = _unit_of(curve.y_label or (self._series[0][1].y_label if self._series else ""))
+        unit_suffix = f" {unit}" if unit else ""
+        prefix = f"{label}  " if label else ""
+        name = quantile_short_label(curve.quantile)
+        self._readout.show(
+            x, value, f"{prefix}{name}:  {value:.3f}{unit_suffix}  @ {x:.2f} ms"
+        )
 
     def clear_readout(self) -> None:
         """Remove the picked-point marker and hide the readout box."""
