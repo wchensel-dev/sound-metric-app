@@ -123,7 +123,9 @@ class LevelLabels:
     def add(self, text: str, color: tuple[int, int, int], fill: QtGui.QColor,
             x: float, level: float) -> LevelPill:
         pill = LevelPill(text, color, fill, x, level)
-        self._plot.addItem(pill)
+        # Its bounding rect is in pixels, which autorange would read as data
+        # units; the anchor lies on the level bar, which is already in range.
+        self._plot.addItem(pill, ignoreBounds=True)
         self._pills.append(pill)
         self.relayout()
         return pill

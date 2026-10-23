@@ -1488,6 +1488,44 @@ def test_level_pills_in_separate_columns_are_not_lifted(qtbot):
     assert [p.lift for p in graph._level_labels.pills()] == [0, 0]
 
 
+def test_level_pills_do_not_stretch_the_autorange(qtbot):
+    # A pill's bounding rect is in screen pixels; if autorange read it as data
+    # it would add ~20 "dB" (plus each lift) below every level and pad the view
+    # with empty space. The view's bounds must be the curves' and bars' alone.
+    from sound_metric_app.dsp.graphing import MetricTrace
+    from sound_metric_app.ui.graph import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+    graph.resize(800, 500)
+    graph.show()
+    qtbot.waitExposed(graph)
+
+    def trace(level):
+        return MetricTrace(
+            t_ms=np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+            values=np.array([120.0, 130.0, 140.0, 130.0, 120.0]),
+            y_label="SPL (dBA)",
+            title="LIAeq,100ms",
+            level=level,
+            window_start_index=1,
+            window_end_index=3,
+        )
+
+    graph.show_traces(
+        [("a", trace(130.00), BLUE), ("b", trace(130.05), RED),
+         ("c", trace(130.10), MetricGraph.series_color(2))],
+        "three shots",
+    )
+    qtbot.waitUntil(lambda: any(p.lift > 0 for p in graph._level_labels.pills()))
+    # Marker spots pad the bounds by a fraction of a unit; a pill would add tens.
+    (x_min, x_max), (y_min, y_max) = graph._plot.getViewBox().childrenBounds()
+    assert y_min == pytest.approx(120.0, abs=1.0)
+    assert y_max == pytest.approx(140.0, abs=1.0)
+    assert x_min == pytest.approx(0.0, abs=1.0)
+    assert x_max == pytest.approx(4.0, abs=1.0)
+
+
 def test_level_line_falls_back_to_full_width_without_a_window(qtbot):
     # With no window to bracket (an edge outside the capture) there is no span to
     # draw the segment over, so the level still shows as a full-width line.
