@@ -10,6 +10,7 @@ from ...dsp import MetricTrace
 from ..format import _unit_of
 from .axis_bounds import AxisBoundsButton, AxisBoundsDialog
 from .framing import _ONSET_ZOOM_MS, _ONSET_ZOOM_START_MS, FramingBar
+from .level_label import LevelLabels
 from .palette import _MARK_COLOR, _SERIES_COLORS, series_color
 from .quantile_overlay import (
     QUANTILE_HIDDEN,
@@ -192,6 +193,9 @@ class MetricGraph(QtWidgets.QWidget):
         # curves to tell apart, so a single-trace graph is unchanged by it.
         self._legend = self._plot.addLegend(offset=(-12, 12))
         self._legend.setVisible(False)
+        # Level-bar value pills, re-stacked on every view change so overlaid
+        # shots' numbers never land on top of one another.
+        self._level_labels = LevelLabels(self._plot)
         layout.addWidget(self._plot)
 
         # Bottom toolbar: ease-of-use view controls for the plot above, plus the
@@ -342,6 +346,7 @@ class MetricGraph(QtWidgets.QWidget):
         different metric.
         """
         self._plot.clear()
+        self._level_labels.clear()
         self._legend.clear()
         self._legend.setVisible(False)
         self._title_label.setText(text)
@@ -523,9 +528,13 @@ class MetricGraph(QtWidgets.QWidget):
         what the Batch average tab always wants: no legend, no label, and the
         annotations in their own colour rather than the curve's.
         """
-        self.show_traces([("", trace, self.series_color(0))], subtitle)
+        self.show_traces(
+            [("", trace, self.series_color(0))], subtitle, mark_color=self._MARK_COLOR
+        )
 
-    def show_traces(self, series, subtitle: str = "", quantile_curves=None) -> None:
+    def show_traces(
+        self, series, subtitle: str = "", quantile_curves=None, mark_color=None
+    ) -> None:
         """Draw ``series`` — ordered ``(label, MetricTrace, colour)`` — overlaid.
 
         Every trace is assumed to be the *same* metric over different shots, so
@@ -542,6 +551,12 @@ class MetricGraph(QtWidgets.QWidget):
         ``quantile_curves`` optionally parallels ``series`` with a
         :class:`~sound_metric_app.dsp.quantile.QuantileCurve` (or None) each. A
         series with no fit keeps its raw curve even in Replace.
+
+        Each series' peak marker, level bar, and level readout are drawn in that
+        series' own colour, so they always match the curve they annotate --
+        including when a view that overlays shots (Compare) is down to one
+        visible curve. ``mark_color`` overrides that for every series; only
+        :meth:`show_trace` passes it, to set a lone trace's annotations apart.
         """
         series = [(label, trace, color) for label, trace, color in series]
         if not series:
@@ -556,6 +571,7 @@ class MetricGraph(QtWidgets.QWidget):
             curves = [None] * len(series)
 
         self._plot.clear()
+        self._level_labels.clear()
         self._legend.clear()
         # One curve needs no key: the title already names it.
         self._legend.setVisible(len(series) > 1)
@@ -587,7 +603,7 @@ class MetricGraph(QtWidgets.QWidget):
         quantile_name = quantile_short_label()
 
         for s_index, ((label, trace, color), curve) in enumerate(zip(series, curves)):
-            mark_color = color if multiple else self._MARK_COLOR
+            series_mark = mark_color if mark_color is not None else color
             draw_raw = self._raw_drawn or curve is None
             # A label is only spent on a legend entry when there is a legend;
             # pyqtgraph adds one row per named curve regardless of visibility.
@@ -610,11 +626,11 @@ class MetricGraph(QtWidgets.QWidget):
                 self._plot.addItem(
                     pg.InfiniteLine(
                         pos=float(trace.t_ms[trace.peak_index]), angle=90,
-                        pen=pg.mkPen(mark_color, width=1),
+                        pen=pg.mkPen(series_mark, width=1),
                     )
                 )
             if trace.level is not None:
-                self._draw_level_line(trace, mark_color)
+                self._draw_level_line(trace, series_mark)
             if trace.window_start_index is not None:
                 window_starts.append(float(trace.t_ms[trace.window_start_index]))
             if trace.window_end_index is not None:
@@ -683,6 +699,10 @@ class MetricGraph(QtWidgets.QWidget):
         # operator left automatic refits to the new curves, the ones they typed
         # come back exactly where they put them.
         self._apply_manual_bounds()
+        # Stack the value pills once, now that every one is in. A view that
+        # changes range re-stacks them again off its own signal; one that
+        # doesn't (same shots redrawn, both axes pinned) relies on this pass.
+        self._level_labels.relayout()
 
     def _draw_curve(self, trace, color: tuple[int, int, int], name: str | None):
         """Plot one trace's samples in ``color``, legending it as ``name`` if given.
@@ -788,14 +808,17 @@ class MetricGraph(QtWidgets.QWidget):
         x0 = float(trace.t_ms[trace.window_start_index])
         x1 = float(trace.t_ms[trace.window_end_index])
         self._plot.plot([x0, x1], [trace.level, trace.level], pen=pen)
-        # Anchored bottom-right at the segment's right end, so the text sits just
-        # above the bar and ends flush with the window close rather than centring
-        # on it. Same unit the point readout uses (dBA for LIAeq).
+        # A pill anchored at the segment's right end, so the value sits just
+        # above the bar and ends flush with the window close rather than
+        # centring on it -- on the plot's Base colour, like the legend, so a
+        # curve running under it cannot swallow the text. Same unit the point
+        # readout uses (dBA for LIAeq).
         unit = _unit_of(trace.y_label)
         unit_suffix = f" {unit}" if unit else ""
-        label = pg.TextItem(f"{trace.level:.2f}{unit_suffix}", color=color, anchor=(1, 1))
-        label.setPos(x1, trace.level)
-        self._plot.addItem(label)
+        self._level_labels.add(
+            f"{trace.level:.2f}{unit_suffix}", color,
+            self.palette().color(QtGui.QPalette.Base), x1, trace.level,
+        )
 
     # ---- point readout -------------------------------------------------- #
 

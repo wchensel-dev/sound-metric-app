@@ -25,10 +25,10 @@ _SERIES_COLORS = (
     (120, 130, 145),  # slate
 )
 
-#: Colour of the peak marker / level line on a *single*-series graph, where
-#: the annotation reads best set apart from the curve. Overlaid series take
-#: their own colour for these instead — with several curves in the plot, the
-#: shared colour is the only thing tying a peak line to the curve it marks.
+#: Colour of the peak marker / level line on a sole-trace graph (Batch
+#: average), where the annotation reads best set apart from the curve. Overlaid
+#: series (Compare) take their own colour for these instead — even when only one
+#: is visible, since the shared colour is what ties a marker to its curve.
 _MARK_COLOR = (214, 90, 70)
 
 #: Mid-grey for a Compare row that is not on the graph: the text of a hidden
