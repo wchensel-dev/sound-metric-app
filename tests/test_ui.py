@@ -1452,6 +1452,9 @@ def test_overlapping_level_pills_are_spaced_apart(qtbot):
         [("first", _level_trace(12.50), BLUE), ("second", _level_trace(12.52), RED)],
         "two shots",
     )
+    # Headroom above the bars, so the stack grows upward rather than being
+    # held under the view's top edge.
+    graph._plot.setYRange(0.0, 20.0, padding=0)
     labels = graph._level_labels
     low, high = labels.pills()
     # The view box applies a range change on its next paint, and the pills
@@ -1464,6 +1467,36 @@ def test_overlapping_level_pills_are_spaced_apart(qtbot):
     graph._plot.setYRange(12.45, 12.55, padding=0)
     qtbot.waitUntil(lambda: high.lift == 0)
     assert not labels.screen_rect(low).intersects(labels.screen_rect(high))
+
+
+def test_stacked_level_pills_stay_inside_the_view(qtbot):
+    # Several shots of one configuration report within a fraction of a dB; with
+    # their levels at the top of the Y range, stacking upward would push the
+    # top pills out of the view and clip them. They must stay inside it, apart.
+    from sound_metric_app.ui.graph import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+    graph.resize(800, 500)
+    graph.show()
+    qtbot.waitExposed(graph)
+
+    levels = [12.50, 12.51, 12.52, 12.53, 12.54, 12.55]
+    graph.show_traces(
+        [(f"shot {i}", _level_trace(lv), MetricGraph.series_color(i))
+         for i, lv in enumerate(levels)],
+        "six shots",
+    )
+    graph._plot.setYRange(0.0, 12.56, padding=0)
+    labels = graph._level_labels
+    view = graph._plot.getViewBox().sceneBoundingRect()
+    qtbot.waitUntil(
+        lambda: all(labels.screen_rect(p).top() >= view.top() - 0.5 for p in labels.pills())
+    )
+    rects = [labels.screen_rect(p) for p in labels.pills()]
+    for i, a in enumerate(rects):
+        for b in rects[i + 1:]:
+            assert not a.intersects(b)
 
 
 def test_level_pills_in_separate_columns_are_not_lifted(qtbot):
@@ -1484,6 +1517,7 @@ def test_level_pills_in_separate_columns_are_not_lifted(qtbot):
         "two shots",
     )
     graph._plot.setXRange(0.0, 4.0, padding=0)
+    graph._plot.setYRange(0.0, 20.0, padding=0)
     qtbot.wait(50)
     assert [p.lift for p in graph._level_labels.pills()] == [0, 0]
 

@@ -35,8 +35,8 @@ class LevelPill(pg.GraphicsObject):
 
     Positioned in data coordinates at the bar's right end (``x``, ``level``) but
     drawn in screen pixels (``ItemIgnoresTransformations``), so it keeps its size
-    at any zoom. :attr:`lift` raises it that many pixels off its natural spot;
-    when lifted, a leader line runs back down to the bar.
+    at any zoom. :attr:`lift` raises it that many pixels off its natural spot
+    (negative lowers it); when it leaves the bar, a leader line runs back to it.
     """
 
     def __init__(self, text: str, color: tuple[int, int, int], fill: QtGui.QColor,
@@ -79,17 +79,21 @@ class LevelPill(pg.GraphicsObject):
         return QtCore.QRectF(-self._w, -_GAP - self._h - self._lift, self._w, self._h)
 
     def boundingRect(self) -> QtCore.QRectF:
-        # Include the leader down to the bar, plus the pen's half-width.
+        # Include the leader to the bar (above or below), plus the pen's half-width.
         rect = self._pill_rect()
-        rect.setBottom(0.0)
+        rect.setTop(min(rect.top(), 0.0))
+        rect.setBottom(max(rect.bottom(), 0.0))
         return rect.adjusted(-1, -1, 1, 1)
 
     def paint(self, painter, *_args) -> None:
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         rect = self._pill_rect()
-        if self._lift > 0:
+        # A negative lift (pushed down from the view's top edge) can leave the
+        # pill below its bar; the leader runs to whichever edge faces the bar.
+        edge = rect.bottom() if rect.bottom() < 0 else rect.top() if rect.top() > 0 else None
+        if edge is not None:
             painter.setPen(pg.mkPen(self._color, width=1))
-            painter.drawLine(QtCore.QPointF(-1.0, 0.0), QtCore.QPointF(-1.0, rect.bottom()))
+            painter.drawLine(QtCore.QPointF(-1.0, 0.0), QtCore.QPointF(-1.0, edge))
         painter.setPen(pg.mkPen(self._color, width=1))
         painter.setBrush(pg.mkBrush(self._fill))
         radius = self._h / 2
@@ -145,11 +149,16 @@ class LevelLabels:
         The pill on the lowest bar keeps its natural spot; each one above is
         raised just past any already-placed pill it would overlap. Pills that
         don't share screen columns never move, so a slid shot's value stays put.
+
+        A stack that would rise past the top of the view is then pushed back
+        down inside it, so a cluster of levels near the top of the range stays
+        readable instead of being clipped.
         """
+        natural = {id(p): self._natural_rect(p) for p in self._pills}
+        rects: dict[int, QtCore.QRectF] = {}
         placed: list[QtCore.QRectF] = []
-        for pill in sorted(self._pills, key=lambda p: -self._natural_rect(p).bottom()):
-            natural = self._natural_rect(pill)
-            rect = QtCore.QRectF(natural)
+        for pill in sorted(self._pills, key=lambda p: -natural[id(p)].bottom()):
+            rect = QtCore.QRectF(natural[id(pill)])
             # Each pass only moves up, so it settles within len(placed) passes.
             for _ in range(len(placed) + 1):
                 hits = [other for other in placed if rect.intersects(other)]
@@ -157,5 +166,26 @@ class LevelLabels:
                     break
                 top = min(other.top() for other in hits)
                 rect.moveBottom(top - _GAP)
-            pill.set_lift(natural.top() - rect.top())
+            rects[id(pill)] = rect
+            placed.append(rect)
+
+        # Second pass, top down: clamp to the view's top edge and push anything
+        # now overlapping further down. A pill whose own bar is above the view
+        # is only held to its natural spot, never dragged into view.
+        view_box = self._plot.getViewBox()
+        view_top = view_box.sceneBoundingRect().top()
+        placed = []
+        for pill in sorted(self._pills, key=lambda p: rects[id(p)].top()):
+            rect = rects[id(pill)]
+            bar_y = view_box.mapViewToScene(pill.anchor).y()
+            ceiling = view_top if bar_y >= view_top else natural[id(pill)].top()
+            if rect.top() < ceiling:
+                rect.moveTop(ceiling)
+            # Each pass only moves down, so it settles within len(placed) passes.
+            for _ in range(len(placed) + 1):
+                hits = [other for other in placed if rect.intersects(other)]
+                if not hits:
+                    break
+                rect.moveTop(max(other.bottom() for other in hits) + _GAP)
+            pill.set_lift(natural[id(pill)].top() - rect.top())
             placed.append(rect)
