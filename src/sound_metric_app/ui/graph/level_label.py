@@ -173,12 +173,12 @@ class LevelLabels:
         # Second pass, top down: clamp to the view's top edge and push anything
         # now overlapping further down. A pill whose own bar is above the view
         # is only held to its natural spot, never dragged into view.
-        view_box = self._plot.getViewBox()
-        view_top = view_box.sceneBoundingRect().top()
+        view_top = self._plot.getViewBox().sceneBoundingRect().top()
         placed = []
         for pill in sorted(self._pills, key=lambda p: rects[id(p)].top()):
             rect = rects[id(pill)]
-            bar_y = view_box.mapViewToScene(pill.anchor).y()
+            # The natural rect sits _GAP above the bar; no need to map again.
+            bar_y = natural[id(pill)].bottom() + _GAP
             ceiling = view_top if bar_y >= view_top else natural[id(pill)].top()
             if rect.top() < ceiling:
                 rect.moveTop(ceiling)
