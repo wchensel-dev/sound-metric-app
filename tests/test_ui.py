@@ -1370,16 +1370,122 @@ def test_level_line_spans_the_calc_window_and_is_labelled(qtbot):
     assert len(segments) == 1
     assert list(segments[0].getData()[0]) == [1.0, 3.0]
 
-    # The value is printed in the trace's unit, anchored at the window's right end.
-    labels = [
-        item
-        for item in graph._plot.getPlotItem().items
-        if isinstance(item, pg.TextItem)
-    ]
+    # The value is printed in the trace's unit on a pill anchored at the window's
+    # right end, stacked above the curves so they cannot hide it.
+    labels = graph._level_labels.pills()
     assert len(labels) == 1
-    assert labels[0].toPlainText() == "12.50 dBA"
+    assert labels[0].text() == "12.50 dBA"
     assert labels[0].pos().x() == pytest.approx(3.0)
     assert labels[0].pos().y() == pytest.approx(12.5)
+    assert labels[0].zValue() > max(
+        item.zValue() for item in graph._plot.listDataItems()
+    )
+
+
+def test_overlaid_level_bar_and_readout_match_their_curve_colour(qtbot):
+    # Compare hands show_traces the colour each shot is drawn in; the LIAeq bar
+    # and its printed value must take that colour, even when only one shot is
+    # on the graph (the rest hidden) -- a fixed marker colour there read as the
+    # hidden shot's colour instead of the visible curve's.
+    import pyqtgraph as pg
+
+    from sound_metric_app.dsp.graphing import MetricTrace
+    from sound_metric_app.ui.graph import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+    green = MetricGraph.series_color(2)
+
+    def trace():
+        return MetricTrace(
+            t_ms=np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+            values=np.array([1.0, 2.0, 3.0, 2.0, 1.0]),
+            y_label="SPL (dBA)",
+            title="LIAeq,100ms",
+            level=12.5,
+            window_start_index=1,
+            window_end_index=3,
+        )
+
+    for series in ([("third", trace(), green)],
+                   [("first", trace(), BLUE), ("third", trace(), green)]):
+        graph.show_traces(series, "shots")
+        items = graph._plot.getPlotItem().items
+        bars = [
+            item for item in items
+            if isinstance(item, pg.PlotDataItem) and list(item.getData()[1]) == [12.5, 12.5]
+        ]
+        labels = graph._level_labels.pills()
+        expected = [c for _label, _trace, c in series]
+        assert [b.opts["pen"].color().getRgb()[:3] for b in bars] == expected
+        assert [lb.color().getRgb()[:3] for lb in labels] == expected
+
+
+def _level_trace(level, end_index=3):
+    from sound_metric_app.dsp.graphing import MetricTrace
+
+    return MetricTrace(
+        t_ms=np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+        values=np.array([1.0, 2.0, 3.0, 2.0, 1.0]),
+        y_label="SPL (dBA)",
+        title="LIAeq,100ms",
+        level=level,
+        window_start_index=1,
+        window_end_index=end_index,
+    )
+
+
+def test_overlapping_level_pills_are_spaced_apart(qtbot):
+    # Two shots reporting nearly the same level would print their values on top
+    # of each other; the lower bar's pill stays put and the other is lifted
+    # clear of it. Zooming in far enough that they no longer collide lets the
+    # lifted one drop back onto its bar.
+    from sound_metric_app.ui.graph import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+    graph.resize(800, 500)
+    graph.show()
+    qtbot.waitExposed(graph)
+
+    graph.show_traces(
+        [("first", _level_trace(12.50), BLUE), ("second", _level_trace(12.52), RED)],
+        "two shots",
+    )
+    labels = graph._level_labels
+    low, high = labels.pills()
+    # The view box applies a range change on its next paint, and the pills
+    # re-stack off that, so wait for it rather than reading a stale layout.
+    qtbot.waitUntil(lambda: high.lift > 0)
+    assert low.lift == 0
+    assert not labels.screen_rect(low).intersects(labels.screen_rect(high))
+
+    # Zoomed to a 0.1 dB span the two sit far apart on screen: no lift needed.
+    graph._plot.setYRange(12.45, 12.55, padding=0)
+    qtbot.waitUntil(lambda: high.lift == 0)
+    assert not labels.screen_rect(low).intersects(labels.screen_rect(high))
+
+
+def test_level_pills_in_separate_columns_are_not_lifted(qtbot):
+    # Same level, but the windows end at different times (e.g. one shot slid):
+    # the pills sit side by side, so neither moves.
+    from sound_metric_app.ui.graph import MetricGraph
+
+    graph = MetricGraph()
+    qtbot.addWidget(graph)
+    graph.resize(1600, 500)
+    graph.show()
+    qtbot.waitExposed(graph)
+    graph._plot.setXRange(0.0, 4.0, padding=0)
+
+    graph.show_traces(
+        [("first", _level_trace(12.5, end_index=1), BLUE),
+         ("second", _level_trace(12.5, end_index=4), RED)],
+        "two shots",
+    )
+    graph._plot.setXRange(0.0, 4.0, padding=0)
+    qtbot.wait(50)
+    assert [p.lift for p in graph._level_labels.pills()] == [0, 0]
 
 
 def test_level_line_falls_back_to_full_width_without_a_window(qtbot):

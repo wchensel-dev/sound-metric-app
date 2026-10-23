@@ -3,7 +3,7 @@
 :class:`~.metric_graph.MetricGraph` is the widget the Batch average and Compare
 tabs share — the same implementation used twice, which is what keeps their
 framing, level weighting, and point readout from drifting apart. It is composed
-of four collaborators kept in their own modules so the widget stays about
+of five collaborators kept in their own modules so the widget stays about
 *drawing*:
 
 * :mod:`.palette` — the colour cycle the graph and the Compare tab's swatches
@@ -15,6 +15,8 @@ of four collaborators kept in their own modules so the widget stays about
   graph, which owns the plot.
 * :mod:`.readout` — the click-to-read box and its pick marker. Which sample was
   clicked stays with the graph, which owns the drawn series.
+* :mod:`.level_label` — the value pills on the LIAeq level bars, re-stacked on
+  every view change so overlaid shots' numbers never overlap.
 * :mod:`.quantile_overlay` — the opt-in quantile-curve button and its drawing;
   the estimator is :mod:`sound_metric_app.dsp.quantile`.
 """
