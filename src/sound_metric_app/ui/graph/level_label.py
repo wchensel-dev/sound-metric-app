@@ -106,8 +106,10 @@ class LevelLabels:
     """The pills on one plot, re-stacked so none overlap on screen.
 
     The graph adds a pill per level bar through :meth:`add` and drops them all
-    through :meth:`clear` whenever it clears the plot; the stacking follows the
-    view box on its own.
+    through :meth:`clear` whenever it clears the plot. :meth:`add` does not
+    stack -- the view is not yet ranged while a redraw is still adding pills --
+    so the graph calls :meth:`relayout` once when it is done; after that the
+    stacking follows the view box on its own.
     """
 
     def __init__(self, plot: pg.PlotWidget):
@@ -131,7 +133,6 @@ class LevelLabels:
         # units; the anchor lies on the level bar, which is already in range.
         self._plot.addItem(pill, ignoreBounds=True)
         self._pills.append(pill)
-        self.relayout()
         return pill
 
     def screen_rect(self, pill: LevelPill) -> QtCore.QRectF:

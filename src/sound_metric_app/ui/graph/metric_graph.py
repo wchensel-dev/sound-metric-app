@@ -699,6 +699,10 @@ class MetricGraph(QtWidgets.QWidget):
         # operator left automatic refits to the new curves, the ones they typed
         # come back exactly where they put them.
         self._apply_manual_bounds()
+        # Stack the value pills once, now that every one is in. A view that
+        # changes range re-stacks them again off its own signal; one that
+        # doesn't (same shots redrawn, both axes pinned) relies on this pass.
+        self._level_labels.relayout()
 
     def _draw_curve(self, trace, color: tuple[int, int, int], name: str | None):
         """Plot one trace's samples in ``color``, legending it as ``name`` if given.
