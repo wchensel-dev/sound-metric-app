@@ -11,20 +11,26 @@ Because the cluster is encoded in the filename, a shot arrives already knowing
 which string of fire it belongs to and its position within it, so its FRP /
 regular role is determined from the moment it lands.
 
+One file can hold several shots: when the recorder is left armed, DewesoftX
+appends each further trigger to the same file. Each new file is opened once to
+count its stored trigger blocks, and each block becomes its own shot, keyed
+``<path>|<k>`` (:func:`~sound_metric_app.models.shot_source`). A one-shot file
+keeps its plain path, exactly as before.
+
 Design notes:
 
 * **User-actuated.** Ingest is an explicit :meth:`IngestionService.scan` call,
   not an auto-watcher (README design principle). A folder watcher can wrap this
   later.
-* **Idempotent.** ``source_file`` is stored as a resolved absolute path and the
-  underlying :meth:`~sound_metric_app.storage.repository.WorkflowRepository.add_unmarked_shot`
-  is a no-op for files already ingested, so re-scanning the same folder adds zero
-  duplicates.
-* **Validating.** By default each *new* file is opened once to confirm it is a
-  readable capture before it is recorded; files that fail to open are reported,
-  not ingested. Already-ingested files are never re-read, keeping re-scans cheap.
-  The channel reader is injected so the service is unit-testable without a real
-  ``.dxd`` file present.
+* **Idempotent.** ``source_file`` is stored as a resolved absolute path and a
+  file that already has any shot recorded is skipped without being opened, so
+  re-scanning the same folder adds zero duplicates, and files ingested before
+  multi-shot support are never re-split.
+* **Validating.** By default each *new* file is opened once, to count its shots
+  and so confirm it is a readable capture, before it is recorded; files that
+  fail to open are reported, not ingested. Already-ingested files are never
+  re-read, keeping re-scans cheap. The shot counter is injected so the service
+  is unit-testable without a real ``.dxd`` file present.
 """
 
 from __future__ import annotations
@@ -33,24 +39,27 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from ..ingestion import ChannelInfo, list_channels
-from ..models import CAPTURE_EXTENSIONS, Shot, parse_capture_filename
+from ..ingestion import count_shots
+from ..models import CAPTURE_EXTENSIONS, Shot, parse_capture_filename, shot_source
 from ..storage import WorkflowRepository
 
-#: Signature of the channel reader used to validate that a file opens.
-ChannelReader = Callable[[str], list[ChannelInfo]]
+#: Signature of the shot counter: path -> how many stored trigger blocks it holds.
+#: Opening the file to count them is also what validates that it is readable.
+ShotCounter = Callable[[str], int]
 
 
 @dataclass
 class IngestReport:
     """Outcome of one :meth:`IngestionService.scan`.
 
-    ``ingested`` holds the freshly created unmarked shots; the remaining lists
-    account for every other capture-extension file the scan saw, so the sum of
-    all five equals the number of candidate files considered.
+    ``ingested`` holds the freshly created unmarked shots, one per shot (so a
+    multi-shot file contributes several); the remaining lists account for every
+    other capture-extension file the scan saw.
     """
 
     ingested: list[Shot] = field(default_factory=list)
+    #: path -> shot count, for each newly ingested file that held more than one.
+    multi_shot_files: dict[str, int] = field(default_factory=dict)
     #: source paths skipped because they were already ingested.
     already_present: list[str] = field(default_factory=list)
     #: (path, reason) for files whose name did not fit the naming convention.
@@ -69,7 +78,7 @@ class IngestReport:
 class IngestionService:
     """Scan an input folder and record new captures as unmarked shots."""
 
-    def __init__(self, repo: WorkflowRepository, *, reader: ChannelReader = list_channels):
+    def __init__(self, repo: WorkflowRepository, *, reader: ShotCounter = count_shots):
         self._repo = repo
         self._reader = reader
 
@@ -83,8 +92,9 @@ class IngestionService:
             ``FileNotFoundError``; a non-directory path raises ``NotADirectoryError``.
         validate:
             When true (default), each new file is opened once via the injected
-            channel reader to confirm it is a readable capture before it is
-            recorded. Set false to skip the read (e.g. filename-only ingest).
+            shot counter, to count its shots and confirm it is a readable
+            capture, before it is recorded. Set false to skip the read
+            (filename-only ingest), which records every file as one shot.
 
         Returns
         -------
@@ -100,6 +110,7 @@ class IngestionService:
 
         report = IngestReport()
         discarded = self._repo.discarded_source_files()
+        ingested = self._repo.ingested_files()
         for path in self._capture_files(folder):
             source_file = str(path.resolve())
 
@@ -113,13 +124,14 @@ class IngestionService:
                 report.malformed.append((source_file, str(exc)))
                 continue
 
-            if self._repo.get_shot_by_source(source_file) is not None:
+            if source_file in ingested:
                 report.already_present.append(source_file)
                 continue
 
+            n_shots = 1
             if validate:
                 try:
-                    self._reader(source_file)
+                    n_shots = self._reader(source_file)
                 except Exception as exc:  # noqa: BLE001 — reader failures are reported, not raised
                     # dwdatareader's DWError carries its real DLL message on
                     # `.message`; str(exc) alone degrades to a bare status code
@@ -127,15 +139,31 @@ class IngestionService:
                     reason = getattr(exc, "message", None) or str(exc)
                     report.unreadable.append((source_file, reason))
                     continue
+                if n_shots < 1:
+                    report.unreadable.append((source_file, "No stored shots in file."))
+                    continue
 
-            shot_id = self._repo.add_unmarked_shot(
-                source_file,
-                suppressor_sku=parsed.suppressor_sku,
-                test_platform=parsed.test_platform,
-                cluster_index=parsed.cluster_index,
-                shot_order=parsed.shot_order,
+            # A one-shot file keeps its plain path as its key; only a file the
+            # recorder stayed armed into gets one suffixed key per shot.
+            keys = (
+                [source_file]
+                if n_shots == 1
+                else [shot_source(source_file, k) for k in range(n_shots)]
             )
-            report.ingested.append(self._repo.get_shot(shot_id))
+            with self._repo.transaction():
+                shot_ids = [
+                    self._repo.add_unmarked_shot(
+                        key,
+                        suppressor_sku=parsed.suppressor_sku,
+                        test_platform=parsed.test_platform,
+                        cluster_index=parsed.cluster_index,
+                        shot_order=parsed.shot_order,
+                    )
+                    for key in keys
+                ]
+            if n_shots > 1:
+                report.multi_shot_files[source_file] = n_shots
+            report.ingested.extend(self._repo.get_shot(i) for i in shot_ids)
 
         return report
 

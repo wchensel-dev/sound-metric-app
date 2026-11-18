@@ -34,8 +34,10 @@ from ..models import Batch, Cluster, Combination, Frame, MetricResult, MicPositi
 from ..storage import WorkflowRepository
 from .clustering_service import ClusteringService
 
-#: Signature of the capture reader: path -> one Frame per mic channel.
-CaptureReader = Callable[[str], list[Frame]]
+#: Signature of the capture reader: (file path, segment) -> one Frame per mic
+#: channel. ``segment`` is the shot's stored trigger block within the file, or
+#: ``None`` to read a one-shot file whole.
+CaptureReader = Callable[[str, int | None], list[Frame]]
 
 
 @dataclass
@@ -169,7 +171,7 @@ class MarkingService:
             )
 
         # Read the capture and validate the channel tagging before touching the DB.
-        frames = self._reader(shot.source_file)
+        frames = self._reader(shot.file_path, shot.segment_index)
         mapping = channel_map if channel_map is not None else autotag_map(frames)
         if not mapping:
             available = sorted(f.channel for f in frames)

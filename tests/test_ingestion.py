@@ -99,3 +99,32 @@ def test_processor_produces_finite_metrics():
     ):
         assert value == value  # not NaN
         assert value not in (float("inf"), float("-inf"))
+
+
+# --- multi-shot files ------------------------------------------------------- #
+
+
+def test_split_segments_breaks_on_gaps_in_the_time_axis():
+    from sound_metric_app.ingestion import split_segments
+
+    fs = 200_000.0
+    block = np.arange(42_000) / fs
+    times = np.concatenate([block + 7.686, block + 14.5786])
+    assert split_segments(times, fs) == [slice(0, 42_000), slice(42_000, 84_000)]
+    assert split_segments(block, fs) == [slice(0, 42_000)]
+    assert split_segments(np.array([]), fs) == []
+
+
+_MULTI = r"C:\Users\Public\Documents\Dewesoft\Data\CAF556\105\caf556_105_03_0000.dxd"
+
+
+@pytest.mark.skipif(not Path(_MULTI).exists(), reason="no two-trigger sample .dxd available")
+def test_two_trigger_file_reads_as_two_shots():
+    from sound_metric_app.ingestion import count_shots
+
+    assert count_shots(_MULTI) == 2
+    first, second = read_capture(_MULTI, 0), read_capture(_MULTI, 1)
+    assert first[0].n_samples == second[0].n_samples == 42_000
+    assert second[0].timestamp > first[0].timestamp
+    # None reads the file whole, as files ingested before multi-shot support are.
+    assert read_capture(_MULTI)[0].n_samples == 84_000

@@ -97,11 +97,12 @@ class _View(QtWidgets.QWidget):
         """
         QtCore.QTimer.singleShot(0, self, fn)
 
-    def _run_async(self, fn, on_success, *, busy=()) -> None:
+    def _run_async(self, fn, on_success, *, busy=(), on_failure=None) -> None:
         """Run ``fn`` off the UI thread; call ``on_success(result)`` when done.
 
         ``busy`` widgets are disabled and a wait cursor shown for the duration.
-        Any exception becomes a critical dialog instead of a crash.
+        Any exception becomes a critical dialog instead of a crash; ``on_failure``,
+        if given, runs after it — e.g. to clear an in-progress status line.
         """
         for w in busy:
             w.setEnabled(False)
@@ -123,6 +124,8 @@ class _View(QtWidgets.QWidget):
         def handle_failure(exc) -> None:
             cleanup()
             QtWidgets.QMessageBox.critical(self, "Error", str(exc))
+            if on_failure is not None:
+                on_failure()
 
         task.succeeded.connect(handle_success)
         task.failed.connect(handle_failure)

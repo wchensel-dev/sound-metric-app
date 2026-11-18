@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from PySide6 import QtCore, QtWidgets
 
-from ...models import MicPosition, ShotRole
+from ...models import MicPosition, ShotRole, order_label
 from ...services import AVERAGE_SLOTS, BatchAverages, slot_line
 from ..compare_series import (
     _COMPARE_LABEL,
@@ -271,7 +271,7 @@ class BatchAverageView(_View):
 
     def _shot_item(self, shot: dict, position: MicPosition) -> QtWidgets.QTreeWidgetItem:
         cluster = shot.get("cluster_index")
-        order = shot.get("shot_order")
+        order = order_label(shot.get("shot_order"), shot.get("file_rank", 0))
         # Every shot here comes from shot_metrics_for_batch, which filters out
         # null shot_order, so order is always present.
         label = f"Cluster {cluster} · shot {order}" if cluster else f"Shot {order}"
@@ -350,7 +350,7 @@ class BatchAverageView(_View):
         where there is room for it. Built off the shared :func:`_compare_series`.
         """
         cluster = shot.get("cluster_index")
-        order = shot.get("shot_order")
+        order = order_label(shot.get("shot_order"), shot.get("file_rank", 0))
         where = f"C{cluster}·S{order}" if cluster else f"S{order}"
         combination = report.combination
         return _compare_series(

@@ -178,3 +178,20 @@ def test_metric_result_as_row_has_no_mic_position():
     # Every metric carries both its linear magnitude and its dB level.
     for key in ("peak_pa", "peak_a_pa", "impulse_pa_ms", "leq10ms_pa", "leq10ms_db", "liaeq_pa"):
         assert key in row
+
+
+def test_shot_source_round_trips_and_leaves_one_shot_files_plain():
+    from sound_metric_app.models import shot_source, split_shot_source
+
+    assert shot_source(r"C:\d\a_b_01_0000.dxd", None) == r"C:\d\a_b_01_0000.dxd"
+    assert split_shot_source(shot_source(r"C:\d\a.dxd", 3)) == (r"C:\d\a.dxd", 3)
+    assert split_shot_source(r"C:\d\a.dxd") == (r"C:\d\a.dxd", None)
+
+
+def test_only_the_first_shot_of_the_0000_file_is_the_frp():
+    from sound_metric_app.models import ShotRole, order_label, role_for_order
+
+    assert role_for_order(0, 0) is ShotRole.FRP
+    assert role_for_order(0, 1) is ShotRole.REGULAR
+    assert role_for_order(2, 0) is ShotRole.REGULAR
+    assert (order_label(0, 0), order_label(0, 1), order_label(3, 0)) == ("0", "0.1", "3")

@@ -90,6 +90,8 @@ class ShotEditDialog(QtWidgets.QDialog):
         form.addRow("Platform *:", self.platform_edit)
         self.cluster_edit = QtWidgets.QLineEdit(_str_or_empty(cluster_index))
         form.addRow("Cluster *:", self.cluster_edit)
+        # A later shot of a multi-shot file is never the FRP, whatever its order.
+        self._file_rank = shot.file_rank
         self.shot_order_edit = QtWidgets.QLineEdit(_str_or_empty(shot.shot_order))
         self.shot_order_edit.textChanged.connect(self._update_role_preview)
         form.addRow("Shot order:", self.shot_order_edit)
@@ -124,7 +126,7 @@ class ShotEditDialog(QtWidgets.QDialog):
 
     def _update_role_preview(self, *_args) -> None:
         """Echo the FRP / Regular role the entered order implies."""
-        role = role_for_order(_safe_int(self.shot_order_edit.text()))
+        role = role_for_order(_safe_int(self.shot_order_edit.text()), self._file_rank)
         self.role_label.setText(role.label if role else _EMPTY)
 
     def _on_accept(self) -> None:

@@ -2,9 +2,9 @@
 
 The complete archive, unfiltered: every shot the app has seen, included or idle.
 This is where inclusion is decided (the checkbox on a shot row, or the
-bring-whole-cluster-forward buttons), where a batch is closed, and where a shot
+bring-whole-cluster-forward buttons), where a batch is closed, where a shot
 or a session is corrected through the dialogs in
-:mod:`~sound_metric_app.ui.dialogs`.
+:mod:`~sound_metric_app.ui.dialogs`, and where bad data is discarded outright.
 """
 
 from __future__ import annotations
@@ -114,12 +114,21 @@ class DataBankView(_View):
         self.close_btn = QtWidgets.QPushButton("Close batch")
         self.close_btn.setEnabled(False)
         self.close_btn.clicked.connect(self._close_batch)
+        self.discard_btn = QtWidgets.QPushButton("Discard…")
+        self.discard_btn.setEnabled(False)
+        self.discard_btn.setToolTip(
+            "Delete the selected shot, cluster, or batch from the archive and "
+            "ignore it on future ingest scans. To keep a shot but leave it out "
+            "of the average, use Set idle instead."
+        )
+        self.discard_btn.clicked.connect(self._discard_selected)
         button_row.addWidget(refresh_btn)
         button_row.addStretch(1)
         button_row.addWidget(self.include_btn)
         button_row.addWidget(self.exclude_btn)
         button_row.addWidget(self.edit_btn)
         button_row.addWidget(self.close_btn)
+        button_row.addWidget(self.discard_btn)
         layout.addLayout(button_row)
 
     # ---- render ---------------------------------------------------------- #
@@ -234,7 +243,7 @@ class DataBankView(_View):
         role = shot.role
         item = QtWidgets.QTreeWidgetItem(
             [
-                f"Shot #{shot.id}  order {_str_or_empty(shot.shot_order) or _EMPTY}"
+                f"Shot #{shot.id}  order {shot.order_label or _EMPTY}"
                 f"  {Path(shot.source_file).name}",
                 tags,
                 role.label if role else _EMPTY,
@@ -285,6 +294,9 @@ class DataBankView(_View):
         self.edit_btn.setEnabled(kind in ("batch", "shot"))
         batch = self._selected_batch() if kind == "batch" else None
         self.close_btn.setEnabled(batch is not None and not batch.closed)
+        # Discard reaches down from a batch; a whole combination is too coarse a
+        # grain to delete from one click.
+        self.discard_btn.setEnabled(kind in ("batch", "cluster", "shot"))
 
     # ---- inclusion ------------------------------------------------------- #
 
@@ -448,6 +460,59 @@ class DataBankView(_View):
             return
         self.main.notify_changed()
 
+    # ---- discard ---------------------------------------------------------- #
+
+    def _discard_selected(self) -> None:
+        """Confirm, then delete the selected shot, cluster, or batch from the archive."""
+        entry = self._selected_entry()
+        if not entry or entry[0] not in ("shot", "cluster", "batch"):
+            return
+        kind, target = entry[0], entry[1]
+        if kind == "shot":
+            what = f"shot #{target.id} ({Path(target.source_file).name})"
+        else:
+            # Count the shots under the selected row, not what the label says,
+            # so the warning states exactly how much is about to go.
+            item = self.tree.selectedItems()[0]
+            n = self._count_shot_rows(item)
+            what = (
+                f"{target.label} (#{target.id}) and its {n} shot(s)"
+                if kind == "cluster"
+                else f"batch #{target.id} and its {n} shot(s)"
+            )
+        reason = self._prompt_discard_reason(
+            "Discard",
+            f"Discard {what}? Metrics are deleted and the capture(s) are ignored "
+            "on future ingest scans (restore from the Ingest tab to re-ingest "
+            "them unmarked). This cannot be undone. Optional reason:",
+        )
+        if reason is None:
+            return
+        self._discard(kind, target.id, reason or None)
+
+    def _discard(self, kind: str, target_id: int, reason: str | None) -> None:
+        """Discard without the confirmation prompt (tests drive this directly)."""
+        discard = {
+            "shot": self.controller.discard_bank_shot,
+            "cluster": self.controller.discard_cluster,
+            "batch": self.controller.discard_batch,
+        }[kind]
+        try:
+            discard(target_id, reason=reason)
+        except Exception as exc:  # noqa: BLE001 — surface to the user as a dialog
+            QtWidgets.QMessageBox.critical(self, "Error", str(exc))
+            return
+        self.main.notify_changed()
+
+    @staticmethod
+    def _count_shot_rows(item: QtWidgets.QTreeWidgetItem) -> int:
+        payload = item.data(0, QtCore.Qt.UserRole)
+        if payload and payload[0] == "shot":
+            return 1
+        return sum(
+            DataBankView._count_shot_rows(item.child(i)) for i in range(item.childCount())
+        )
+
     # ---- compare ----------------------------------------------------------- #
 
     def _compare_widget(self, shot: Shot, cluster, batch, combo) -> QtWidgets.QWidget:
@@ -483,9 +548,9 @@ class DataBankView(_View):
         shows) get a note in the detail saying so.
         """
         where = (
-            f"C{shot.cluster_index}·S{shot.shot_order}"
+            f"C{shot.cluster_index}·S{shot.order_label}"
             if shot.cluster_index
-            else f"S{shot.shot_order}"
+            else f"S{shot.order_label}"
         )
         return _compare_series(
             shot_id=shot.id,

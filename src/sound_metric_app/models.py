@@ -63,8 +63,9 @@ _POSITION_LABELS = {
 class ShotRole(str, Enum):
     """A shot's role within its cluster, **derived** from its shot order.
 
-    Order 0 is the FRP (first round pop) — the cold-bore shot whose signature
-    differs from the rest of the string — and everything after it is regular.
+    The first shot of order 0 is the FRP (first round pop) — the cold-bore shot
+    whose signature differs from the rest of the string — and everything after
+    it is regular, including any later shot the ``_0000`` file itself holds.
     Deriving the role rather than storing it means every cluster has exactly one
     FRP by construction, and re-ordering a shot cannot leave a stale role behind.
 
@@ -91,11 +92,18 @@ MIN_SHOT_ORDER = FRP_SHOT_ORDER
 MIN_CLUSTER_INDEX = 1
 
 
-def role_for_order(shot_order: int | None) -> ShotRole | None:
-    """The :class:`ShotRole` implied by a shot order, or ``None`` if unordered.
+def role_for_order(shot_order: int | None, file_rank: int = 0) -> ShotRole | None:
+    """The :class:`ShotRole` implied by a shot's place in its string, or ``None`` if unordered.
+
+    ``shot_order`` is the file's order (from its name) and ``file_rank`` the
+    shot's position among the shots that file holds. Only the first shot of the
+    order-0 file is the FRP: a recorder left armed can append more shots to that
+    same file, and those are regulars.
 
     >>> role_for_order(0)
     <ShotRole.FRP: 'FRP'>
+    >>> role_for_order(0, file_rank=1)
+    <ShotRole.REGULAR: 'REGULAR'>
     >>> role_for_order(4)
     <ShotRole.REGULAR: 'REGULAR'>
     >>> role_for_order(None) is None
@@ -103,7 +111,24 @@ def role_for_order(shot_order: int | None) -> ShotRole | None:
     """
     if shot_order is None:
         return None
-    return ShotRole.FRP if shot_order == FRP_SHOT_ORDER else ShotRole.REGULAR
+    if shot_order == FRP_SHOT_ORDER and file_rank == 0:
+        return ShotRole.FRP
+    return ShotRole.REGULAR
+
+
+def order_label(shot_order: int | None, file_rank: int = 0) -> str:
+    """A shot's place in its string as text: ``"3"``, or ``"3.1"`` for a file's second shot.
+
+    The integer part is the file's order from its name; the fraction counts the
+    further shots that one file holds, 0-based like Dewesoft's own counter, so a
+    one-shot file reads exactly as it always has. ``""`` when unordered.
+
+    >>> order_label(3), order_label(0, 2), order_label(None)
+    ('3', '0.2', '')
+    """
+    if shot_order is None:
+        return ""
+    return f"{shot_order}.{file_rank}" if file_rank else str(shot_order)
 
 
 # --------------------------------------------------------------------------- #
@@ -116,13 +141,43 @@ def role_for_order(shot_order: int | None) -> ShotRole | None:
 CAPTURE_EXTENSIONS = frozenset({".dxd", ".d7d"})
 
 
+#: Separates a capture path from the shot number in a multi-shot file's shot
+#: key. ``|`` cannot occur in a Windows path, so the split is never ambiguous.
+SHOT_SOURCE_SEP = "|"
+
+
+def shot_source(path: str, segment: int | None) -> str:
+    """The stored key of one shot: ``path`` for a whole file, ``path|k`` for shot ``k``.
+
+    A one-shot file keeps its plain path, exactly as every shot was keyed before
+    files could hold several, so existing rows need no change. Only the shots
+    of a file holding two or more triggers carry a suffix.
+
+    >>> shot_source("C:/x.dxd", None), shot_source("C:/x.dxd", 1)
+    ('C:/x.dxd', 'C:/x.dxd|1')
+    """
+    return path if segment is None else f"{path}{SHOT_SOURCE_SEP}{segment}"
+
+
+def split_shot_source(source: str) -> tuple[str, int | None]:
+    """Inverse of :func:`shot_source`: ``(file path, segment or None)``.
+
+    >>> split_shot_source("C:/x.dxd|2"), split_shot_source("C:/x.dxd")
+    (('C:/x.dxd', 2), ('C:/x.dxd', None))
+    """
+    path, sep, segment = source.rpartition(SHOT_SOURCE_SEP)
+    if sep and segment.isdigit():
+        return path, int(segment)
+    return source, None
+
+
 class ParsedCaptureName(NamedTuple):
     """Result of :func:`parse_capture_filename`. Unpacks as a 4-tuple."""
 
     suppressor_sku: str  # part of the combination key
     test_platform: str  # part of the combination key (ammo is tagged later)
     cluster_index: int  # which string of fire within the batch
-    shot_order: int  # position within that cluster; 0 == FRP
+    shot_order: int  # the file's position within that cluster; 0 holds the FRP
 
 
 def parse_capture_filename(name: str) -> ParsedCaptureName:
@@ -137,7 +192,9 @@ def parse_capture_filename(name: str) -> ParsedCaptureName:
     its order within that cluster is — and therefore whether it is the FRP.
 
     The shot order is DewesoftX's own export counter, which starts at zero, so a
-    trailing ``0000`` is the string's FRP and ``0001`` the second round. Cluster
+    trailing ``0000`` holds the string's FRP. It orders *files*, not rounds: a
+    file the recorder stayed armed into can hold several shots, so ``0003`` is
+    the fourth file of the string but not necessarily its fourth round. Cluster
     indices are ours and stay 1-based.
 
     >>> parse_capture_filename("SUP-1234_AR15_02_0003.dxd")
@@ -200,8 +257,9 @@ def parse_capture_filename(name: str) -> ParsedCaptureName:
 class Frame:
     """One acquisition frame of calibrated sound-pressure data, in Pascals.
 
-    A DewesoftX ``.dxd`` capture for this application is a single 100 ms frame
-    (20,000 samples at 200 kHz), so one file maps to one ``Frame`` per channel.
+    One frame is one shot's stored trigger block on one channel (10 ms
+    pre-trigger + 200 ms at 200 kHz). A file the recorder stayed armed into
+    holds several blocks, and each becomes its own ``Frame`` per channel.
     """
 
     samples: np.ndarray  # 1-D float64, Pascals (calibration already applied)
@@ -395,7 +453,11 @@ class Cluster:
 
 @dataclass
 class Shot:
-    """A single gunshot event, captured as one file carrying up to two mic streams.
+    """A single gunshot event: one stored trigger block, carrying up to two mic streams.
+
+    A capture file holds one or more shots. ``source_file`` is the shot's key:
+    the plain file path for a one-shot file, or ``<path>|<k>`` for shot ``k`` of
+    a file the recorder stayed armed into (see :func:`shot_source`).
 
     On ingest a shot is an *Unmarked Data Set*: it knows only the provisional
     keys parsed from its filename (``suppressor_sku``, ``test_platform``,
@@ -406,8 +468,10 @@ class Shot:
     Three pieces of per-shot state drive the roll-up, separately from where the
     shot sits in the tree:
 
-    * ``shot_order`` — position within its cluster. Order 0 is the FRP; see
-      :attr:`role`, which is derived, never stored.
+    * ``shot_order`` — its file's position within the cluster, with
+      ``file_rank`` its position within that file. Together they give firing
+      order; the first shot of order 0 is the FRP. See :attr:`role`, which is
+      derived, never stored.
     * ``included`` — whether the shot feeds its batch's average. Idle
       (``False``) by default; flipping it on is what brings a shot forward out of
       the data bank. ``exclusion_reason`` records *why* a shot was left behind
@@ -425,7 +489,7 @@ class Shot:
     test_platform: str | None = None  # provisional combination key from filename
     ammo: str | None = None  # set at marking; completes the combination key
     cluster_index: int | None = None  # provisional cluster key from filename
-    shot_order: int | None = None  # position within its cluster; 0 == FRP
+    shot_order: int | None = None  # its file's position within the cluster; 0 holds the FRP
     wind_speed: float | None = None  # mph
     temp: float | None = None  # degrees Fahrenheit
     relative_humidity: float | None = None  # percent
@@ -447,23 +511,56 @@ class Shot:
     #: (Dewesoft ``start_store_time``). ISO-8601 string, or ``None`` if the file
     #: carried no timestamp. Set at marking, when the capture is read.
     captured_at: str | None = None
+    #: Position among the shots *still recorded* for the same file (0-based).
+    #: Derived by the store on read, never written: discarding a false trigger
+    #: ahead of a shot moves that shot up, so the FRP is the first real shot of
+    #: the ``_0000`` file even when the recorder fired on something else first.
+    file_rank: int = 0
+
+    @property
+    def file_path(self) -> str:
+        """The capture file on disk, without any shot suffix."""
+        return split_shot_source(self.source_file)[0]
+
+    @property
+    def segment_index(self) -> int | None:
+        """Which stored trigger block of :attr:`file_path` this is; ``None`` = whole file."""
+        return split_shot_source(self.source_file)[1]
 
     @property
     def role(self) -> ShotRole | None:
-        """FRP or Regular, derived from :attr:`shot_order` (``None`` if unordered)."""
-        return role_for_order(self.shot_order)
+        """FRP or Regular, derived from its order and file rank (``None`` if unordered)."""
+        return role_for_order(self.shot_order, self.file_rank)
+
+    @property
+    def order_label(self) -> str:
+        """Firing position as text: ``"2"``, or ``"0.1"`` for a file's second shot."""
+        return order_label(self.shot_order, self.file_rank)
 
 
 @dataclass
 class DiscardedFile:
-    """A capture path the operator has told the app to permanently ignore.
+    """A capture path, or one shot inside it, that the operator has told the app to ignore.
 
     Recorded so a permanently-bad file (corrupt, unfixable filename) does not
     resurface as malformed/unreadable on every ingest scan. Restoring just
     deletes the row; the file itself is untouched and will resurface as
     malformed/unreadable on the next scan if it's still bad.
+
+    ``source_file`` is a shot key (:func:`shot_source`), so a single shot of a
+    multi-shot file, such as a false trigger, is discarded on its own while its
+    sibling shots stay in the app.
     """
 
     source_file: str
     reason: str | None = None
     discarded_at: str | None = None
+
+    @property
+    def file_path(self) -> str:
+        return split_shot_source(self.source_file)[0]
+
+    @property
+    def segment_index(self) -> int | None:
+        """The discarded shot within a multi-shot file; ``None`` for a whole file."""
+        return split_shot_source(self.source_file)[1]

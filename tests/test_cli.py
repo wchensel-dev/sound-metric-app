@@ -32,7 +32,7 @@ def _sine_frame(path: str, channel: str, freq: float = 1000.0, amp: float = 1.0)
 def capture_reader(monkeypatch):
     """Patch the CLI's capture reader to yield the two DAQ mic channels."""
 
-    def reader(path: str) -> list[Frame]:
+    def reader(path: str, segment: int | None = None) -> list[Frame]:
         return [_sine_frame(path, "AI 1"), _sine_frame(path, "AI 2")]
 
     monkeypatch.setattr(workflow_cli, "_capture_reader", reader)
@@ -295,6 +295,18 @@ def test_include_and_exclude_move_shots_between_the_views(marked_batch, capsys):
     assert "FRP: 1/3   Regular: 4/5" in bank
     # Nothing was deleted: the archive still holds all seven shots.
     assert bank.count("#") >= 7
+
+
+def test_discard_removes_a_shot_from_the_bank(marked_batch, capsys):
+    db = marked_batch
+    assert workflow_cli.main(["discard", "shot", "7", "--reason", "clipped", "--db", db]) == 0
+    assert "Discarded shot #7" in capsys.readouterr().out
+
+    assert workflow_cli.main(["bank", "1", "--db", db]) == 0
+    bank = capsys.readouterr().out
+    assert "#7 " not in bank and bank.count("[ ] #") == 6
+    # A second discard of the same id is a user error, not a crash.
+    assert workflow_cli.main(["discard", "shot", "7", "--db", db]) == 2
 
 
 def test_include_unknown_shot_errors(env, capsys):

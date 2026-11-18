@@ -46,7 +46,7 @@ def _fake_channels(path: str) -> list[ChannelInfo]:
     ]
 
 
-def _fake_capture(path: str) -> list[Frame]:
+def _fake_capture(path: str, segment: int | None = None) -> list[Frame]:
     return [_sine_frame(path, "AI 1"), _sine_frame(path, "AI 2")]
 
 
@@ -64,6 +64,7 @@ def window(tmp_path, monkeypatch, qtbot):
         tmp_path / "wf.db",
         channel_reader=_fake_channels,
         capture_reader=_fake_capture,
+        shot_counter=lambda path: 1,
     )
     controller.set_input_folder(inbox)
     win = MainWindow(controller)
@@ -357,6 +358,31 @@ def test_notify_changed_prunes_empty_containers(window, tmp_path):
     tree = window.controller.data_bank()
     cluster_ids = {c.cluster.id for n in tree for b in n.batches for c in b.clusters}
     assert stray not in cluster_ids
+
+
+def test_data_bank_discards_a_selected_batch(window, tmp_path):
+    _seed_marked_shot(window, tmp_path, "SUP-1_AR15_01_0000.dxd")
+    _seed_marked_shot(window, tmp_path, "SUP-2_AR15_01_0000.dxd")
+    bv = window.bank_view
+    bv.refresh()
+
+    # The button follows the selection: off for a combination, on for a batch.
+    combo_row = bv.tree.topLevelItem(0)
+    bv.tree.setCurrentItem(combo_row)
+    assert not bv.discard_btn.isEnabled()
+    batch_row = combo_row.child(0)
+    bv.tree.setCurrentItem(batch_row)
+    assert bv.discard_btn.isEnabled()
+    assert bv._count_shot_rows(batch_row) == 1
+
+    # _discard bypasses the confirmation prompt, same as the Ingest-tab tests.
+    _kind, batch, _combo = batch_row.data(0, QtCore.Qt.UserRole)
+    bv._discard("batch", batch.id, "wrong suppressor")
+
+    assert bv.tree.topLevelItemCount() == 1
+    assert bv.tree.topLevelItem(0).text(0).startswith("SUP-2")
+    [entry] = window.controller.discarded_files()
+    assert entry.reason == "wrong suppressor"
 
 
 def test_batch_average_sku_filter_narrows_the_batch_list(window, tmp_path):

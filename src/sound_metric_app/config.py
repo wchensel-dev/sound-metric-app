@@ -120,8 +120,9 @@ DEFAULT_AMMO_DEFINITIONS: tuple[str, ...] = (
     "Black Hills 77gr OTM (5.56)",
     "Winchester 147gr T&P (308)",
     "LC M118LR (308)",
+    "LC M80 (7.62x54)",
     "Syntech TM 147gr (9mm)",
-    "Federal 115gr Champion FMJ RN (9mm)",
+    "Federal 115gr AE FMJ (9mm)",
     "Hornady Black 208gr (300 BLK)",
 )
 
