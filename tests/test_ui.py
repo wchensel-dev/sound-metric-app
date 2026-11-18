@@ -20,6 +20,7 @@ pytest.importorskip("pyqtgraph")
 
 from PySide6 import QtCore, QtWidgets  # noqa: E402
 
+from sound_metric_app.config import DEFAULT_AMMO_DEFINITIONS  # noqa: E402
 from sound_metric_app.ingestion import ChannelInfo  # noqa: E402
 from sound_metric_app.models import Frame  # noqa: E402
 from sound_metric_app.ui.controller import WorkflowController  # noqa: E402
@@ -646,9 +647,15 @@ def test_scout_paste_button_copies_the_row_it_sits_on(window, qtbot):
     mic, values = field.split("=")
     assert (tag, shot_type, mic) == ("SSR1", "frp", "SE")
     # Four values, in the order LIAeq100ms dB, Peak dB, Peak dBA, Impulse Pa·ms
-    # -- and each one exactly what its column on this row shows.
+    # -- each one this row's column, rounded to the tenth the paste format emits
+    # (the table shows hundredths, so compare within half a tenth, not as text).
     columns = ["LIAeq,100ms dBA", "Peak dB", "Peak dBA", "Impulse Pa·ms"]
-    assert values.split(",") == [frp_se.text(rv._COLUMNS.index(c)) for c in columns]
+    pasted = values.split(",")
+    shown = [frp_se.text(rv._COLUMNS.index(c)) for c in columns]
+    assert len(pasted) == len(shown) == 4
+    for p, s in zip(pasted, shown, strict=True):
+        assert len(p.split(".")[1]) == 1, p
+        assert float(p) == pytest.approx(float(s), abs=0.05 + 1e-9), (p, s)
 
     # A clipboard write is invisible, so the button confirms it and then reverts.
     assert button.text() == _COPIED_LABEL
@@ -2845,7 +2852,7 @@ def test_mark_tab_offers_configured_ammo_presets(window):
     # a saved custom list after Settings ▸ Ammo definitions.
     mv = window.marking_view
     presets = [mv.ammo_combo.itemText(i) for i in range(mv.ammo_combo.count())]
-    assert presets == ["LC M193 (5.56)", "LC M855 (5.56)", "Black Hills 77gr OTM (5.56)"]
+    assert presets == list(DEFAULT_AMMO_DEFINITIONS)
 
     window.controller.set_ammo_definitions(["Custom 62gr", "LC M855 (5.56)"])
     window.notify_changed()
