@@ -1275,6 +1275,66 @@ def test_discarding_one_shot_keeps_its_siblings_and_is_not_reingested(repo, tmp_
     assert report.n_ingested == 0 and report.already_present == [path]
 
 
+def test_restoring_one_discarded_shot_of_a_multi_shot_file_brings_it_back(repo, tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    path = str(_touch(inbox, "SUP-1_AR15_01_0000.dxd").resolve())
+    svc = IngestionService(repo, reader=lambda p: 3)
+    middle = svc.scan(inbox).ingested[1]
+    repo.discard_shot(middle.id)
+
+    repo.restore_file(f"{path}|1")
+
+    restored = repo.get_shot_by_source(f"{path}|1")
+    assert restored is not None and not restored.marked
+    assert restored.order_label == "0.1"
+    assert svc.scan(inbox).n_ingested == 0
+    assert sorted(s.source_file for s in repo.unmarked_shots()) == [
+        f"{path}|0",
+        f"{path}|1",
+        f"{path}|2",
+    ]
+
+
+def test_restoring_one_of_several_discarded_shots_keeps_the_others_out(repo, tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    path = str(_touch(inbox, "SUP-1_AR15_01_0000.dxd").resolve())
+    svc = IngestionService(repo, reader=lambda p: 3)
+    for shot in svc.scan(inbox).ingested:
+        repo.discard_shot(shot.id)
+
+    repo.restore_file(f"{path}|2")
+
+    assert svc.scan(inbox).n_ingested == 0
+    assert [s.source_file for s in repo.unmarked_shots()] == [f"{path}|2"]
+
+
+def test_restoring_the_first_shot_of_the_frp_file_makes_it_the_frp_again(repo, tmp_path):
+    """A restored shot gets a new, larger id; it must still rank by segment."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    path = str(_touch(inbox, "SUP-1_AR15_01_0000.dxd").resolve())
+    first, second, third = IngestionService(repo, reader=lambda p: 3).scan(inbox).ingested
+    svc = _marking_service(repo)
+    for s in (first, second, third):
+        svc.mark(s.id, ammo="M855")
+    repo.discard_shot(first.id)
+    assert repo.get_shot(second.id).role is ShotRole.FRP
+
+    repo.restore_file(f"{path}|0")
+
+    restored = repo.get_shot_by_source(f"{path}|0")
+    assert restored.id > third.id
+    assert (restored.role, restored.order_label) == (ShotRole.FRP, "0")
+    demoted = repo.get_shot(second.id)
+    assert (demoted.role, demoted.order_label) == (ShotRole.REGULAR, "0.1")
+    # Firing order follows the segment too: the restored shot precedes its siblings.
+    svc.mark(restored.id, ammo="M855")
+    assert repo.prior_marked_shot(second.id).id == restored.id
+    assert repo.prior_marked_shot(restored.id) is None
+
+
 def test_discarding_a_false_trigger_ahead_of_the_frp_promotes_the_real_shot(repo, tmp_path):
     inbox = tmp_path / "inbox"
     inbox.mkdir()
