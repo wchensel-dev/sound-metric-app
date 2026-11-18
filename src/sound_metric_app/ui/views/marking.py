@@ -88,6 +88,11 @@ class MarkingView(_View):
         self.trigger_edit.setPlaceholderText("Pa")
         form.addRow("Trigger (Pa):", self.trigger_edit)
         self._seed_trigger_default()
+        # Says where the pre-filled ammo / conditions came from, so carried-
+        # forward values are reviewed rather than mistaken for blanks to fill.
+        self.prior_label = QtWidgets.QLabel(_EMPTY)
+        self.prior_label.setWordWrap(True)
+        form.addRow("Pre-filled:", self.prior_label)
 
         layout.addLayout(form)
 
@@ -193,6 +198,7 @@ class MarkingView(_View):
         Falls back to the shot's own order when the box is blank, since an empty
         field means "keep what the filename gave it", not "no order".
         """
+        shot = self._current_shot()
         text = self.shot_order_edit.text().strip()
         if text:
             try:
@@ -201,15 +207,46 @@ class MarkingView(_View):
                 self.role_label.setText(_EMPTY)
                 return
         else:
-            shot = self._current_shot()
             order = shot.shot_order if shot else None
-        role = role_for_order(order)
+        # A later shot of the _0000 file stays regular whatever order is typed.
+        role = role_for_order(order, shot.file_rank if shot else 0)
         self.role_label.setText(role.label if role else _EMPTY)
+
+    def _carry_forward(self, shot: Shot | None) -> None:
+        """Pre-fill ammo, conditions and trigger from the shot fired just before.
+
+        A string is normally fired on one load in one set of conditions, so the
+        form assumes uniformity and the operator only reviews and corrects. At
+        the start of a string (nothing marked before it) the fields are cleared
+        and the trigger falls back to the configured default.
+        """
+        prior = self.controller.prior_marked_shot(shot.id) if shot is not None else None
+        if prior is None:
+            self.ammo_combo.setCurrentIndex(-1)
+            self.ammo_combo.clearEditText()
+            for edit in (self.wind_edit, self.temp_edit, self.rh_edit):
+                edit.clear()
+            self._seed_trigger_default()
+            self.prior_label.setText(_EMPTY)
+            return
+        self.ammo_combo.setCurrentText(prior.ammo or "")
+        self.wind_edit.setText(_str_or_empty(prior.wind_speed))
+        self.temp_edit.setText(_str_or_empty(prior.temp))
+        self.rh_edit.setText(_str_or_empty(prior.relative_humidity))
+        if prior.trigger_pa is not None:
+            self.trigger_edit.setText(_fmt_trigger(prior.trigger_pa))
+        else:
+            self._seed_trigger_default()
+        self.prior_label.setText(
+            f"Carried forward from shot #{prior.id} "
+            f"(cluster {prior.cluster_index}, shot {prior.order_label}). Review before marking."
+        )
 
     def _on_shot_changed(self, *_args) -> None:
         self._channel_token += 1
         token = self._channel_token
         shot = self._current_shot()
+        self._carry_forward(shot)
 
         # Prefill override placeholders from the shot's provisional filename keys.
         self.sku_edit.setPlaceholderText(shot.suppressor_sku or "" if shot else "")
@@ -319,6 +356,7 @@ class MarkingView(_View):
             lambda: self.controller.mark(shot_id, ammo=ammo, channel_map=channel_map, **kwargs),
             self._on_marked,
             busy=(self.mark_btn,),
+            on_failure=lambda: self.status_label.setText(""),
         )
 
     def _on_marked(self, marked) -> None:
@@ -327,7 +365,7 @@ class MarkingView(_View):
         parts = [
             f"Marked shot #{shot.id} — {marked.combination.label}, "
             f"batch #{marked.batch.id}, {marked.cluster.label}, "
-            f"shot {shot.shot_order} ({role}).",
+            f"shot {shot.order_label} ({role}).",
             "It is idle in the data bank; bring it forward there to feed the average.",
         ]
         for position in (MicPosition.ML, MicPosition.SE):
@@ -338,16 +376,12 @@ class MarkingView(_View):
                     f"LIAeq {result.liaeq_100ms_db:.2f} dBA"
                 )
         self.status_label.setText("\n".join(parts))
-        self.ammo_combo.setCurrentIndex(-1)
-        self.ammo_combo.clearEditText()
+        # Overrides are per-shot and never carried; ammo, conditions and trigger
+        # are re-filled from the shot just marked when the next shot loads.
         self.sku_edit.clear()
         self.platform_edit.clear()
         self.cluster_edit.clear()
         self.shot_order_edit.clear()
-        self.wind_edit.clear()
-        self.temp_edit.clear()
-        self.rh_edit.clear()
-        self._seed_trigger_default()
         self.main.notify_changed()
 
     # ---- discard ---------------------------------------------------------- #
@@ -366,10 +400,17 @@ class MarkingView(_View):
         if reason is None:
             return
 
-        shot_id = shot.id
+        shot_id, name = shot.id, Path(shot.source_file).name
         self.status_label.setText("Discarding…")
         self._run_async(
             lambda: self.controller.discard_shot(shot_id, reason=reason or None),
-            lambda _: self.main.notify_changed(),
+            lambda _: self._on_discarded(shot_id, name),
             busy=(self.mark_btn, self.discard_btn),
+            on_failure=lambda: self.status_label.setText(""),
         )
+
+    def _on_discarded(self, shot_id: int, filename: str) -> None:
+        # Replace the in-progress line before the refresh moves the picker on,
+        # so the next shot doesn't open under a stale "Discarding…".
+        self.status_label.setText(f"Discarded shot #{shot_id} ({filename}).")
+        self.main.notify_changed()

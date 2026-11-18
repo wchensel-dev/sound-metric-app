@@ -36,7 +36,7 @@ def _fake_channels(path: str) -> list[ChannelInfo]:
     ]
 
 
-def _fake_capture(path: str) -> list[Frame]:
+def _fake_capture(path: str, segment: int | None = None) -> list[Frame]:
     return [_sine_frame(path, "AI 1"), _sine_frame(path, "AI 2")]
 
 
@@ -48,6 +48,7 @@ def controller(tmp_path, monkeypatch):
         tmp_path / "wf.db",
         channel_reader=_fake_channels,
         capture_reader=_fake_capture,
+        shot_counter=lambda path: 1,
     )
 
 

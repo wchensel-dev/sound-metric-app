@@ -30,7 +30,7 @@ import sys
 from pathlib import Path
 
 from . import config
-from .ingestion import list_channels, read_capture
+from .ingestion import count_shots, read_capture
 from .models import MicPosition
 from .services import (
     AVERAGE_SLOTS,
@@ -45,7 +45,7 @@ from .storage import WorkflowRepository
 
 #: Readers used by the workflow services. Kept at module scope so tests can
 #: monkeypatch them with fakes instead of opening real DewesoftX files.
-_channel_reader = list_channels
+_shot_counter = count_shots
 _capture_reader = read_capture
 
 #: Exceptions the services raise for bad user input / state, reported as a clean
@@ -74,7 +74,7 @@ def _cmd_ingest(args: argparse.Namespace, repo: WorkflowRepository) -> int:
         )
         return 2
 
-    svc = IngestionService(repo, reader=_channel_reader)
+    svc = IngestionService(repo, reader=_shot_counter)
     report = svc.scan(folder, validate=not args.no_validate)
 
     print(f"Scanned {folder}")
@@ -82,8 +82,10 @@ def _cmd_ingest(args: argparse.Namespace, repo: WorkflowRepository) -> int:
     for shot in report.ingested:
         print(
             f"    #{shot.id}  {Path(shot.source_file).name}"
-            f"  [cluster {shot.cluster_index}, shot {shot.shot_order}]"
+            f"  [cluster {shot.cluster_index}, shot {shot.order_label}]"
         )
+    for path, n in report.multi_shot_files.items():
+        print(f"    {Path(path).name} held {n} shots; each is listed above.")
     print(f"  already present : {len(report.already_present)}")
     if report.malformed:
         print(f"  malformed       : {len(report.malformed)}")
@@ -135,7 +137,7 @@ def _cmd_mark(args: argparse.Namespace, repo: WorkflowRepository) -> int:
     print(f"  combination : #{marked.combination.id}  {marked.combination.label}")
     print(f"  batch       : #{marked.batch.id}  {marked.batch.title}")
     print(f"  cluster     : #{marked.cluster.id}  {marked.cluster.label}")
-    print(f"  shot        : order {shot.shot_order}  ({role})")
+    print(f"  shot        : order {shot.order_label}  ({role})")
     if shot.trigger_pa is not None:
         print(f"  trigger     : {shot.trigger_pa:g} Pa onset")
     if shot.captured_at:
@@ -244,7 +246,7 @@ def _cmd_bank(args: argparse.Namespace, repo: WorkflowRepository) -> int:
             role = s.role.label if s.role else "—"
             reason = f"  — {s.exclusion_reason}" if s.exclusion_reason else ""
             print(
-                f"    {flag} #{s.id}  order {s.shot_order}  {role:8s}"
+                f"    {flag} #{s.id}  order {s.order_label}  {role:8s}"
                 f"  {Path(s.source_file).name}{reason}"
             )
     print(f"  {InclusionService(repo).status(batch.id).summary()}")
@@ -280,6 +282,37 @@ def _set_inclusion(
 
     if batch_id is not None:
         print(f"  batch #{batch_id}: {svc.status(batch_id).summary()}")
+    return 0
+
+
+def _cmd_discard(args: argparse.Namespace, repo: WorkflowRepository) -> int:
+    """Remove a shot, cluster, or batch from the data bank and blocklist its shots.
+
+    Unlike ``exclude`` (which idles a shot and keeps it), this deletes the shots
+    and their metrics; ``ingest`` then skips them until restored.
+    """
+    if args.target == "shot":
+        shot = repo.get_shot(args.id)
+        if shot is None:
+            raise LookupError(f"No shot with id {args.id}")
+        batch_id = _batch_of_shot(repo, shot)
+        repo.discard_shot(args.id, reason=args.reason)
+        print(f"Discarded shot #{args.id} ({Path(shot.source_file).name}).")
+    elif args.target == "cluster":
+        cluster = repo.get_cluster(args.id)
+        if cluster is None:
+            raise LookupError(f"No cluster with id {args.id}")
+        batch_id = cluster.batch_id
+        n = repo.discard_cluster(args.id, reason=args.reason)
+        print(f"Discarded {n} shot(s) in cluster #{args.id} ({cluster.label}).")
+    else:  # target == "batch"
+        batch_id = None
+        n = repo.discard_batch(args.id, reason=args.reason)
+        print(f"Discarded {n} shot(s) in batch #{args.id}.")
+
+    # The batch survives only if the discard left shots in it.
+    if batch_id is not None and repo.get_batch(batch_id) is not None:
+        print(f"  batch #{batch_id}: {InclusionService(repo).status(batch_id).summary()}")
     return 0
 
 
@@ -535,6 +568,17 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--reason", help="why it is being left out (e.g. 'high winds')")
         add_db(p)
         p.set_defaults(func=handler)
+
+    # discard
+    p_discard = sub.add_parser(
+        "discard",
+        help="delete a shot, cluster, or batch from the data bank and skip it on ingest",
+    )
+    p_discard.add_argument("target", choices=["shot", "cluster", "batch"])
+    p_discard.add_argument("id", type=int, help="shot, cluster, or batch id")
+    p_discard.add_argument("--reason", help="why it is being discarded")
+    add_db(p_discard)
+    p_discard.set_defaults(func=_cmd_discard)
 
     # batch
     p_batch = sub.add_parser(

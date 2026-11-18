@@ -28,8 +28,16 @@ from typing import Iterator
 
 from .. import config
 from ..dsp import MetricTrace, build_metric_trace
-from ..ingestion import ChannelInfo, autotag_map, list_channels, read_capture
-from ..models import Batch, Cluster, Combination, DiscardedFile, MicPosition, Shot
+from ..ingestion import ChannelInfo, autotag_map, count_shots, list_channels, read_capture
+from ..models import (
+    Batch,
+    Cluster,
+    Combination,
+    DiscardedFile,
+    MicPosition,
+    Shot,
+    split_shot_source,
+)
 from ..services import (
     AggregationService,
     BatchAverages,
@@ -107,10 +115,12 @@ class WorkflowController:
         *,
         channel_reader=list_channels,
         capture_reader=read_capture,
+        shot_counter=count_shots,
     ):
         self._db_path = str(db_path)
         self._channel_reader = channel_reader
         self._capture_reader = capture_reader
+        self._shot_counter = shot_counter
         #: Cached ammo presets. The GUI re-reads these on every view refresh
         #: (each tab switch / mark / ingest / close), but the list only changes
         #: through :meth:`set_ammo_definitions`, so we parse the settings file
@@ -162,7 +172,7 @@ class WorkflowController:
         if not folder:
             raise ValueError("No input folder configured. Choose one before ingesting.")
         with self._repo() as repo:
-            return IngestionService(repo, reader=self._channel_reader).scan(
+            return IngestionService(repo, reader=self._shot_counter).scan(
                 folder, validate=validate
             )
 
@@ -173,6 +183,12 @@ class WorkflowController:
     def get_shot(self, shot_id: int) -> Shot | None:
         with self._repo() as repo:
             return repo.get_shot(shot_id)
+
+    def prior_marked_shot(self, shot_id: int) -> Shot | None:
+        """The marked shot fired just before ``shot_id``, whose ammo and conditions
+        the mark form carries forward. ``None`` at the start of a string."""
+        with self._repo() as repo:
+            return repo.prior_marked_shot(shot_id)
 
     def discard_file(self, source_file: str, *, reason: str | None = None) -> None:
         """Blocklist a bad capture path so future ingest scans skip it silently."""
@@ -193,11 +209,29 @@ class WorkflowController:
         with self._repo() as repo:
             repo.discard_unmarked_shot(shot_id, reason=reason)
 
+    def discard_bank_shot(self, shot_id: int, *, reason: str | None = None) -> None:
+        """Remove a shot from the data bank, metrics and all, and blocklist it."""
+        with self._repo() as repo:
+            repo.discard_shot(shot_id, reason=reason)
+
+    def discard_cluster(self, cluster_id: int, *, reason: str | None = None) -> int:
+        """Discard every shot in a cluster; return how many were removed."""
+        with self._repo() as repo:
+            return repo.discard_cluster(cluster_id, reason=reason)
+
+    def discard_batch(self, batch_id: int, *, reason: str | None = None) -> int:
+        """Discard every shot in a batch; return how many were removed."""
+        with self._repo() as repo:
+            return repo.discard_batch(batch_id, reason=reason)
+
     # ---- mark ----------------------------------------------------------- #
 
     def channels_for(self, source_file: str) -> list[ChannelInfo]:
-        """Raw channels in a capture, to offer as ML/SE choices in the mark form."""
-        return self._channel_reader(source_file)
+        """Raw channels in a capture, to offer as ML/SE choices in the mark form.
+
+        Takes a shot key; every shot of a multi-shot file has the file's channels.
+        """
+        return self._channel_reader(split_shot_source(source_file)[0])
 
     def suggested_channel_map(self, source_file: str) -> dict[str, MicPosition]:
         """The DAQ-convention channel tagging to pre-fill the mark form with.
@@ -206,7 +240,7 @@ class WorkflowController:
         that does not follow the convention yields a partial or empty map, which
         the form shows as un-tagged dropdowns for the user to set by hand.
         """
-        return autotag_map(self._channel_reader(source_file))
+        return autotag_map(self.channels_for(source_file))
 
     def mark(
         self,
@@ -486,7 +520,7 @@ class WorkflowController:
         if not channel:
             raise ValueError(f"Shot #{shot_id} has no {position.label} channel to graph.")
 
-        frames = self._capture_reader(shot.source_file)
+        frames = self._capture_reader(shot.file_path, shot.segment_index)
         frame = next((f for f in frames if f.channel == channel), None)
         if frame is None:
             raise ValueError(f"Channel {channel!r} not found in {Path(shot.source_file).name}.")

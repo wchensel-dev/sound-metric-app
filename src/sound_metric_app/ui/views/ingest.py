@@ -118,7 +118,7 @@ class IngestView(_View):
                 s.suppressor_sku or _EMPTY,
                 s.test_platform or _EMPTY,
                 _EMPTY if s.cluster_index is None else str(s.cluster_index),
-                _EMPTY if s.shot_order is None else str(s.shot_order),
+                s.order_label or _EMPTY,
                 role.label if role else _EMPTY,
             ]
             for col, text in enumerate(values):
@@ -269,8 +269,13 @@ class IngestView(_View):
 
     def _on_ingested(self, report) -> None:
         self._last_report = report
+        multi = (
+            f" ({len(report.multi_shot_files)} file(s) held more than one)"
+            if report.multi_shot_files
+            else ""
+        )
         self.status_label.setText(
-            f"Ingested {report.n_ingested}, "
+            f"Ingested {report.n_ingested} shot(s){multi}, "
             f"already present {len(report.already_present)}, "
             f"malformed {len(report.malformed)}, "
             f"unreadable {len(report.unreadable)}, "

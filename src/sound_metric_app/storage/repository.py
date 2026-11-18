@@ -8,10 +8,14 @@ own six tables, so the two can share a ``.db`` without interfering.
 
 The tree is pure containment. Two separate concerns ride on top of it:
 
-* **Roles** are derived, not stored: a shot with ``shot_order = 0`` is its
-  cluster's FRP and every other shot is regular (see :data:`_ROLE_CASE`), so a
-  cluster has exactly one FRP by construction and re-ordering a shot cannot
-  leave a stale role behind.
+* **Roles** are derived, not stored: the first shot of the ``shot_order = 0``
+  file is its cluster's FRP and every other shot is regular (see
+  :data:`_ROLE_CASE`), so a cluster has exactly one FRP by construction and
+  re-ordering a shot cannot leave a stale role behind.
+* A capture file can hold **several shots**. Each is its own row, keyed
+  ``<path>|<k>`` in ``source_file`` (:func:`~sound_metric_app.models.shot_source`);
+  a one-shot file keeps its plain path, so rows from before multi-shot files
+  existed are read exactly as they always were. No column was added for it.
 * **Inclusion** (``shots.included``) is what moves a shot from the data bank
   into the batch average. Nothing is ever deleted for being left out.
 
@@ -28,6 +32,7 @@ from contextlib import contextmanager
 from ..config import P_REF
 from ..models import (
     FRP_SHOT_ORDER,
+    SHOT_SOURCE_SEP,
     Batch,
     Cluster,
     Combination,
@@ -36,6 +41,8 @@ from ..models import (
     MicPosition,
     Shot,
     ShotRole,
+    parse_capture_filename,
+    split_shot_source,
 )
 from ._base import _SqliteStore
 from .database import _METRIC_COLUMNS, _PEAK_WINDOW_COLUMNS, _STORED_COLUMNS
@@ -123,12 +130,39 @@ CREATE TABLE IF NOT EXISTS discarded_files (
 );
 """
 
+#: The ``<path>|`` prefix every shot of one multi-shot file shares; ``''`` for a
+#: plain one-shot key, which has no siblings.
+_FILE_PREFIX = "substr({t}.source_file, 1, instr({t}.source_file, '%s'))" % SHOT_SOURCE_SEP
+
+#: SQL for a shot's segment number: the ``<k>`` of a ``<path>|<k>`` key. Only
+#: meaningful where :data:`_FILE_PREFIX` is non-empty.
+_SEGMENT = "CAST(substr({t}.source_file, instr({t}.source_file, '%s') + 1) AS INTEGER)" % (
+    SHOT_SOURCE_SEP
+)
+
+#: SQL for a shot's rank within its file: how many shots still recorded for the
+#: same file sit ahead of it in recording (segment) order. Segment order rather
+#: than id order, so a shot restored after a discard -- re-inserted with a new,
+#: larger id -- goes back to its own place, and the FRP stays the file's first
+#: recorded shot. Counting surviving rows rather than reading the segment number
+#: itself means discarding a false trigger ahead of a shot moves it up.
+_FILE_RANK = (
+    "(SELECT COUNT(*) FROM shots p "
+    f"WHERE {_FILE_PREFIX.format(t='s')} <> '' "
+    f"AND {_FILE_PREFIX.format(t='p')} = {_FILE_PREFIX.format(t='s')} "
+    f"AND {_SEGMENT.format(t='p')} < {_SEGMENT.format(t='s')})"
+)
+
+#: Every shot read goes through this so ``Shot.file_rank`` is always populated.
+_SELECT_SHOTS = f"SELECT s.*, {_FILE_RANK} AS file_rank FROM shots s"
+
 #: SQL that derives a shot's role from its order. Kept as one constant so every
-#: roll-up query agrees on the definition (order 0 == FRP, everything else
-#: regular) and an unordered shot is excluded rather than silently counted.
+#: roll-up query agrees on the definition (the first shot of order 0 == FRP,
+#: everything else regular) and an unordered shot is excluded rather than
+#: silently counted.
 _ROLE_CASE = (
-    f"CASE WHEN s.shot_order = {FRP_SHOT_ORDER} THEN '{ShotRole.FRP.value}' "
-    f"ELSE '{ShotRole.REGULAR.value}' END"
+    f"CASE WHEN s.shot_order = {FRP_SHOT_ORDER} AND {_FILE_RANK} = 0 "
+    f"THEN '{ShotRole.FRP.value}' ELSE '{ShotRole.REGULAR.value}' END"
 )
 
 #: Linear-magnitude column -> the dB column derived from its batch-average. Batch
@@ -461,10 +495,12 @@ class WorkflowRepository(_SqliteStore):
         cluster_index: int | None = None,
         shot_order: int | None = None,
     ) -> int:
-        """Record a capture file as an Unmarked Data Set. Idempotent by source_file.
+        """Record one shot as an Unmarked Data Set. Idempotent by source_file.
 
-        Re-adding an already-ingested file returns the existing shot id without
-        overwriting it, so re-scanning the input folder never duplicates shots.
+        ``source_file`` is the shot key: the plain path of a one-shot file, or
+        ``<path>|<k>`` for one shot of a multi-shot file. Re-adding an
+        already-ingested shot returns the existing id without overwriting it, so
+        re-scanning the input folder never duplicates shots.
         """
         self._conn.execute(
             """
@@ -482,18 +518,70 @@ class WorkflowRepository(_SqliteStore):
         return int(row["id"])
 
     def get_shot(self, shot_id: int) -> Shot | None:
-        row = self._conn.execute("SELECT * FROM shots WHERE id = ?", (shot_id,)).fetchone()
+        row = self._conn.execute(f"{_SELECT_SHOTS} WHERE s.id = ?", (shot_id,)).fetchone()
         return _row_to_shot(row) if row else None
 
     def get_shot_by_source(self, source_file: str) -> Shot | None:
         row = self._conn.execute(
-            "SELECT * FROM shots WHERE source_file = ?", (source_file,)
+            f"{_SELECT_SHOTS} WHERE s.source_file = ?", (source_file,)
         ).fetchone()
         return _row_to_shot(row) if row else None
 
+    def ingested_files(self) -> set[str]:
+        """Every capture file that already has a shot, or a discarded single shot, recorded.
+
+        Paths are the files themselves (shot suffixes stripped). All of a file's
+        shots arrive in one scan, so an ingest scan skips any file listed here
+        without re-reading it, which is also what keeps files ingested before
+        multi-shot support exactly as they were. Whole-file discards are not
+        listed; they come from :meth:`discarded_source_files`.
+        """
+        cur = self._conn.execute("SELECT source_file FROM shots")
+        out = {split_shot_source(r["source_file"])[0] for r in cur.fetchall()}
+        cur = self._conn.execute(
+            "SELECT source_file FROM discarded_files WHERE instr(source_file, ?) > 0",
+            (SHOT_SOURCE_SEP,),
+        )
+        for row in cur.fetchall():
+            path, segment = split_shot_source(row["source_file"])
+            if segment is not None:
+                out.add(path)
+        return out
+
     def unmarked_shots(self) -> list[Shot]:
-        cur = self._conn.execute("SELECT * FROM shots WHERE marked = 0 ORDER BY id")
+        cur = self._conn.execute(f"{_SELECT_SHOTS} WHERE s.marked = 0 ORDER BY s.id")
         return [_row_to_shot(r) for r in cur.fetchall()]
+
+    def prior_marked_shot(self, shot_id: int) -> Shot | None:
+        """The marked shot fired just before ``shot_id`` in its string, or ``None``.
+
+        "Before" is firing order over the shots' filename keys: same SKU and
+        platform, then cluster, file order, and position within the file
+        (segment order, via the file rank). This is
+        what the mark form carries ammo and conditions forward from, since a
+        string is normally fired on one load in one set of conditions.
+        """
+        shot = self.get_shot(shot_id)
+        if shot is None or shot.cluster_index is None or shot.shot_order is None:
+            return None
+        row = self._conn.execute(
+            f"""
+            {_SELECT_SHOTS}
+            WHERE s.marked = 1
+              AND s.suppressor_sku IS ? AND s.test_platform IS ?
+              AND (s.cluster_index, s.shot_order, {_FILE_RANK}) < (?, ?, ?)
+            ORDER BY s.cluster_index DESC, s.shot_order DESC, file_rank DESC, s.id DESC
+            LIMIT 1
+            """,
+            (
+                shot.suppressor_sku,
+                shot.test_platform,
+                shot.cluster_index,
+                shot.shot_order,
+                shot.file_rank,
+            ),
+        ).fetchone()
+        return _row_to_shot(row) if row else None
 
     def mark_shot(
         self,
@@ -597,7 +685,7 @@ class WorkflowRepository(_SqliteStore):
     def shots_by_cluster(self, cluster_id: int) -> list[Shot]:
         """Shots in a cluster, in firing order (then id for stability)."""
         cur = self._conn.execute(
-            "SELECT * FROM shots WHERE cluster_id = ? ORDER BY shot_order, id",
+            f"{_SELECT_SHOTS} WHERE s.cluster_id = ? ORDER BY s.shot_order, file_rank, s.id",
             (cluster_id,),
         )
         return [_row_to_shot(r) for r in cur.fetchall()]
@@ -640,10 +728,10 @@ class WorkflowRepository(_SqliteStore):
         clause = " AND s.included = 1" if included_only else ""
         cur = self._conn.execute(
             f"""
-            SELECT s.* FROM shots s
+            SELECT s.*, {_FILE_RANK} AS file_rank FROM shots s
             JOIN clusters c ON c.id = s.cluster_id
             WHERE c.batch_id = ?{clause}
-            ORDER BY c.cluster_index, c.id, s.shot_order, s.id
+            ORDER BY c.cluster_index, c.id, s.shot_order, file_rank, s.id
             """,
             (batch_id,),
         )
@@ -686,9 +774,28 @@ class WorkflowRepository(_SqliteStore):
         self._commit()
 
     def restore_file(self, source_file: str) -> None:
-        """Un-blocklist a path. No-op if it was not discarded."""
-        self._conn.execute("DELETE FROM discarded_files WHERE source_file = ?", (source_file,))
-        self._commit()
+        """Un-blocklist a path or shot key. No-op if it was not discarded.
+
+        A whole file comes back on the next ingest scan. One shot of a
+        multi-shot file cannot wait for the scan: the file is still listed in
+        :meth:`ingested_files` through its other shots or discards, so the scan
+        skips it unread. The shot is re-added here instead, unmarked and keyed
+        from the filename, exactly as the scan would have recorded it.
+        """
+        with self.transaction():
+            cur = self._conn.execute(
+                "DELETE FROM discarded_files WHERE source_file = ?", (source_file,)
+            )
+            path, segment = split_shot_source(source_file)
+            if cur.rowcount and segment is not None:
+                parsed = parse_capture_filename(path)
+                self.add_unmarked_shot(
+                    source_file,
+                    suppressor_sku=parsed.suppressor_sku,
+                    test_platform=parsed.test_platform,
+                    cluster_index=parsed.cluster_index,
+                    shot_order=parsed.shot_order,
+                )
 
     def is_discarded(self, source_file: str) -> bool:
         row = self._conn.execute(
@@ -712,7 +819,11 @@ class WorkflowRepository(_SqliteStore):
         return {row["source_file"] for row in cur.fetchall()}
 
     def discard_unmarked_shot(self, shot_id: int, *, reason: str | None = None) -> None:
-        """Delete an unmarked shot and blocklist its source file.
+        """Delete an unmarked shot and blocklist it.
+
+        The blocklist entry is the shot's key, so for one shot of a multi-shot
+        file (a false trigger, say) only that shot is blocked and its siblings
+        stay; for a one-shot file it is the whole file, as before.
 
         Guards that the shot is unmarked: a marked shot carries metrics
         (channel_metrics, ON DELETE CASCADE) and a cluster/batch placement, and
@@ -727,8 +838,85 @@ class WorkflowRepository(_SqliteStore):
                 f"Shot {shot_id} is already marked; exclude it instead of discarding."
             )
         with self.transaction():
+            self._discard_shot_rows([shot], reason)
+
+    def discard_shot(self, shot_id: int, *, reason: str | None = None) -> None:
+        """Delete a shot from the data bank, marked or not, and blocklist it.
+
+        Where idling (:meth:`set_shot_included`) keeps a shot in the archive,
+        this removes it: its metrics go with it (channel_metrics, ON DELETE
+        CASCADE) and its key joins the blocklist, so a re-scan does not bring it
+        back. Restoring the key from the blocklist brings it back unmarked, to
+        be marked afresh (see :meth:`restore_file`).
+
+        The cluster, batch and combination it leaves empty are pruned in the
+        same transaction, so the tree never shows a shot-less container.
+
+        Raises ``LookupError`` if ``shot_id`` matches no shot.
+        """
+        shot = self.get_shot(shot_id)
+        if shot is None:
+            raise LookupError(f"No shot with id {shot_id}")
+        with self.transaction():
+            self._discard_shot_rows([shot], reason)
+
+    def discard_cluster(self, cluster_id: int, *, reason: str | None = None) -> int:
+        """Discard every shot in a cluster (see :meth:`discard_shot`); return how many.
+
+        Raises ``LookupError`` if ``cluster_id`` matches no cluster.
+        """
+        if self.get_cluster(cluster_id) is None:
+            raise LookupError(f"No cluster with id {cluster_id}")
+        shots = self.shots_by_cluster(cluster_id)
+        with self.transaction():
+            self._discard_shot_rows(shots, reason)
+            # Covers a cluster that was already empty, which the per-shot prune
+            # never reaches.
+            self._prune_cluster(cluster_id)
+        return len(shots)
+
+    def discard_batch(self, batch_id: int, *, reason: str | None = None) -> int:
+        """Discard every shot in a batch (see :meth:`discard_shot`); return how many.
+
+        Raises ``LookupError`` if ``batch_id`` matches no batch.
+        """
+        batch = self.get_batch(batch_id)
+        if batch is None:
+            raise LookupError(f"No batch with id {batch_id}")
+        shots = self.shots_for_batch(batch_id)
+        with self.transaction():
+            self._discard_shot_rows(shots, reason)
+            for cluster in self.clusters_for_batch(batch_id):
+                self._prune_cluster(cluster.id)
+            if self.delete_batch_if_empty(batch_id):
+                self.delete_combination_if_empty(batch.combination_id)
+        return len(shots)
+
+    def _discard_shot_rows(self, shots: Iterable[Shot], reason: str | None) -> None:
+        """Blocklist and delete ``shots``, then prune what they leave empty.
+
+        Must run inside :meth:`transaction`. The blocklist entry is each shot's
+        own key, so discarding one shot of a multi-shot file leaves its siblings
+        (and, because roles are derived from surviving rows, may promote the next
+        shot of the ``_0000`` file to FRP).
+        """
+        clusters = set()
+        for shot in shots:
             self.discard_file(shot.source_file, reason=reason)
-            self._conn.execute("DELETE FROM shots WHERE id = ?", (shot_id,))
+            self._conn.execute("DELETE FROM shots WHERE id = ?", (shot.id,))
+            if shot.cluster_id is not None:
+                clusters.add(shot.cluster_id)
+        for cluster_id in clusters:
+            self._prune_cluster(cluster_id)
+
+    def _prune_cluster(self, cluster_id: int) -> None:
+        """Delete ``cluster_id`` if empty, then its batch and combination if that empties them."""
+        cluster = self.get_cluster(cluster_id)
+        if cluster is None or not self.delete_cluster_if_empty(cluster_id):
+            return
+        batch = self.get_batch(cluster.batch_id)
+        if batch is not None and self.delete_batch_if_empty(batch.id):
+            self.delete_combination_if_empty(batch.combination_id)
 
     # ---- inclusion ------------------------------------------------------ #
 
@@ -1012,6 +1200,7 @@ class WorkflowRepository(_SqliteStore):
                    s.id              AS shot_id,
                    c.cluster_index   AS cluster_index,
                    s.shot_order      AS shot_order,
+                   {_FILE_RANK}      AS file_rank,
                    s.included        AS included,
                    s.source_file     AS source_file,
                    {metric_select}
@@ -1019,7 +1208,7 @@ class WorkflowRepository(_SqliteStore):
             JOIN shots s    ON s.id = cm.shot_id
             JOIN clusters c ON c.id = s.cluster_id
             WHERE c.batch_id = ? AND s.shot_order IS NOT NULL{clause}
-            ORDER BY cm.mic_position, role, c.cluster_index, s.shot_order, s.id
+            ORDER BY cm.mic_position, role, c.cluster_index, s.shot_order, file_rank, s.id
             """,
             (batch_id,),
         )
@@ -1031,6 +1220,7 @@ class WorkflowRepository(_SqliteStore):
                     "shot_id": int(r["shot_id"]),
                     "cluster_index": r["cluster_index"],
                     "shot_order": r["shot_order"],
+                    "file_rank": int(r["file_rank"]),
                     "included": bool(r["included"]),
                     "source_file": r["source_file"],
                     # Every stored column, metrics and diagnostics alike —
@@ -1126,6 +1316,8 @@ def _row_to_shot(row: sqlite3.Row) -> Shot:
         cluster_id=row["cluster_id"],
         created_at=row["created_at"],
         captured_at=row["captured_at"],
+        # Present on every read through _SELECT_SHOTS; a bare SELECT * lacks it.
+        file_rank=int(row["file_rank"]) if "file_rank" in row.keys() else 0,
     )
 
 

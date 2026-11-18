@@ -20,6 +20,7 @@ pytest.importorskip("pyqtgraph")
 
 from PySide6 import QtCore, QtWidgets  # noqa: E402
 
+from sound_metric_app.config import DEFAULT_AMMO_DEFINITIONS  # noqa: E402
 from sound_metric_app.ingestion import ChannelInfo  # noqa: E402
 from sound_metric_app.models import Frame  # noqa: E402
 from sound_metric_app.ui.controller import WorkflowController  # noqa: E402
@@ -46,7 +47,7 @@ def _fake_channels(path: str) -> list[ChannelInfo]:
     ]
 
 
-def _fake_capture(path: str) -> list[Frame]:
+def _fake_capture(path: str, segment: int | None = None) -> list[Frame]:
     return [_sine_frame(path, "AI 1"), _sine_frame(path, "AI 2")]
 
 
@@ -64,6 +65,7 @@ def window(tmp_path, monkeypatch, qtbot):
         tmp_path / "wf.db",
         channel_reader=_fake_channels,
         capture_reader=_fake_capture,
+        shot_counter=lambda path: 1,
     )
     controller.set_input_folder(inbox)
     win = MainWindow(controller)
@@ -359,6 +361,31 @@ def test_notify_changed_prunes_empty_containers(window, tmp_path):
     assert stray not in cluster_ids
 
 
+def test_data_bank_discards_a_selected_batch(window, tmp_path):
+    _seed_marked_shot(window, tmp_path, "SUP-1_AR15_01_0000.dxd")
+    _seed_marked_shot(window, tmp_path, "SUP-2_AR15_01_0000.dxd")
+    bv = window.bank_view
+    bv.refresh()
+
+    # The button follows the selection: off for a combination, on for a batch.
+    combo_row = bv.tree.topLevelItem(0)
+    bv.tree.setCurrentItem(combo_row)
+    assert not bv.discard_btn.isEnabled()
+    batch_row = combo_row.child(0)
+    bv.tree.setCurrentItem(batch_row)
+    assert bv.discard_btn.isEnabled()
+    assert bv._count_shot_rows(batch_row) == 1
+
+    # _discard bypasses the confirmation prompt, same as the Ingest-tab tests.
+    _kind, batch, _combo = batch_row.data(0, QtCore.Qt.UserRole)
+    bv._discard("batch", batch.id, "wrong suppressor")
+
+    assert bv.tree.topLevelItemCount() == 1
+    assert bv.tree.topLevelItem(0).text(0).startswith("SUP-2")
+    [entry] = window.controller.discarded_files()
+    assert entry.reason == "wrong suppressor"
+
+
 def test_batch_average_sku_filter_narrows_the_batch_list(window, tmp_path):
     _seed_marked_shot(window, tmp_path, "SUP-1_AR15_01_0000.dxd")
     _seed_marked_shot(window, tmp_path, "SUP-2_AR15_01_0000.dxd")
@@ -620,9 +647,15 @@ def test_scout_paste_button_copies_the_row_it_sits_on(window, qtbot):
     mic, values = field.split("=")
     assert (tag, shot_type, mic) == ("SSR1", "frp", "SE")
     # Four values, in the order LIAeq100ms dB, Peak dB, Peak dBA, Impulse Pa·ms
-    # -- and each one exactly what its column on this row shows.
+    # -- each one this row's column, rounded to the tenth the paste format emits
+    # (the table shows hundredths, so compare within half a tenth, not as text).
     columns = ["LIAeq,100ms dBA", "Peak dB", "Peak dBA", "Impulse Pa·ms"]
-    assert values.split(",") == [frp_se.text(rv._COLUMNS.index(c)) for c in columns]
+    pasted = values.split(",")
+    shown = [frp_se.text(rv._COLUMNS.index(c)) for c in columns]
+    assert len(pasted) == len(shown) == 4
+    for p, s in zip(pasted, shown, strict=True):
+        assert len(p.split(".")[1]) == 1, p
+        assert float(p) == pytest.approx(float(s), abs=0.05 + 1e-9), (p, s)
 
     # A clipboard write is invisible, so the button confirms it and then reverts.
     assert button.text() == _COPIED_LABEL
@@ -2819,7 +2852,7 @@ def test_mark_tab_offers_configured_ammo_presets(window):
     # a saved custom list after Settings ▸ Ammo definitions.
     mv = window.marking_view
     presets = [mv.ammo_combo.itemText(i) for i in range(mv.ammo_combo.count())]
-    assert presets == ["LC M193 (5.56)", "LC M855 (5.56)", "Black Hills 77gr OTM (5.56)"]
+    assert presets == list(DEFAULT_AMMO_DEFINITIONS)
 
     window.controller.set_ammo_definitions(["Custom 62gr", "LC M855 (5.56)"])
     window.notify_changed()

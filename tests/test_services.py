@@ -49,7 +49,7 @@ class FakeCaptureReader:
     def set(self, path: str, channels: list[tuple[str, float]]) -> None:
         self.by_path[path] = channels
 
-    def __call__(self, path: str) -> list[Frame]:
+    def __call__(self, path: str, segment: int | None = None) -> list[Frame]:
         specs = self.by_path.get(path, self.default)
         return [
             Frame(
@@ -109,7 +109,7 @@ def test_scan_ingests_new_files_and_rescans_add_zero(repo, tmp_path):
     for name in ("SUP-1_AR15_01_001.dxd", "SUP-1_AR15_01_002.dxd", "SUP-2_MK18_01_001.d7d"):
         _touch(inbox, name)
 
-    svc = IngestionService(repo, reader=lambda p: [])  # validate = no-op
+    svc = IngestionService(repo, reader=lambda p: 1)  # validate = no-op
 
     first = svc.scan(inbox)
     assert first.n_ingested == 3
@@ -128,7 +128,7 @@ def test_scan_seeds_provisional_keys_from_filename(repo, tmp_path):
     inbox = tmp_path / "inbox"
     inbox.mkdir()
     _touch(inbox, "SUP-1234_AR15_02_003.dxd")
-    report = IngestionService(repo, reader=lambda p: []).scan(inbox)
+    report = IngestionService(repo, reader=lambda p: 1).scan(inbox)
     shot = report.ingested[0]
     assert (shot.suppressor_sku, shot.test_platform) == ("SUP-1234", "AR15")
     # The cluster comes from the filename, so a shot knows its string of fire
@@ -142,7 +142,7 @@ def test_scan_seeds_the_frp_from_shot_order_zero(repo, tmp_path):
     inbox = tmp_path / "inbox"
     inbox.mkdir()
     _touch(inbox, "SUP-1_AR15_01_0000.dxd")
-    report = IngestionService(repo, reader=lambda p: []).scan(inbox)
+    report = IngestionService(repo, reader=lambda p: 1).scan(inbox)
     assert report.ingested[0].shot_order == 0
     assert report.ingested[0].role is ShotRole.FRP
 
@@ -155,7 +155,7 @@ def test_scan_reports_malformed_names_without_ingesting(repo, tmp_path):
     _touch(inbox, "SUP_AR15_001.dxd")  # 3 fields — the old convention
     _touch(inbox, "SUP_AR15_01_notanumber.dxd")  # non-numeric order
 
-    report = IngestionService(repo, reader=lambda p: []).scan(inbox)
+    report = IngestionService(repo, reader=lambda p: 1).scan(inbox)
     assert report.n_ingested == 1
     assert len(report.malformed) == 3
     assert len(repo.unmarked_shots()) == 1
@@ -168,7 +168,7 @@ def test_scan_ignores_non_capture_files(repo, tmp_path):
     _touch(inbox, "README.txt")
     _touch(inbox, "notes.csv")
 
-    report = IngestionService(repo, reader=lambda p: []).scan(inbox)
+    report = IngestionService(repo, reader=lambda p: 1).scan(inbox)
     assert report.n_ingested == 1
     assert report.malformed == []  # non-capture files are simply skipped, not flagged
 
@@ -251,12 +251,12 @@ def test_scan_skips_discarded_malformed_file(repo, tmp_path):
     inbox.mkdir()
     bad = _touch(inbox, "not-a-valid-name.dxd")
 
-    report = IngestionService(repo, reader=lambda p: []).scan(inbox)
+    report = IngestionService(repo, reader=lambda p: 1).scan(inbox)
     assert len(report.malformed) == 1
     assert report.discarded == []
 
     repo.discard_file(str(bad.resolve()), reason="unfixable name")
-    report = IngestionService(repo, reader=lambda p: []).scan(inbox)
+    report = IngestionService(repo, reader=lambda p: 1).scan(inbox)
     assert report.malformed == []
     assert report.discarded == [str(bad.resolve())]
 
@@ -286,11 +286,11 @@ def test_scan_reingests_after_restore(repo, tmp_path):
     resolved = str(bad.resolve())
 
     repo.discard_file(resolved, reason="unfixable name")
-    report = IngestionService(repo, reader=lambda p: []).scan(inbox)
+    report = IngestionService(repo, reader=lambda p: 1).scan(inbox)
     assert report.discarded == [resolved]
 
     repo.restore_file(resolved)
-    report = IngestionService(repo, reader=lambda p: []).scan(inbox)
+    report = IngestionService(repo, reader=lambda p: 1).scan(inbox)
     assert report.discarded == []
     assert len(report.malformed) == 1
 
@@ -546,7 +546,7 @@ def test_mark_records_capture_timestamp_from_frames(repo):
     # marking should persist it as the shot's captured_at (ISO-8601).
     fired_at = datetime(2026, 7, 15, 9, 30, 15)
 
-    def reader(path):
+    def reader(path, segment=None):
         return [
             Frame(
                 samples=np.array([1.0]),
@@ -803,15 +803,93 @@ def test_discard_unmarked_shot_prevents_reingest(repo, tmp_path):
     inbox.mkdir()
     good = _touch(inbox, "SUP-1_AR15_01_003.dxd")
 
-    report = IngestionService(repo, reader=lambda p: []).scan(inbox)
+    report = IngestionService(repo, reader=lambda p: 1).scan(inbox)
     assert report.n_ingested == 1
     shot_id = report.ingested[0].id
 
     repo.discard_unmarked_shot(shot_id)
 
-    report = IngestionService(repo, reader=lambda p: []).scan(inbox)
+    report = IngestionService(repo, reader=lambda p: 1).scan(inbox)
     assert report.n_ingested == 0
     assert report.discarded == [str(good.resolve())]
+
+
+# --------------------------------------------------------------------------- #
+# discard_shot / discard_cluster / discard_batch — removing data-bank data
+# --------------------------------------------------------------------------- #
+
+
+def _marked(repo, name, *, cluster=1, order=1):
+    shot_id = _unmarked(repo, name, cluster=cluster, order=order)
+    _marking_service(repo).mark(
+        shot_id, ammo="M855", channel_map={"AI 1": MicPosition.ML, "AI 2": MicPosition.SE}
+    )
+    return repo.get_shot(shot_id)
+
+
+def test_discard_shot_removes_a_marked_shot_and_its_metrics(repo):
+    keep = _marked(repo, "SUP-1_AR15_01_001.dxd", order=0)
+    gone = _marked(repo, "SUP-1_AR15_01_002.dxd", order=1)
+    repo.set_shot_included(gone.id, True)
+
+    repo.discard_shot(gone.id, reason="clipped")
+
+    assert repo.get_shot(gone.id) is None
+    assert repo.metrics_for_shot(gone.id) == []
+    assert repo.is_discarded(gone.source_file)
+    assert [entry.reason for entry in repo.discarded_files()] == ["clipped"]
+    # Its sibling and their shared cluster stay.
+    assert [s.id for s in repo.shots_by_cluster(keep.cluster_id)] == [keep.id]
+
+
+def test_discarding_the_last_shot_prunes_its_containers(repo):
+    shot = _marked(repo, "SUP-1_AR15_01_001.dxd")
+    batch_id = repo.get_cluster(shot.cluster_id).batch_id
+
+    repo.discard_shot(shot.id)
+
+    assert repo.get_cluster(shot.cluster_id) is None
+    assert repo.get_batch(batch_id) is None
+    assert repo.all_combinations() == []
+
+
+def test_discard_cluster_removes_every_shot_and_keeps_other_clusters(repo):
+    a = _marked(repo, "SUP-1_AR15_01_000.dxd", cluster=1, order=0)
+    _marked(repo, "SUP-1_AR15_01_001.dxd", cluster=1, order=1)
+    other = _marked(repo, "SUP-1_AR15_02_000.dxd", cluster=2, order=0)
+
+    assert repo.discard_cluster(a.cluster_id, reason="wrong can") == 2
+
+    assert repo.get_cluster(a.cluster_id) is None
+    assert len(repo.discarded_files()) == 2
+    assert repo.get_shot(other.id) is not None
+
+
+def test_discard_batch_removes_the_session_and_blocks_reingest(repo, tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _touch(inbox, "SUP-1_AR15_01_0000.dxd")
+    _touch(inbox, "SUP-1_AR15_01_0001.dxd")
+    ingest = IngestionService(repo, reader=lambda p: 1)
+    svc = _marking_service(repo)
+    for shot in ingest.scan(inbox).ingested:
+        svc.mark(shot.id, ammo="M855", channel_map={"AI 1": MicPosition.ML})
+    [batch] = repo.all_batches()
+
+    assert repo.discard_batch(batch.id) == 2
+
+    assert repo.all_batches() == [] and repo.all_combinations() == []
+    report = ingest.scan(inbox)
+    assert report.n_ingested == 0 and len(report.discarded) == 2
+
+
+def test_discard_shot_unknown_ids_raise(repo):
+    with pytest.raises(LookupError):
+        repo.discard_shot(999)
+    with pytest.raises(LookupError):
+        repo.discard_cluster(999)
+    with pytest.raises(LookupError):
+        repo.discard_batch(999)
 
 
 # --------------------------------------------------------------------------- #
@@ -1118,3 +1196,213 @@ def test_slot_line_rounds_each_value_to_the_nearest_tenth():
         },
     )
     assert line == "SSR1|frp|SE=122.6,172.6,156.5,4.8"
+
+
+# --------------------------------------------------------------------------- #
+# Multi-shot files — one capture the recorder stayed armed into
+# --------------------------------------------------------------------------- #
+
+
+def test_scan_splits_a_multi_shot_file_into_one_shot_each(repo, tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    path = str(_touch(inbox, "SUP-1_AR15_01_0000.dxd").resolve())
+
+    report = IngestionService(repo, reader=lambda p: 3).scan(inbox)
+
+    assert [s.source_file for s in report.ingested] == [f"{path}|0", f"{path}|1", f"{path}|2"]
+    assert report.multi_shot_files == {path: 3}
+    assert all(s.file_path == path for s in report.ingested)
+    # Only the first shot of the _0000 file is the FRP; the rest are regulars.
+    assert [s.role for s in report.ingested] == [ShotRole.FRP, ShotRole.REGULAR, ShotRole.REGULAR]
+    assert [s.order_label for s in report.ingested] == ["0", "0.1", "0.2"]
+
+
+def test_scan_keeps_a_one_shot_file_on_its_plain_path(repo, tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    path = str(_touch(inbox, "SUP-1_AR15_01_0001.dxd").resolve())
+
+    [shot] = IngestionService(repo, reader=lambda p: 1).scan(inbox).ingested
+
+    assert shot.source_file == path and shot.segment_index is None
+
+
+def test_scan_never_re_splits_a_file_ingested_before(repo, tmp_path):
+    """A file already in the store is skipped unread, so a shot ingested before
+    multi-shot support stays the one whole-file shot it was."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    path = str(_touch(inbox, "SUP-1_AR15_01_0000.dxd").resolve())
+    repo.add_unmarked_shot(path, "SUP-1", "AR15", 1, 0)
+
+    def must_not_read(p):
+        raise AssertionError("an ingested file must not be re-read")
+
+    report = IngestionService(repo, reader=must_not_read).scan(inbox)
+
+    assert report.n_ingested == 0 and report.already_present == [path]
+    [shot] = repo.unmarked_shots()
+    assert shot.source_file == path
+
+
+def test_rescan_of_a_multi_shot_file_adds_zero(repo, tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _touch(inbox, "SUP-1_AR15_01_0000.dxd")
+    svc = IngestionService(repo, reader=lambda p: 2)
+    svc.scan(inbox)
+
+    again = svc.scan(inbox)
+
+    assert again.n_ingested == 0 and len(again.already_present) == 1
+    assert len(repo.unmarked_shots()) == 2
+
+
+def test_discarding_one_shot_keeps_its_siblings_and_is_not_reingested(repo, tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    path = str(_touch(inbox, "SUP-1_AR15_01_0002.dxd").resolve())
+    svc = IngestionService(repo, reader=lambda p: 2)
+    false_trigger = svc.scan(inbox).ingested[1]
+
+    repo.discard_unmarked_shot(false_trigger.id, reason="door slam")
+
+    assert [s.source_file for s in repo.unmarked_shots()] == [f"{path}|0"]
+    [entry] = repo.discarded_files()
+    assert (entry.file_path, entry.segment_index) == (path, 1)
+    report = svc.scan(inbox)
+    assert report.n_ingested == 0 and report.already_present == [path]
+
+
+def test_restoring_one_discarded_shot_of_a_multi_shot_file_brings_it_back(repo, tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    path = str(_touch(inbox, "SUP-1_AR15_01_0000.dxd").resolve())
+    svc = IngestionService(repo, reader=lambda p: 3)
+    middle = svc.scan(inbox).ingested[1]
+    repo.discard_shot(middle.id)
+
+    repo.restore_file(f"{path}|1")
+
+    restored = repo.get_shot_by_source(f"{path}|1")
+    assert restored is not None and not restored.marked
+    assert restored.order_label == "0.1"
+    assert svc.scan(inbox).n_ingested == 0
+    assert sorted(s.source_file for s in repo.unmarked_shots()) == [
+        f"{path}|0",
+        f"{path}|1",
+        f"{path}|2",
+    ]
+
+
+def test_restoring_one_of_several_discarded_shots_keeps_the_others_out(repo, tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    path = str(_touch(inbox, "SUP-1_AR15_01_0000.dxd").resolve())
+    svc = IngestionService(repo, reader=lambda p: 3)
+    for shot in svc.scan(inbox).ingested:
+        repo.discard_shot(shot.id)
+
+    repo.restore_file(f"{path}|2")
+
+    assert svc.scan(inbox).n_ingested == 0
+    assert [s.source_file for s in repo.unmarked_shots()] == [f"{path}|2"]
+
+
+def test_restoring_the_first_shot_of_the_frp_file_makes_it_the_frp_again(repo, tmp_path):
+    """A restored shot gets a new, larger id; it must still rank by segment."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    path = str(_touch(inbox, "SUP-1_AR15_01_0000.dxd").resolve())
+    first, second, third = IngestionService(repo, reader=lambda p: 3).scan(inbox).ingested
+    svc = _marking_service(repo)
+    for s in (first, second, third):
+        svc.mark(s.id, ammo="M855")
+    repo.discard_shot(first.id)
+    assert repo.get_shot(second.id).role is ShotRole.FRP
+
+    repo.restore_file(f"{path}|0")
+
+    restored = repo.get_shot_by_source(f"{path}|0")
+    assert restored.id > third.id
+    assert (restored.role, restored.order_label) == (ShotRole.FRP, "0")
+    demoted = repo.get_shot(second.id)
+    assert (demoted.role, demoted.order_label) == (ShotRole.REGULAR, "0.1")
+    # Firing order follows the segment too: the restored shot precedes its siblings.
+    svc.mark(restored.id, ammo="M855")
+    assert repo.prior_marked_shot(second.id).id == restored.id
+    assert repo.prior_marked_shot(restored.id) is None
+
+
+def test_discarding_a_false_trigger_ahead_of_the_frp_promotes_the_real_shot(repo, tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _touch(inbox, "SUP-1_AR15_01_0000.dxd")
+    false_trigger, real, _ = IngestionService(repo, reader=lambda p: 3).scan(inbox).ingested
+    assert real.role is ShotRole.REGULAR
+
+    repo.discard_unmarked_shot(false_trigger.id)
+
+    promoted = repo.get_shot(real.id)
+    assert promoted.role is ShotRole.FRP and promoted.order_label == "0"
+
+
+def test_marking_reads_only_its_own_shot_of_the_file(repo, tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    path = str(_touch(inbox, "SUP-1_AR15_01_0000.dxd").resolve())
+    shots = IngestionService(repo, reader=lambda p: 2).scan(inbox).ingested
+    calls = []
+
+    def reader(p, segment=None):
+        calls.append((p, segment))
+        return FakeCaptureReader()(p, segment)
+
+    svc = MarkingService(repo, ClusteringService(repo), reader=reader, processor=PeakProcessor())
+    svc.mark(shots[1].id, ammo="M855")
+
+    assert calls == [(path, 1)]
+
+
+def test_roll_ups_count_a_multi_shot_frp_file_as_one_frp(repo, tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _touch(inbox, "SUP-1_AR15_01_0000.dxd")
+    shots = IngestionService(repo, reader=lambda p: 3).scan(inbox).ingested
+    svc = _marking_service(repo)
+    for s in shots:
+        marked = svc.mark(s.id, ammo="M855")
+    for s in shots:
+        repo.set_shot_included(s.id, True)
+
+    counts = repo.inclusion_counts(marked.batch.id)
+
+    assert counts == {ShotRole.FRP: 1, ShotRole.REGULAR: 2}
+    rows = repo.shot_metrics_for_batch(marked.batch.id)
+    assert [r["file_rank"] for r in rows[(MicPosition.SE, ShotRole.REGULAR)]] == [1, 2]
+
+
+def test_prior_marked_shot_is_the_one_fired_just_before(repo, tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _touch(inbox, "SUP-1_AR15_01_0000.dxd")
+    _touch(inbox, "SUP-1_AR15_01_0001.dxd")
+    _touch(inbox, "SUP-2_AR15_01_0000.dxd")
+
+    def counter(p):
+        return 2 if p.endswith("SUP-1_AR15_01_0000.dxd") else 1
+
+    frp, second, third, other_sku = IngestionService(repo, reader=counter).scan(inbox).ingested
+    svc = _marking_service(repo)
+
+    assert repo.prior_marked_shot(second.id) is None  # nothing marked yet
+    svc.mark(frp.id, ammo="M855", wind_speed=4.0, temp=71.0)
+
+    prior = repo.prior_marked_shot(third.id)
+    assert prior.id == frp.id
+    assert (prior.ammo, prior.wind_speed, prior.temp) == ("M855", 4.0, 71.0)
+    svc.mark(second.id, ammo="M193")
+    assert repo.prior_marked_shot(third.id).id == second.id
+    # A different SKU's string has no prior from this one.
+    assert repo.prior_marked_shot(other_sku.id) is None
